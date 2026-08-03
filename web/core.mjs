@@ -119,15 +119,15 @@ export function layoutTopology(snapshot) {
     const subnetGateways = [...(gateways.get(subnet.id) ?? [])].sort((a, b) => nodeAddressKey(a) - nodeAddressKey(b) || a.id.localeCompare(b.id));
     const compact = devices.length > 30;
     const columns = compact ? 4 : 3;
-    widestColumns = Math.max(widestColumns, columns);
+    widestColumns = Math.max(widestColumns, columns, subnetGateways.length || 1);
     const rows = Math.max(2, Math.ceil(devices.length / columns) + 1);
     const height = Math.max(600, 80 + rows * (NODE_HEIGHT + VERTICAL_GAP));
     lanes.push({ subnet, devices, subnetGateways, compact, columns, y: nextY, height });
     nextY += height + VERTICAL_GAP;
   }
 
-  const deviceGridRight = 820 + (widestColumns - 1) * COLUMN_STRIDE + NODE_WIDTH;
-  const upstreamX = Math.max(1160, deviceGridRight + HORIZONTAL_GAP);
+  const rightmostGrid = 820 + (widestColumns - 1) * COLUMN_STRIDE + NODE_WIDTH;
+  const upstreamX = Math.max(1160, rightmostGrid + HORIZONTAL_GAP);
 
   for (const lane of lanes) {
     const baseY = lane.y + 40;

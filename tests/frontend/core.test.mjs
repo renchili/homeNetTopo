@@ -11,20 +11,23 @@ import {
   selectedAddressCount,
 } from "../../web/core.mjs";
 
-function snapshot(deviceCount = 3) {
+function snapshot(deviceCount = 3, gatewayCount = 1) {
   const nodes = [
     { id: "local-host", kind: "local_host", label: "This Mac", confidence: "high", addresses: [] },
     { id: "interface:en0", kind: "interface", label: "en0", confidence: "high", addresses: ["192.168.1.10"] },
     { id: "subnet:192-168-1-0-24", kind: "subnet", label: "192.168.1.0/24", confidence: "high", addresses: ["192.168.1.0/24"] },
-    { id: "gateway:192.168.1.1", kind: "gateway", label: "192.168.1.1", confidence: "high", addresses: ["192.168.1.1"] },
     { id: "upstream:default", kind: "upstream_boundary", label: "Upstream", confidence: "low", addresses: [] },
   ];
   const edges = [
     { id: "host-if", source: "local-host", target: "interface:en0", type: "host_uses_interface", observed: true },
     { id: "if-subnet", source: "interface:en0", target: "subnet:192-168-1-0-24", type: "interface_attached_to_subnet", observed: true },
-    { id: "gateway-subnet", source: "gateway:192.168.1.1", target: "subnet:192-168-1-0-24", type: "gateway_for_subnet", observed: true },
-    { id: "gateway-up", source: "gateway:192.168.1.1", target: "upstream:default", type: "upstream_of", observed: false },
   ];
+  for (let index = 0; index < gatewayCount; index += 1) {
+    const address = `192.168.1.${index + 1}`;
+    nodes.push({ id: `gateway:${address}`, kind: "gateway", label: address, confidence: "high", addresses: [address] });
+    edges.push({ id: `gateway-subnet-${index}`, source: `gateway:${address}`, target: "subnet:192-168-1-0-24", type: "gateway_for_subnet", observed: true });
+  }
+  if (gatewayCount) edges.push({ id: "gateway-up", source: "gateway:192.168.1.1", target: "upstream:default", type: "upstream_of", observed: false });
   for (let index = 0; index < deviceCount; index += 1) {
     const address = `192.168.1.${20 + index}`;
     nodes.push({ id: `device:${address}`, kind: "device", label: address, confidence: "medium", addresses: [address] });
@@ -71,12 +74,14 @@ test("layout is pure, deterministic and rectangles do not overlap", () => {
   }
 });
 
-test("upstream column moves after compact four-column grid", () => {
-  const layout = layoutTopology(snapshot(31));
-  const upstream = layout.nodes.find((node) => node.kind === "upstream_boundary");
-  const devices = layout.nodes.filter((node) => node.kind === "device");
-  assert.ok(upstream.x > Math.max(...devices.map((node) => node.x + node.width)));
-  assert.ok(devices.every((node) => node.compact));
+test("upstream moves after compact device or wide gateway grids", () => {
+  for (const input of [snapshot(31, 1), snapshot(2, 6)]) {
+    const layout = layoutTopology(input);
+    const upstream = layout.nodes.find((node) => node.kind === "upstream_boundary");
+    const rightmost = Math.max(...layout.nodes.filter((node) => ["device", "gateway"].includes(node.kind)).map((node) => node.x + node.width));
+    assert.ok(upstream.x > rightmost);
+  }
+  assert.ok(layoutTopology(snapshot(31)).nodes.filter((node) => node.kind === "device").every((node) => node.compact));
 });
 
 test("eligible targets and unique address totals are stable", () => {

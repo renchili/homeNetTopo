@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import http.client
+import tempfile
 import threading
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from server import AppState, HomeNetTopoServer
 
@@ -39,11 +42,23 @@ class StaticSecurityTests(unittest.TestCase):
         self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
         self.assertEqual(headers["Cache-Control"], "no-store")
 
-    def test_rejects_traversal_and_repeated_decoding(self):
+    def test_rejects_traversal_repeated_decoding_and_unknown_files(self):
         for path in ("/../AGENT.md", "/%2e%2e/AGENT.md", "/%252e%252e/AGENT.md", "/missing.js"):
             with self.subTest(path=path):
                 status, _, _ = self.request(path)
                 self.assertEqual(status, 404)
+
+    def test_rejects_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "web"
+            root.mkdir()
+            outside = Path(directory) / "outside.js"
+            outside.write_text("secret", encoding="utf-8")
+            (root / "app.js").symlink_to(outside)
+            with mock.patch("server.WEB_ROOT", root):
+                status, _, body = self.request("/app.js")
+            self.assertEqual(status, 404)
+            self.assertNotIn(b"secret", body)
 
 
 if __name__ == "__main__":
