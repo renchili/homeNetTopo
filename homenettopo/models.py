@@ -89,12 +89,14 @@ def _validate_json_value(value: Any) -> None:
 
 
 def _validate_address(value: str) -> None:
+    if not isinstance(value, str):
+        raise ModelError("addresses must be strings")
     try:
         if "/" in value:
             ipaddress.IPv4Network(value, strict=True)
         else:
             ipaddress.IPv4Address(value)
-    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError) as exc:
+    except ValueError as exc:
         raise ModelError(f"invalid IPv4 address or network: {value}") from exc
 
 
@@ -200,9 +202,9 @@ class TopologySnapshot:
     def validate(self) -> None:
         if self.schema_version != "1":
             raise ModelError("unsupported schema version")
-        if not self.snapshot_id or not isinstance(self.snapshot_id, str):
+        if not isinstance(self.snapshot_id, str) or not self.snapshot_id:
             raise ModelError("snapshot id must be nonempty")
-        if not self.platform or not isinstance(self.platform, str):
+        if not isinstance(self.platform, str) or not self.platform:
             raise ModelError("platform must be nonempty")
         if not isinstance(self.partial, bool):
             raise ModelError("partial must be boolean")
@@ -226,7 +228,7 @@ class TopologySnapshot:
         for network in self.networks:
             try:
                 parsed_network = ipaddress.IPv4Network(network.cidr, strict=True)
-            except (ipaddress.AddressValueError, ipaddress.NetmaskValueError) as exc:
+            except ValueError as exc:
                 raise ModelError("network CIDR must be canonical IPv4") from exc
             key = (network.cidr, network.interface)
             if key in network_keys or not network.interface:
@@ -250,9 +252,9 @@ class TopologySnapshot:
                 raise ModelError("node labels must be nonempty")
             for address in node.addresses:
                 _validate_address(address)
-            if any(not _MAC_RE.fullmatch(mac) for mac in node.mac_addresses):
+            if any(not isinstance(mac, str) or not _MAC_RE.fullmatch(mac) for mac in node.mac_addresses):
                 raise ModelError("MAC addresses must use canonical lowercase notation")
-            if any(not name for name in node.interface_names):
+            if any(not isinstance(name, str) or not name for name in node.interface_names):
                 raise ModelError("interface names must be nonempty")
             if node.observed_at is not None:
                 _parse_utc(node.observed_at)
@@ -285,13 +287,17 @@ class TopologySnapshot:
             for value in (*metadata.requested_networks, *metadata.effective_networks):
                 try:
                     ipaddress.IPv4Network(value, strict=True)
-                except (ipaddress.AddressValueError, ipaddress.NetmaskValueError) as exc:
+                except ValueError as exc:
                     raise ModelError("active discovery networks must be canonical IPv4") from exc
             if not isinstance(metadata.completed, bool):
                 raise ModelError("active discovery completion must be boolean")
             _nonnegative_integer(metadata.duration_ms, "active discovery duration")
             _nonnegative_integer(metadata.hosts_reported_up, "active discovery host count")
-            if isinstance(metadata.operation_timeout_seconds, bool) or not 5 <= metadata.operation_timeout_seconds <= 120:
+            if (
+                isinstance(metadata.operation_timeout_seconds, bool)
+                or not isinstance(metadata.operation_timeout_seconds, int)
+                or not 5 <= metadata.operation_timeout_seconds <= 120
+            ):
                 raise ModelError("active discovery timeout is outside the allowed range")
             if metadata.host_timeout_seconds != 5 or metadata.output_format != "xml":
                 raise ModelError("active discovery metadata does not match the fixed command contract")
