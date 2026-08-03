@@ -45,7 +45,7 @@ A generation summary or static self-review is not independent acceptance evidenc
 
 HomeNetTopo is a local-first macOS network-discovery and topology-visualization project. It collects evidence visible from the current Mac, infers a best-effort logical topology, and serves a local interactive web page.
 
-The project must not claim complete physical visibility from a single endpoint. Product-specific runtime, scanning, privacy, API, UI, ownership, and testing constraints are defined in `AGENT.md`. The implementation requirement ledger and package sequence are owned by `docs/plan.md`.
+The project must not claim complete physical visibility from a single endpoint. Product-specific runtime, scanning, privacy, API, UI, ownership, and testing constraints are defined in `AGENT.md`. Current implementation ownership and artifact policy are recorded in `docs/plan.md`; that document is not an automatic file-creation authorization or a substitute for a task-scoped requirement ledger and approved artifact manifest.
 
 ## Working record
 
@@ -66,7 +66,7 @@ Create or update only files required by the user's request, `AGENT.md`, `docs/pl
 
 Do not create a second project root, unrelated demo, duplicate rule system, arbitrary report, generated runtime inventory, local scan output, cache, log, credential file, compiled output, or real environment data.
 
-Runtime topology JSON, local addresses, MAC addresses, hostnames, packet data, and machine-specific logs must stay out of source control unless sanitized fixtures are explicitly required and clearly synthetic.
+Runtime topology JSON, local addresses, MAC addresses, hostnames, packet data, and machine-specific logs must stay out of source control. Short single-use synthetic test inputs stay inline in their owning tests. A separate fixture, sample, example, report, or generated-data path requires a demonstrated necessity and explicit authorization for the exact path.
 
 ## Evidence rules
 
