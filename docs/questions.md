@@ -29,7 +29,7 @@
 | Q-017 | How are concurrent collection requests handled? | RESOLVED | One passive or active collection at a time; a second collection returns `409 collection_in_progress` | Failed collections preserve the previous snapshot. |
 | Q-018 | How are browser-originated active requests protected? | RESOLVED | Loopback Host allowlist, custom request header, matching Origin when present, cross-site Fetch Metadata rejection, and no permissive CORS | Covers cross-origin and DNS-rebinding-style requests. |
 | Q-019 | What are the fixed request and process bounds? | RESOLVED | 16 KiB JSON body; active timeout 1–120 seconds, default 30; passive command timeout 5 seconds; stdout 2 MiB; stderr 64 KiB; kill grace 2 seconds | Values are public contract and test boundaries. |
-| Q-020 | What owns the full regression entrypoint? | RESOLVED | `scripts/check.py`, run as `python3 scripts/check.py` | Runs compile checks, Python tests, frontend Node tests when Node is available, and repository consistency guards. |
+| Q-020 | What owns the full regression entrypoint? | RESOLVED | `scripts/check.py`, run as `python3 scripts/check.py`; full mode requires Node 20+ and fails when frontend tests cannot run | A separate Python-only developer mode may skip Node but cannot be reported as full regression. |
 
 ## Deferred product questions
 
