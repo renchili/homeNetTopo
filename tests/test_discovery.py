@@ -52,12 +52,14 @@ class DiscoveryValidationTests(unittest.TestCase):
             with self.subTest(targets=targets), self.assertRaises(ValidationError):
                 validate_phase_b(self.request(targets), (local,))
 
-    def test_loopback_link_local_reserved_documentation_and_tunnel_are_not_local_eligible(self):
+    def test_only_rfc1918_non_tunnel_local_networks_are_eligible(self):
         facts = (
             interface("127.0.0.0/8", name="lo0"),
             interface("169.254.0.0/16", name="en1"),
             interface("240.0.0.0/4", name="en2"),
             interface("192.0.2.0/24", name="en3"),
+            interface("192.0.0.0/24", name="en4"),
+            interface("198.18.0.0/15", name="en5"),
             interface("10.0.0.0/24", kind="tunnel", name="utun0"),
             interface("192.168.1.0/24", name="en0"),
         )
@@ -77,12 +79,14 @@ class DiscoveryValidationTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
                 validate_phase_a(invalid)
 
-    def test_rejects_public_special_documentation_ipv6_and_unknown_fields(self):
+    def test_rejects_public_special_non_rfc1918_documentation_ipv6_and_unknown_fields(self):
         bodies = (
             {"networks": ["8.8.8.0/24"]},
             {"networks": ["127.0.0.0/8"]},
             {"networks": ["169.254.0.0/16"]},
             {"networks": ["240.0.0.0/4"]},
+            {"networks": ["192.0.0.0/24"]},
+            {"networks": ["198.18.0.0/15"]},
             {"networks": ["192.0.2.0/24"]},
             {"networks": ["2001:db8::/64"]},
             {"networks": ["10.0.0.0/24"], "extra": True},
