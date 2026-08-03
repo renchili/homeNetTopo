@@ -126,10 +126,17 @@ def _canonical_targets(networks: Iterable[str]) -> tuple[str, ...]:
         parsed.append(network)
     if not 1 <= len(parsed) <= MAX_NETWORKS:
         raise CommandError("invalid_target", "Nmap requires between 1 and 32 validated networks.")
-    collapsed = tuple(ipaddress.collapse_addresses(parsed))
-    if sum(network.num_addresses for network in collapsed) > MAX_ADDRESSES:
+
+    kept: list[ipaddress.IPv4Network] = []
+    for network in sorted(set(parsed), key=lambda item: (item.prefixlen, int(item.network_address))):
+        if any(network == existing or network.subnet_of(existing) for existing in kept):
+            continue
+        kept.append(network)
+    canonical = tuple(sorted(kept, key=lambda item: (int(item.network_address), item.prefixlen)))
+
+    if sum(network.num_addresses for network in ipaddress.collapse_addresses(canonical)) > MAX_ADDRESSES:
         raise CommandError("invalid_target", "Nmap target union exceeds the address limit.")
-    return tuple(str(network) for network in collapsed)
+    return tuple(str(network) for network in canonical)
 
 
 def nmap_spec(path: str, networks: Iterable[str], operation_timeout_seconds: int) -> CommandSpec:
