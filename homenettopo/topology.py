@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 from collections import defaultdict
+from dataclasses import replace
 from typing import Iterable
 
 from .discovery import ActiveHost, network_is_active_eligible
@@ -19,6 +21,7 @@ from .models import (
     Node,
     NodeKind,
     SourceStatus,
+    SourceStatusValue,
     TopologySnapshot,
     WarningItem,
     utc_now,
@@ -31,9 +34,11 @@ def _slug(value: str) -> str:
     return value.replace("/", "-").replace(":", "-").replace(".", "-")
 
 
-def _snapshot_id(mode: str, node_ids: Iterable[str], collected_at: str) -> str:
-    payload = "|".join((mode, collected_at, *sorted(node_ids))).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:20]
+def _content_fingerprint(snapshot: TopologySnapshot) -> str:
+    payload = snapshot.to_dict()
+    payload.pop("snapshot_id", None)
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:20]
 
 
 def build_snapshot(
@@ -53,7 +58,7 @@ def build_snapshot(
     route_items = tuple(routes)
     neighbor_items = tuple(neighbors)
     active_items = tuple(active_hosts)
-    source_items = tuple(sources)
+    source_items = list(sources)
     warning_list = list(warnings)
 
     nodes: dict[str, Node] = {}
@@ -61,6 +66,10 @@ def build_snapshot(
     networks: dict[tuple[str, str], NetworkDescriptor] = {}
     subnet_networks: dict[str, ipaddress.IPv4Network] = {}
     gateway_by_address: dict[str, str] = {}
+
+    def add_derived_source(source_type: str) -> None:
+        if not any(source.type == source_type for source in source_items):
+            source_items.append(SourceStatus(source_type, SourceStatusValue.OK))
 
     host_id = "local-host"
     nodes[host_id] = Node(host_id, NodeKind.LOCAL_HOST, "This Mac", confidence=Confidence.HIGH, observed_at=timestamp)
@@ -135,7 +144,7 @@ def build_snapshot(
         address = str(gateway_ip)
         gateway_id = f"gateway:{address}"
         gateway_by_address[address] = gateway_id
-        evidence = Evidence(
+        route_evidence = Evidence(
             "routes",
             "IPv4 route gateway",
             timestamp,
@@ -147,7 +156,7 @@ def build_snapshot(
             NodeKind.GATEWAY,
             address,
             addresses=(address,),
-            evidence=(*existing.evidence, evidence) if existing else (evidence,),
+            evidence=(*existing.evidence, route_evidence) if existing else (route_evidence,),
             confidence=Confidence.HIGH,
             observed_at=timestamp,
         )
@@ -161,17 +170,25 @@ def build_snapshot(
                 EdgeType.GATEWAY_FOR_SUBNET,
                 True,
                 Confidence.HIGH,
-                (evidence,),
+                (route_evidence,),
             )
+
         if route.is_default:
             upstream_id = "upstream:default"
+            inferred = Evidence(
+                "route_inference",
+                "Default route reaches an upstream boundary through this gateway",
+                timestamp,
+                {"gateway": address, "interface": route.interface},
+            )
             nodes.setdefault(
                 upstream_id,
                 Node(
                     upstream_id,
                     NodeKind.UPSTREAM_BOUNDARY,
                     "Upstream network",
-                    evidence=(evidence,),
+                    properties={"destination": "0.0.0.0/0"},
+                    evidence=(inferred,),
                     confidence=Confidence.LOW,
                     observed_at=timestamp,
                 ),
@@ -184,8 +201,46 @@ def build_snapshot(
                 EdgeType.UPSTREAM_OF,
                 False,
                 Confidence.LOW,
-                (evidence,),
+                (inferred,),
+                {"destination": "0.0.0.0/0"},
             )
+            add_derived_source("route_inference")
+            continue
+
+        try:
+            destination = ipaddress.IPv4Network(route.destination, strict=True)
+        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+            continue
+        boundary_id = f"upstream:route:{_slug(str(destination))}"
+        inferred = Evidence(
+            "route_inference",
+            "Route reaches a destination network through this gateway",
+            timestamp,
+            {"destination": str(destination), "gateway": address, "interface": route.interface},
+        )
+        existing_boundary = nodes.get(boundary_id)
+        nodes[boundary_id] = Node(
+            boundary_id,
+            NodeKind.UPSTREAM_BOUNDARY,
+            str(destination),
+            addresses=(str(destination),),
+            properties={"destination": str(destination)},
+            evidence=(*existing_boundary.evidence, inferred) if existing_boundary else (inferred,),
+            confidence=Confidence.MEDIUM,
+            observed_at=timestamp,
+        )
+        edge_id = f"edge:{gateway_id}:{boundary_id}"
+        edges[edge_id] = Edge(
+            edge_id,
+            gateway_id,
+            boundary_id,
+            EdgeType.ROUTES_TO,
+            False,
+            Confidence.MEDIUM,
+            (inferred,),
+            {"destination": str(destination), "interface": route.interface},
+        )
+        add_derived_source("route_inference")
 
     macs_by_address: dict[str, set[str]] = defaultdict(set)
     names_by_address: dict[str, set[str]] = defaultdict(set)
@@ -257,16 +312,17 @@ def build_snapshot(
                 Confidence.MEDIUM,
                 (membership,),
             )
+            add_derived_source("address_membership")
 
     mode = "active" if active_metadata else "passive"
     node_values = tuple(sorted(nodes.values(), key=lambda item: item.id))
     snapshot = TopologySnapshot(
         schema_version="1",
-        snapshot_id=_snapshot_id(mode, (node.id for node in node_values), timestamp),
+        snapshot_id="pending",
         collected_at=timestamp,
         mode=mode,
         platform=platform,
-        partial=any(source.status.value == "failed" for source in source_items),
+        partial=any(source.status is SourceStatusValue.FAILED for source in source_items),
         warnings=tuple(sorted(warning_list, key=lambda item: (item.code, item.message, item.source or ""))),
         sources=tuple(sorted(source_items, key=lambda item: item.type)),
         networks=tuple(
@@ -283,5 +339,6 @@ def build_snapshot(
         edges=tuple(sorted(edges.values(), key=lambda item: item.id)),
         active_discovery=active_metadata,
     )
+    snapshot = replace(snapshot, snapshot_id=_content_fingerprint(snapshot))
     snapshot.validate()
     return snapshot
