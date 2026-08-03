@@ -19,6 +19,7 @@ class WebContractTests(unittest.TestCase):
         self.assertIn('"X-HomeNetTopo-Request": "1"', script)
         self.assertIn('/api/v1/topology/refresh', script)
         self.assertIn('/api/v1/discover', script)
+        self.assertIn("new Set(selectedNetworks()", script)
 
     def test_assets_have_no_external_fetch_or_asset_urls(self):
         combined = "\n".join(path.read_text() for path in WEB.iterdir() if path.is_file())
@@ -27,6 +28,12 @@ class WebContractTests(unittest.TestCase):
         html = (WEB / "index.html").read_text()
         self.assertNotRegex(html, r"<script(?![^>]+src=)[^>]*>")
         self.assertNotRegex(html, r"<style[^>]*>")
+
+    def test_dom_updates_avoid_html_string_sinks(self):
+        script = (WEB / "app.js").read_text()
+        self.assertNotIn("innerHTML", script)
+        self.assertNotIn("insertAdjacentHTML", script)
+        self.assertIn("replaceChildren", script)
 
     def test_accessibility_and_reduced_motion_hooks(self):
         html = (WEB / "index.html").read_text()
