@@ -16,7 +16,7 @@
 | Q-004 | Production dependencies | RESOLVED | Python standard library and repository-owned browser assets | Nmap is optional; Node is development-test-only. |
 | Q-005 | Page-load behavior | RESOLVED | Page load explicitly calls protected passive-refresh POST | It may read local OS state but cannot invoke Nmap. |
 | Q-006 | Active discovery mode | RESOLVED | Nmap `-sn -n --max-retries 1 --host-timeout 5s -oX -` | XML stdout only; no ports, services, OS, DNS, or online lookup. |
-| Q-007 | Active target relationship | RESOLVED | Every target must equal or be a subnet of one eligible non-tunnel local network | Supernets, partial overlaps, adjacent networks, and unrelated private ranges are rejected. |
+| Q-007 | Active target relationship | RESOLVED | Every target must equal or be a subnet of one eligible non-tunnel local RFC 1918 network | Supernets, partial overlaps, adjacent networks, unrelated private ranges, and non-RFC1918 ranges are rejected. Duplicate or contained targets may be removed only within the same containing local network. |
 | Q-008 | Active request limits | RESOLVED | 1–32 networks and at most 1024 unique addresses | Enforced in both validation phases before Nmap. |
 | Q-009 | Active timeout semantics | RESOLVED | `operation_timeout_seconds` is total Nmap-process deadline; default 30, range 5–120 | Nmap per-host timeout is separately fixed at 5 seconds. |
 | Q-010 | Request body and command bounds | RESOLVED | 16 KiB body; passive timeout 5s; stdout 2 MiB; stderr 64 KiB; kill grace 2s | Public contract and exact test boundaries. |
