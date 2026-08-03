@@ -1,185 +1,77 @@
 # Agent Execution Bootstrap
 
-This is the repository entrypoint for agents. It defines rule loading, deterministic Skill routing, missing-rule behaviour, working-record requirements, and final reporting.
+This file is the repository entry point for agents working on `renchili/infoScreen`.
 
-Project-specific constraints belong in `AGENT.md`. Reusable workflows belong in `.agents/skills/**/SKILL.md`.
+It defines only the rule-loading order, hierarchy, and safe operating boundary. It must not independently invent or freeze the InfoScreen directory layout. Project-specific architecture and ownership belong in `AGENT.md`, which is the InfoScreen-specialized form of these bootstrap rules.
 
-## Mandatory base loading
+## Rule hierarchy and derivation
 
-Before planning, editing, generating files, reviewing, accepting, committing, opening a PR, or reporting completion, load:
+Use the following relationship:
 
-1. `AGENTS.md` — this bootstrap and routing file;
-2. `AGENT.md` — project-adapted product, architecture, implementation, test, and delivery constraints;
-3. the Skill or Skills selected by the mandatory routing table below;
-4. `README.md` and relevant `docs/`, when present;
-5. the affected source, tests, scripts, CI, deployment, migrations, configuration, and artifacts.
+1. the user's current request and explicit corrections define the requested outcome;
+2. `AGENTS.md` defines how repository rules are loaded and how evidence is handled;
+3. `AGENT.md` specializes those rules for InfoScreen after reading current project planning and repository evidence;
+4. `skills/SKILL.md` defines the reusable repository-work workflow and evidence boundary;
+5. source, configuration, deployment definitions, tests, documentation, and current runtime evidence establish implementation facts.
 
-If a required rule source cannot be read, stop before editing or verdict formation. Report the exact path and failed operation. Do not continue from memory, invent a replacement, or return a raw tool error.
+`AGENT.md` is generated project guidance, not an authority above the user or the project plan. The current file tree is evidence of the current state, not proof that the current state is architecturally correct.
 
-## Mandatory Skill routing
+When `AGENT.md` conflicts with an explicit user correction, the product plan, or a stronger ownership boundary:
 
-Skill selection is deterministic. Do not choose a weaker workflow because it is shorter or already loaded.
+- do not use the conflicting `AGENT.md` sentence to justify the existing implementation;
+- identify the incorrect specialization and every enforcement or documentation owner that repeats it;
+- correct the project-specific rule and the affected owners together;
+- distinguish the intended architecture from temporary legacy paths that still require migration.
 
-| Task intent | Mandatory Skill |
-|---|---|
-| Generate, implement, repair, extend, package, or document project source | `.agents/skills/project-generation/SKILL.md` |
-| Review, verify, validate, audit, accept, reject, assess readiness, or decide whether work is complete/correct | `.agents/skills/full-acceptance-hard-gate/SKILL.md` |
-| Issue `PASS`, `CONDITIONAL`, `FAIL`, `NOT VERIFIED`, approval, merge-ready, production-ready, or equivalent verdict | `.agents/skills/full-acceptance-hard-gate/SKILL.md` |
-| Inspect a repository, package, ZIP, branch, commit, pull request, or generated project as a finished deliverable | `.agents/skills/full-acceptance-hard-gate/SKILL.md` |
-| Generate or repair frontend, prototype, UI, UX, or interaction source | `.agents/skills/project-generation/SKILL.md` |
-| Accept or review frontend, prototype, UI, UX, screenshots, Figma, Storybook, or interactions | `.agents/skills/full-acceptance-hard-gate/SKILL.md`, including its frontend reference |
-| Implement fixes and then independently accept them in one task | Use project generation while editing, then restart verification under full acceptance before any verdict |
+## Required reading order
 
-A generation Skill's static self-review is not independent acceptance. A generator's completion statement, summary, screenshot, or test definition is not acceptance evidence.
+Before planning, editing, reviewing, validating, or reporting repository work, read these files in order:
 
-## Mixed implementation and acceptance
+1. `AGENTS.md` — this bootstrap entrypoint and rule hierarchy.
+2. `AGENT.md` — the InfoScreen project-specific specialization.
+3. `skills/SKILL.md` — repository workflow, evidence, validation, and delivery rules.
+4. `skills/full-project-acceptance-hard-gates` — full-project acceptance rules when the task is validation, acceptance, or release readiness.
+5. `README.md` — operator-facing project overview and verification commands.
+6. `metadata.json` — compact product metadata and natural-language product prompt.
+7. `docs/design.md`, `docs/api-spec.md`, and `docs/questions.md` when relevant.
+8. Relevant source, tests, scripts, deployment files, CI workflows, and configuration files.
 
-When a task includes both implementation and a final acceptance decision:
+If a required rule source cannot be read, stop and ask the user. Do not continue from memory or guess missing rules.
 
-1. load the project-generation Skill for implementation;
-2. complete the implementation pass and fix the exact target revision;
-3. load the full-acceptance Skill and its required references;
-4. reconstruct requirements independently rather than trusting the implementation summary;
-5. perform all applicable hard gates;
-6. issue the verdict only from the acceptance workflow.
+## Project identity
 
-During the acceptance phase, the full-acceptance Skill controls evidence, runtime interaction, prototype quality, and verdict rules. The project-generation Skill remains relevant only as an implementation contract and cannot prohibit acceptance checks required by the acceptance Skill.
+InfoScreen is a local-first personal information screen for an always-on Surface or Ubuntu display. The repository root is `~/infoscreen`.
 
-## Frontend and prototype acceptance activation
+Do not create another project root, duplicate app, placeholder implementation, unrelated demo, or generated runtime output in source control.
 
-Frontend acceptance is mandatory when any requirement, artifact, documentation claim, or changed path includes or implies a frontend, screen, view, page, route, UI, UX, prototype, mockup, wireframe, Figma, Storybook, HTML/CSS, screenshot, browser flow, mobile/desktop UI, plugin UI, gesture, or interactive control.
+## Output boundary
 
-Prototype acceptance is mandatory whenever a prototype, mockup, wireframe, Figma file, Storybook story, screenshot set, HTML prototype, design specification, or implementation-guiding visual artifact is requested, supplied, referenced, generated, or used as evidence.
+Create or update only files required by the current request and owned by the project-specific layout defined in `AGENT.md`.
 
-When activated, the acceptance agent must load:
+This bootstrap file deliberately does not authorize generic root-level `deploy/`, `scripts/`, `tests/`, tool configuration, or any other project path. Their correct location must be derived from InfoScreen ownership in `AGENT.md` and the current task.
 
-```text
-.agents/skills/full-acceptance-hard-gate/SKILL.md
-.agents/skills/full-acceptance-hard-gate/references/full-hard-gates.md
-.agents/skills/full-acceptance-hard-gate/references/frontend-acceptance.md
-```
+Runtime JSON, local environment files, logs, local photos, generated photo outputs, caches, compiled files, and test output must stay out of source control.
 
-The agent must:
+## Evidence rules
 
-- validate the prototype itself before comparing production implementation;
-- reconstruct all frontend functions and user goals into a requirement matrix;
-- check every material flow, state, branch, role, result, and recovery path;
-- verify the prototype resolves implementation-critical visual, interaction, responsive, content, accessibility, and data decisions;
-- inspect artifact integrity, links, components, assets, contradictions, and placeholders;
-- verify the prototype can drive a materially consistent and testable generated implementation;
-- issue a separate prototype verdict;
-- inventory the complete frontend surface rather than selected examples.
+Every repository-work response must distinguish:
 
-Prototype checks must not be skipped because the artifact is static, design-only, non-executable, or not yet implemented. `SKIP` is not an allowed acceptance status. Missing required prototype functionality or unresolved design decisions are `FAIL`; inaccessible evidence is `NOT VERIFIED`.
+- code or documentation changed;
+- static inspection performed;
+- local commands executed;
+- CI or workflow evidence available;
+- checks not run;
+- remaining gaps or risks.
 
-A polished image, clickable demo, or visually similar generated screen is not sufficient for `PASS`.
-
-## Rule-file handling
-
-Treat `AGENT.md`, `AGENTS.md`, and `.agents/skills/**/SKILL.md` as checked-in rule sources.
-
-- Read and obey existing rule files.
-- Do not generate, replace, summarise over, or synthesise alternate rule files during ordinary work.
-- Modify rule files only when the user explicitly asks to change rules, workflow, evidence, validation, acceptance, or repository-operation behaviour.
-- Keep reusable Skills under `.agents/skills/<skill-name>/SKILL.md`.
-- Do not fall back to `skills/...` or `.chatgpt/skills/...`.
-- Do not invent Skill paths.
-
-If `AGENT.md` or a mandatory Skill is missing or unreadable, stop and report the exact path. Do not create a substitute unless the user explicitly requested rule-file creation or repair.
-
-## Rule metadata integrity
-
-Before editing or acceptance inspection, record for every loaded, missing, skipped, or blocked rule source:
-
-```text
-Path
-Role
-Required status
-Read status
-Blob SHA, commit SHA, checksum, or exact ref
-Reason it applies
-```
-
-A bare statement such as `read the rules` is insufficient.
-
-Every final response and PR body must include loaded rule paths and identifiers when available, plus every missing, unreadable, skipped, or blocked rule source.
-
-## Rule precedence
-
-Obey the user's current explicit request and all compatible loaded repository rules.
-
-Within repository rules:
-
-- `AGENT.md` controls project-specific constraints;
-- `AGENTS.md` controls loading and routing;
-- the task-routed Skill controls its workflow;
-- during independent acceptance, the full-acceptance Skill controls evidence and verdict rules;
-- its frontend reference controls prototype and production UI acceptance;
-- stricter evidence requirements override weaker sampling or summary language.
-
-When two rules truly require mutually exclusive actions and this precedence does not resolve them, stop and ask the user. Do not silently choose.
-
-## Required pre-work record
-
-Before repository changes or acceptance conclusions, establish a working record containing:
-
-- repository, base revision, and current branch;
-- exact target revision or package hash;
-- loaded rules and stable identifiers;
-- routed task intent and selected Skill;
-- whether frontend acceptance is activated and why;
-- whether prototype acceptance is activated and why;
-- atomic requirement ledger;
-- complete affected-file or inspected-surface map;
-- files expected to change;
-- checks and evidence expected;
-- checks that cannot run in the environment;
-- open user feedback that constrains the task.
-
-If the working record cannot be established, stop before editing or verdict formation.
-
-## Allowed output boundary
-
-For repository work, generate or update only files required by the user request, `AGENT.md`, loaded Skills, or repository convention.
-
-Allowed categories include production source, tests, migrations, configuration, workflow files, validation scripts, required documentation, PR notes, and acceptance evidence in established paths.
-
-Unless explicitly requested or required, do not create duplicate project roots, sample applications, placeholders, noop files, unrelated demos, arbitrary reports, runtime databases, caches, compiled output, logs, secrets, or generated state.
-
-## Documentation and evidence boundary
-
-Documentation must follow the routed Skill and current implementation.
-
-- Do not invent document names when a Skill or repository convention defines them.
-- Do not merge distinct document purposes into a loose summary.
-- Do not claim implemented or verified behaviour without matching source and evidence.
-- Distinguish test definitions from executed tests, CI from local execution, screenshots from interaction traces, mocks from real evidence, and reviewer reports from generated artifacts.
-- Every evidence claim must identify the inspected revision and existing paths.
-
-## Context continuation
-
-After compaction, model switch, long pause, continuation, or loss of working memory, do not continue from memory. Re-read:
-
-1. `AGENTS.md`;
-2. `AGENT.md`;
-3. the task-routed Skill and mandatory references;
-4. current branch, target revision, and changed files;
-5. requirement and evidence sources.
-
-Then rebuild the working record before editing or reporting completion.
+Do not claim full acceptance, CI success, browser validation, deployment success, or runtime correctness unless there is direct evidence for the exact commit being discussed.
 
 ## Final response requirements
 
-Every final response for repository work must include:
+For repository work, include:
 
-- exact files changed or inspected;
-- branch name, commit, and PR number when applicable;
-- loaded rule files with identifiers when available;
-- selected Skill and routing reason;
-- frontend and prototype acceptance activation decisions when acceptance is involved;
-- checks and evidence inspected or executed;
-- checks not run and the exact reason;
-- remaining defects, evidence gaps, or risks;
-- a verdict only when the routed acceptance workflow permits one.
-
-Do not describe files or artifacts under names different from their actual paths.
+- branch name;
+- commit SHA or PR number when applicable;
+- exact files changed;
+- checks run;
+- checks not run;
+- remaining evidence gaps or risks.
