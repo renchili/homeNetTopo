@@ -179,7 +179,7 @@ The response uses the topology snapshot shape from `GET /api/v1/topology`, with:
 
 ## `GET /api/v1/topology/export`
 
-Returns the latest in-memory snapshot as a JSON download. It must not upload or persist the snapshot on the server.
+Returns the latest in-memory snapshot as a JSON download. It must not upload or persist the snapshot on the server, and it must not trigger a new collection.
 
 ### Response headers
 
@@ -188,7 +188,7 @@ Content-Type: application/json; charset=utf-8
 Content-Disposition: attachment; filename="home-network-topology.json"
 ```
 
-When no snapshot exists, the endpoint may collect a passive snapshot or return a documented `404`; the implementation and README must agree.
+When no snapshot exists, the endpoint returns `404 not_found`. The user must first load or refresh the passive topology endpoint before exporting.
 
 ## Node schema
 
