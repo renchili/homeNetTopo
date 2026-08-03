@@ -44,8 +44,8 @@ function collectionOptions(body) {
 async function loadCapabilities() {
   try {
     dispatch({ type: "CAPABILITIES", capabilities: await api("/api/v1/capabilities") });
-  } catch {
-    elements["discover-reason"].textContent = "Capabilities could not be loaded.";
+  } catch (error) {
+    dispatch({ type: "ERROR", phase: UI_STATES.REQUEST_ERROR, error: { error: { code: "request_error", message: "Capabilities could not be loaded." } } });
   }
 }
 
@@ -71,9 +71,10 @@ function openDiscoverDialog() {
   elements["network-options"].querySelector("input")?.focus();
 }
 
-function closeDiscoverDialog() {
-  elements["discover-dialog"].close();
+function closeDiscoverDialog(restoreState = true) {
+  if (elements["discover-dialog"].open) elements["discover-dialog"].close();
   elements["dialog-error"].textContent = "";
+  if (restoreState) dispatch({ type: "ACTIVE_CANCEL" });
   dialogReturnFocus?.focus();
 }
 
@@ -114,7 +115,7 @@ async function runActiveDiscovery(event) {
     elements["dialog-error"].textContent = "Select at least one network and enter a timeout from 5 through 120 seconds.";
     return;
   }
-  closeDiscoverDialog();
+  closeDiscoverDialog(false);
   dispatch({ type: "ACTIVE_START" });
   try {
     const snapshot = await api("/api/v1/discover", collectionOptions({ networks, operation_timeout_seconds: timeout }));
@@ -285,23 +286,31 @@ function fitView() {
 
 async function exportSnapshot() {
   if (!state.snapshot) return;
-  const response = await fetch("/api/v1/topology/export", { cache: "no-store" });
-  if (!response.ok) return;
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = exportFilename(state.snapshot);
-  link.click();
-  URL.revokeObjectURL(url);
+  try {
+    const response = await fetch("/api/v1/topology/export", { cache: "no-store" });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ error: { code: "request_error", message: "Export failed." } }));
+      throw payload;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = exportFilename(state.snapshot);
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    dispatch({ type: "ERROR", phase: mapApiError(error), error });
+  }
 }
 
 elements["refresh-button"].addEventListener("click", refreshPassive);
 elements["discover-button"].addEventListener("click", openDiscoverDialog);
 elements["export-button"].addEventListener("click", exportSnapshot);
 elements["discover-form"].addEventListener("submit", runActiveDiscovery);
-elements["dialog-close"].addEventListener("click", closeDiscoverDialog);
-elements["dialog-cancel"].addEventListener("click", closeDiscoverDialog);
+elements["dialog-close"].addEventListener("click", () => closeDiscoverDialog());
+elements["dialog-cancel"].addEventListener("click", () => closeDiscoverDialog());
+elements["discover-dialog"].addEventListener("cancel", (event) => { event.preventDefault(); closeDiscoverDialog(); });
 elements["zoom-in"].addEventListener("click", () => changeZoom(1.2));
 elements["zoom-out"].addEventListener("click", () => changeZoom(1 / 1.2));
 elements["fit-view"].addEventListener("click", fitView);
@@ -326,10 +335,7 @@ elements["graph-viewport"].addEventListener("pointermove", (event) => {
 elements["graph-viewport"].addEventListener("pointerup", () => { drag = null; });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    if (elements["discover-dialog"].open) closeDiscoverDialog();
-    else dispatch({ type: "CLEAR_SELECTION" });
-  }
+  if (event.key === "Escape" && !elements["discover-dialog"].open) dispatch({ type: "CLEAR_SELECTION" });
   if (elements["discover-dialog"].open && event.key === "Tab") {
     const focusable = [...elements["discover-dialog"].querySelectorAll("button, input, [tabindex]:not([tabindex='-1'])")].filter((item) => !item.disabled);
     const first = focusable[0]; const last = focusable.at(-1);

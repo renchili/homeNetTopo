@@ -24,15 +24,19 @@ export function initialState() {
   return { phase: UI_STATES.BOOT, snapshot: null, capabilities: null, selectedId: null, error: null };
 }
 
+function readyPhase(snapshot) {
+  if (!snapshot) return UI_STATES.BOOT;
+  if (snapshot.mode === "active") return UI_STATES.ACTIVE_READY;
+  if (snapshot.partial) return UI_STATES.PARTIAL_READY;
+  return snapshot.nodes.some((node) => node.kind === "device") ? UI_STATES.PASSIVE_READY : UI_STATES.EMPTY_READY;
+}
+
 export function reduceState(state, action) {
   switch (action.type) {
     case "PASSIVE_START": return { ...state, phase: UI_STATES.LOADING_PASSIVE, error: null };
-    case "PASSIVE_SUCCESS": {
-      const devices = action.snapshot.nodes.filter((node) => node.kind === "device").length;
-      const phase = action.snapshot.partial ? UI_STATES.PARTIAL_READY : devices ? UI_STATES.PASSIVE_READY : UI_STATES.EMPTY_READY;
-      return { ...state, phase, snapshot: action.snapshot, error: null, selectedId: null };
-    }
+    case "PASSIVE_SUCCESS": return { ...state, phase: readyPhase(action.snapshot), snapshot: action.snapshot, error: null, selectedId: null };
     case "ACTIVE_CONFIRM": return { ...state, phase: UI_STATES.ACTIVE_CONFIRM, error: null };
+    case "ACTIVE_CANCEL": return { ...state, phase: readyPhase(state.snapshot), error: null };
     case "ACTIVE_START": return { ...state, phase: UI_STATES.ACTIVE_RUNNING, error: null };
     case "ACTIVE_SUCCESS": return { ...state, phase: UI_STATES.ACTIVE_READY, snapshot: action.snapshot, error: null, selectedId: null };
     case "CAPABILITIES": return { ...state, capabilities: action.capabilities };

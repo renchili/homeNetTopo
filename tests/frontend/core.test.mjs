@@ -36,6 +36,7 @@ function snapshot(deviceCount = 3, gatewayCount = 1) {
   return {
     partial: false,
     collected_at: "2026-08-03T00:00:00Z",
+    mode: "passive",
     nodes,
     edges,
     networks: [{ cidr: "192.168.1.0/24", interface: "en0", eligible_for_active_discovery: true, address_count: 256 }],
@@ -46,11 +47,16 @@ function rectanglesOverlap(a, b) {
   return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 }
 
-test("state reducer maps passive, partial, empty and active states", () => {
-  assert.equal(reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: snapshot() }).phase, UI_STATES.PASSIVE_READY);
+test("state reducer maps ready states and restores after dialog cancellation", () => {
+  const passive = reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: snapshot() });
+  assert.equal(passive.phase, UI_STATES.PASSIVE_READY);
+  assert.equal(reduceState({ ...passive, phase: UI_STATES.ACTIVE_CONFIRM }, { type: "ACTIVE_CANCEL" }).phase, UI_STATES.PASSIVE_READY);
+  const activeSnapshot = { ...snapshot(), mode: "active" };
+  const active = reduceState(passive, { type: "ACTIVE_SUCCESS", snapshot: activeSnapshot });
+  assert.equal(active.phase, UI_STATES.ACTIVE_READY);
+  assert.equal(reduceState({ ...active, phase: UI_STATES.ACTIVE_CONFIRM }, { type: "ACTIVE_CANCEL" }).phase, UI_STATES.ACTIVE_READY);
   assert.equal(reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: { ...snapshot(0), nodes: snapshot(0).nodes.filter((node) => node.kind !== "device") } }).phase, UI_STATES.EMPTY_READY);
   assert.equal(reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: { ...snapshot(), partial: true } }).phase, UI_STATES.PARTIAL_READY);
-  assert.equal(reduceState(initialState(), { type: "ACTIVE_SUCCESS", snapshot: snapshot() }).phase, UI_STATES.ACTIVE_READY);
 });
 
 test("API errors map to recovery states", () => {

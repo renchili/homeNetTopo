@@ -20,6 +20,10 @@ KILL_GRACE_SECONDS = 2
 NMAP_HOST_TIMEOUT_SECONDS = 5
 MAX_NETWORKS = 32
 MAX_ADDRESSES = 1024
+DOCUMENTATION_RANGES = tuple(
+    ipaddress.IPv4Network(value)
+    for value in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+)
 
 
 class CommandError(RuntimeError):
@@ -96,6 +100,18 @@ def resolve_nmap(explicit_path: str | None = None) -> NmapResolution:
     return NmapResolution(None, "unavailable")
 
 
+def _target_is_eligible(network: ipaddress.IPv4Network) -> bool:
+    return not (
+        network.is_loopback
+        or network.is_link_local
+        or network.is_multicast
+        or network.is_unspecified
+        or network.is_reserved
+        or not network.is_private
+        or any(network.overlaps(documentation) for documentation in DOCUMENTATION_RANGES)
+    )
+
+
 def _canonical_targets(networks: Iterable[str]) -> tuple[str, ...]:
     parsed: list[ipaddress.IPv4Network] = []
     for value in networks:
@@ -105,8 +121,8 @@ def _canonical_targets(networks: Iterable[str]) -> tuple[str, ...]:
             network = ipaddress.ip_network(value, strict=True)
         except ValueError as exc:
             raise CommandError("invalid_target", "Nmap targets must be canonical IPv4 networks.") from exc
-        if not isinstance(network, ipaddress.IPv4Network) or not network.is_private:
-            raise CommandError("invalid_target", "Nmap targets must be private IPv4 networks.")
+        if not isinstance(network, ipaddress.IPv4Network) or not _target_is_eligible(network):
+            raise CommandError("invalid_target", "Nmap targets must be eligible private IPv4 networks.")
         parsed.append(network)
     if not 1 <= len(parsed) <= MAX_NETWORKS:
         raise CommandError("invalid_target", "Nmap requires between 1 and 32 validated networks.")
@@ -120,7 +136,7 @@ def nmap_spec(path: str, networks: Iterable[str], operation_timeout_seconds: int
     verified = _verified_executable(path)
     if not verified or verified != os.path.realpath(path):
         raise CommandError("dependency_unavailable", "Nmap is unavailable.")
-    if isinstance(operation_timeout_seconds, bool) or not 5 <= operation_timeout_seconds <= 120:
+    if isinstance(operation_timeout_seconds, bool) or not isinstance(operation_timeout_seconds, int) or not 5 <= operation_timeout_seconds <= 120:
         raise CommandError("invalid_target", "Nmap operation timeout is outside the allowed range.")
     targets = _canonical_targets(networks)
     argv = (
@@ -154,7 +170,7 @@ def _validate_spec(spec: CommandSpec) -> None:
     if executable != spec.argv[0]:
         raise CommandError("dependency_unavailable", "Nmap is unavailable.")
     fixed = ("-sn", "-n", "--max-retries", "1", "--host-timeout", "5s", "-oX", "-")
-    if spec.argv[1:9] != fixed or spec.timeout_seconds < 5 or spec.timeout_seconds > 120:
+    if spec.argv[1:9] != fixed or not isinstance(spec.timeout_seconds, int) or isinstance(spec.timeout_seconds, bool) or not 5 <= spec.timeout_seconds <= 120:
         raise CommandError("collection_failed", "Nmap command specification is not approved.")
     if _canonical_targets(spec.argv[9:]) != spec.argv[9:]:
         raise CommandError("collection_failed", "Nmap targets are not canonical.")

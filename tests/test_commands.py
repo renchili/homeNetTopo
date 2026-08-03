@@ -32,10 +32,19 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(spec.timeout_seconds, 30)
 
     @mock.patch("homenettopo.commands._verified_executable", return_value="/opt/homebrew/bin/nmap")
-    def test_nmap_rejects_option_injection_public_and_large_union(self, _verified):
-        for targets in (["--script"], ["8.8.8.0/24"], ["10.0.0.0/21"]):
-            with self.subTest(targets=targets), self.assertRaises(CommandError):
-                nmap_spec("/opt/homebrew/bin/nmap", targets, 30)
+    def test_nmap_rejects_option_injection_special_ranges_large_union_and_non_integer_timeout(self, _verified):
+        cases = (
+            (["--script"], 30),
+            (["8.8.8.0/24"], 30),
+            (["127.0.0.0/8"], 30),
+            (["169.254.0.0/16"], 30),
+            (["192.0.2.0/24"], 30),
+            (["10.0.0.0/21"], 30),
+            (["10.0.0.0/24"], 30.0),
+        )
+        for targets, timeout in cases:
+            with self.subTest(targets=targets, timeout=timeout), self.assertRaises(CommandError):
+                nmap_spec("/opt/homebrew/bin/nmap", targets, timeout)
 
     def test_generic_absolute_command_spec_is_rejected_before_popen(self):
         spec = CommandSpec(CommandKind.INTERFACES, ("/bin/echo", "unsafe"), 5)
