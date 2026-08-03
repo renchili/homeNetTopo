@@ -29,6 +29,11 @@ class InterfaceParserTests(unittest.TestCase):
         self.assertEqual(facts[0].kind, "tunnel")
         self.assertEqual(facts[0].addresses[0].peer, "203.0.113.10")
 
+    def test_empty_output_is_empty_but_unrecognized_output_fails(self):
+        self.assertEqual(parse_ifconfig(""), ())
+        with self.assertRaises(ValueError):
+            parse_ifconfig("not ifconfig output\n")
+
 
 if __name__ == "__main__":
     unittest.main()
