@@ -22,6 +22,7 @@
 | Q-010 | Is Nmap a mandatory runtime dependency? | RESOLVED | No | Passive discovery remains available; the UI reports when optional active discovery is unavailable. |
 | Q-011 | What implementation dependency posture is preferred? | DEFAULTED | Python standard library and native browser APIs | Keeps setup small; any new dependency requires a documented owner and reason. |
 | Q-012 | Should tunnel interfaces be actively queried automatically? | RESOLVED | No | Tunnel networks may represent remote infrastructure; show them passively and require explicit eligibility rules. |
+| Q-013 | What happens when JSON export is requested before a snapshot exists? | RESOLVED | Return `404 not_found` without collecting data | Export remains side-effect free; the user must first load or refresh the passive topology. |
 
 ## Open product questions
 
