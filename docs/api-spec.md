@@ -2,7 +2,7 @@
 
 ## Status
 
-This contract describes the intended first implementation. Endpoint availability must not be claimed until matching source exists.
+This contract defines the intended first implementation. It is not evidence that the endpoints already exist or run.
 
 ## General rules
 
@@ -10,52 +10,58 @@ This contract describes the intended first implementation. Endpoint availability
 - API prefix: `/api/v1`
 - Minimum Python runtime: 3.10
 - JSON media type: `application/json; charset=utf-8`
-- The service binds to IPv4 loopback only in the first release.
-- Passive collection and active host discovery are separate operations.
-- Timestamps use RFC 3339 UTC strings.
-- Unknown response fields may be added compatibly; clients must ignore unknown fields.
-- Breaking field or semantic changes require a new schema or API version.
-- No endpoint persists or uploads network data.
+- Bind: IPv4 loopback only
+- No endpoint uploads or persists network data
+- Timestamps: RFC 3339 UTC
+- Breaking field or semantic changes require a new API or schema version
+- Every GET endpoint is read-only and must not execute collection commands
 
 ## Fixed limits
 
 | Limit | Value |
 |---|---:|
-| Maximum JSON request body | 16 KiB |
+| Maximum JSON body | 16 KiB |
 | Maximum requested networks | 32 |
 | Maximum unique target addresses | 1024 |
-| Active timeout default | 30 seconds |
-| Active timeout minimum | 1 second |
-| Active timeout maximum | 120 seconds |
+| Active-operation timeout default | 30 seconds |
+| Active-operation timeout range | 5–120 seconds |
+| Nmap per-host timeout | 5 seconds |
 | Passive command timeout | 5 seconds |
-| Captured stdout per command | 2 MiB |
-| Captured stderr per command | 64 KiB |
+| Captured stdout | 2 MiB |
+| Captured stderr | 64 KiB |
 | Timed-out process kill grace | 2 seconds |
 
-Requests exceeding a documented HTTP limit fail before command invocation.
+`operation_timeout_seconds` is the total deadline enforced by the subprocess runner for the Nmap process. The Nmap command separately uses a fixed `--host-timeout 5s`.
 
-## Request Host boundary
+## Host boundary
 
 Every request must contain a Host value matching the configured loopback port.
 
-For the default port, accepted forms are:
+Accepted forms for the default port:
 
 ```text
 127.0.0.1:8765
 localhost:8765
 ```
 
-The allowlist is derived from the actual configured loopback port. Missing, malformed, non-loopback, alternate-domain, or DNS-rebinding-style values return:
+The allowlist is derived from the actual configured port. Missing, malformed, non-loopback, alternate-domain, IPv6-literal, or DNS-rebinding-style Host values return:
 
 ```text
 400 invalid_host
 ```
 
-The service does not trust arbitrary Host values for origin construction, redirects, links, or error content.
+The service must not use an untrusted Host value to construct redirects, links, origins, filenames, or error text.
 
-## State-changing browser request boundary
+## Protected collection boundary
 
-`POST /api/v1/discover` requires:
+These endpoints execute commands and therefore require same-origin request protection:
+
+```text
+POST /api/v1/topology/refresh
+POST /api/v1/discover
+```
+
+Required headers:
 
 ```text
 Content-Type: application/json
@@ -64,25 +70,25 @@ X-HomeNetTopo-Request: 1
 
 When `Origin` is present, it must exactly match an accepted loopback origin for the configured port. When `Sec-Fetch-Site` is present, it must be `same-origin` or `none`.
 
-Failure returns:
+A missing custom header, mismatched Origin, or cross-site Fetch Metadata value returns:
 
 ```text
 403 cross_origin_request
 ```
 
-The server must not emit permissive CORS headers. An API `OPTIONS` request is not an alternative authorization path and returns `405 method_not_allowed` unless a later version explicitly defines otherwise.
+The server emits no permissive CORS headers. API `OPTIONS` is not an authorization path and returns `405 method_not_allowed`.
 
 ## Collection concurrency
 
-The service permits only one passive or active collection at a time.
+Only one passive or active collection may run at a time.
 
-A second request that would start collection returns immediately:
+A second collection request returns immediately:
 
 ```text
 409 collection_in_progress
 ```
 
-The request is not queued, merged, or allowed to invoke another subprocess. A failed collection preserves the previous snapshot. A successful or coherent partial collection replaces it atomically.
+It is not queued, merged, or allowed to start another command. A failed operation preserves the previous snapshot. A successful passive result, coherent partial passive result, or successful active result replaces the snapshot atomically.
 
 ## Error envelope
 
@@ -114,7 +120,7 @@ Error codes:
 - `method_not_allowed`
 - `internal_error`
 
-Messages must be useful without exposing arbitrary command output, environment variables, or local filesystem details. `details` may include validated field names, configured limits, eligibility reasons, or source-status summaries.
+Messages must not expose raw command lines, unrestricted stderr, environment variables, or local filesystem paths. Details may contain validated field names, configured limits, eligibility reasons, source-status summaries, or Nmap resolution-source identifiers.
 
 ## `GET /api/v1/health`
 
@@ -131,26 +137,30 @@ Returns service identity without collecting network data.
 }
 ```
 
-On a non-macOS host, health may still return `200` with the actual normalized platform. Collection endpoints remain unsupported.
+On a non-macOS host, health may still return `200` with the normalized actual platform.
 
 ## `GET /api/v1/capabilities`
 
-Returns runtime, platform, optional-tool, and public-limit information without collecting topology.
+Returns platform, optional-tool availability, limits, and first-release feature flags without executing collection commands.
 
-### Response `200`
+### Supported-platform example `200`
 
 ```json
 {
+  "platform": "darwin",
   "passive_collection": true,
   "active_discovery": {
     "available": true,
+    "unavailable_reason": null,
     "tool": "nmap",
-    "mode": "host-discovery-only",
+    "resolution_source": "homebrew_arm64",
+    "mode": "host-discovery-xml",
     "max_networks_per_request": 32,
     "max_addresses_per_request": 1024,
-    "timeout_default_seconds": 30,
-    "timeout_min_seconds": 1,
-    "timeout_max_seconds": 120
+    "operation_timeout_default_seconds": 30,
+    "operation_timeout_min_seconds": 5,
+    "operation_timeout_max_seconds": 120,
+    "host_timeout_seconds": 5
   },
   "bind": "127.0.0.1",
   "port": 8765,
@@ -160,75 +170,66 @@ Returns runtime, platform, optional-tool, and public-limit information without c
 }
 ```
 
-Capability availability is informative. Every active request is still validated.
+Allowed `resolution_source` values:
 
-## `GET /api/v1/topology`
+- `explicit`
+- `homebrew_arm64`
+- `homebrew_intel`
+- `path`
+- `unavailable`
 
-Returns a passive snapshot.
+The full Nmap executable path is never returned.
 
-### Query parameter
-
-`refresh` accepts only `true` or `false`.
-
-- omitted or `refresh=true`: start a new passive collection;
-- `refresh=false`: return the latest in-memory snapshot without collecting;
-- `refresh=false` with no snapshot: return `404 not_found`.
-
-The endpoint must never invoke Nmap.
-
-### Success `200`
+### Unsupported-platform example `200`
 
 ```json
 {
-  "schema_version": "1",
-  "snapshot_id": "local-generated-id",
-  "collected_at": "2026-08-03T01:00:00Z",
-  "mode": "passive",
-  "platform": "darwin",
-  "partial": false,
-  "warnings": [],
-  "sources": [
-    {
-      "type": "interfaces",
-      "status": "ok"
-    },
-    {
-      "type": "routes",
-      "status": "ok"
-    },
-    {
-      "type": "neighbors",
-      "status": "ok"
-    }
-  ],
-  "networks": [
-    {
-      "cidr": "192.0.2.0/24",
-      "interface": "en0",
-      "eligible_for_active_discovery": false,
-      "eligibility_reason": "documentation_example_address"
-    }
-  ],
-  "nodes": [],
-  "edges": []
+  "platform": "linux",
+  "passive_collection": false,
+  "active_discovery": {
+    "available": false,
+    "unavailable_reason": "unsupported_platform",
+    "tool": "nmap",
+    "resolution_source": "unavailable",
+    "mode": "host-discovery-xml",
+    "max_networks_per_request": 32,
+    "max_addresses_per_request": 1024,
+    "operation_timeout_default_seconds": 30,
+    "operation_timeout_min_seconds": 5,
+    "operation_timeout_max_seconds": 120,
+    "host_timeout_seconds": 5
+  },
+  "bind": "127.0.0.1",
+  "port": 8765,
+  "external_assets_required": false,
+  "reverse_dns_enabled": false,
+  "annotations_supported": false
 }
 ```
 
-The example uses documentation-reserved addressing and is not an eligible active target.
+Capability reporting does not execute `ifconfig`, `netstat`, `arp`, or Nmap discovery.
 
-### Expected failures
+## `GET /api/v1/topology`
 
-- `400 bad_request` for invalid query values;
-- `404 not_found` for `refresh=false` without a snapshot;
-- `409 collection_in_progress` when a new passive collection is requested while another collection runs;
-- `500 collection_failed` when no coherent snapshot can be produced;
-- `501 unsupported_platform` on unsupported collection platforms.
+Returns the latest in-memory snapshot without collecting or changing state.
 
-A coherent partial result returns `200` with `partial=true`, source-status failures, and warnings.
+Query parameters are not supported in schema version `1`; an unexpected query parameter returns `400 bad_request`.
 
-## `POST /api/v1/discover`
+### Success `200`
 
-Performs a fresh passive collection followed by explicit bounded Nmap host discovery and returns one merged snapshot.
+Uses the topology snapshot schema below.
+
+### No snapshot
+
+```text
+404 not_found
+```
+
+The browser should call `POST /api/v1/topology/refresh` before the first read.
+
+## `POST /api/v1/topology/refresh`
+
+Performs passive macOS collection only. It must never invoke Nmap.
 
 ### Required headers
 
@@ -237,47 +238,124 @@ Content-Type: application/json
 X-HomeNetTopo-Request: 1
 ```
 
-Host, Origin, and Fetch Metadata rules from the general contract apply.
+### Request
+
+```json
+{}
+```
+
+The body must be a JSON object with no fields in schema version `1`.
+
+### Success `200`
+
+Returns a passive snapshot and replaces the latest snapshot atomically.
+
+A coherent partial result returns `200` with:
+
+```json
+{
+  "mode": "passive",
+  "partial": true,
+  "warnings": [],
+  "sources": []
+}
+```
+
+### Expected failures
+
+- `400 invalid_json`
+- `400 bad_request`
+- `400 invalid_host`
+- `403 cross_origin_request`
+- `409 collection_in_progress`
+- `413 target_too_large` for body size overflow
+- `415 bad_request` for unsupported content type
+- `500 collection_failed` when no coherent snapshot can be produced
+- `501 unsupported_platform`
+- `504 command_timeout`
+
+A failure preserves the previous snapshot.
+
+## `POST /api/v1/discover`
+
+Performs fresh passive collection followed by bounded Nmap host discovery. It returns one merged active snapshot.
+
+### Required headers
+
+```text
+Content-Type: application/json
+X-HomeNetTopo-Request: 1
+```
 
 ### Request
 
 ```json
 {
   "networks": ["192.168.1.0/24"],
-  "timeout_seconds": 30
+  "operation_timeout_seconds": 30
 }
 ```
 
-`timeout_seconds` is optional and defaults to 30.
+`operation_timeout_seconds` is optional and defaults to 30.
 
-### Validation order
+### Validation Phase A — before lock and commands
 
 1. validate Host and browser-origin boundary;
 2. reject body larger than 16 KiB;
-3. require JSON object body;
+3. require a JSON object;
 4. require `networks` with 1–32 string entries;
-5. parse canonical IPv4 networks;
-6. reject public, loopback, link-local, multicast, unspecified, reserved-only, unrelated private, and tunnel-only targets;
-7. collapse overlapping networks and count unique addresses;
-8. reject totals above 1024;
-9. validate integer timeout from 1 through 120;
-10. resolve Nmap and construct the fixed argument array.
+5. parse each item as a canonical IPv4 network;
+6. reject loopback, link-local, multicast, unspecified, public, and reserved-only documentation ranges;
+7. reject an absolute unique-address union above 1024;
+8. validate `operation_timeout_seconds` as an integer from 5 through 120.
 
-No process invocation may happen before validation completes.
+Phase A failure must not acquire the collection lock and must not execute any command.
+
+### Validation Phase B — after fresh passive collection
+
+Under the collection lock:
+
+1. run approved passive commands;
+2. derive eligible private IPv4 networks assigned to non-tunnel local interfaces;
+3. require each requested target to be equal to or a subnet of one eligible local network;
+4. reject supernets, partial overlaps, adjacent networks, tunnel-only networks, and unrelated private ranges;
+5. collapse duplicate or contained targets;
+6. recalculate the final unique-address union and require at most 1024 addresses.
+
+Passive commands are permitted between Phase A and Phase B because they establish current local eligibility. **Nmap must not be resolved or invoked until both phases pass.**
+
+### Nmap command
+
+```text
+<canonical-nmap-path> -sn -n --max-retries 1 --host-timeout 5s -oX - <validated-targets...>
+```
+
+The subprocess runner enforces `operation_timeout_seconds` as the total process deadline. XML stdout is parsed with `xml.etree.ElementTree`. Only host-up address and status evidence is accepted; port, service, OS, script, and name-resolution data are ignored or rejected.
 
 ### Success `200`
 
-The response uses the topology snapshot shape with:
-
 ```json
 {
+  "schema_version": "1",
+  "snapshot_id": "local-generated-id",
+  "collected_at": "2026-08-03T03:00:00Z",
   "mode": "active",
+  "platform": "darwin",
+  "partial": false,
+  "warnings": [],
+  "sources": [],
+  "networks": [],
+  "nodes": [],
+  "edges": [],
   "active_discovery": {
     "requested_networks": ["192.168.1.0/24"],
+    "effective_networks": ["192.168.1.0/24"],
     "completed": true,
     "duration_ms": 1200,
     "hosts_reported_up": 4,
-    "timeout_seconds": 30
+    "operation_timeout_seconds": 30,
+    "host_timeout_seconds": 5,
+    "output_format": "xml"
   }
 }
 ```
@@ -293,17 +371,17 @@ The successful merged snapshot replaces the latest snapshot atomically.
 - `403 cross_origin_request`
 - `409 collection_in_progress`
 - `413 target_too_large`
-- `415 bad_request` for unsupported content type
+- `415 bad_request`
 - `424 dependency_unavailable`
 - `500 collection_failed`
 - `501 unsupported_platform`
 - `504 command_timeout`
 
-A failed active operation preserves the previous snapshot and does not publish the intermediate passive collection.
+A failed active operation preserves the previous snapshot and does not publish its intermediate passive data.
 
 ## `GET /api/v1/topology/export`
 
-Downloads the latest in-memory snapshot without collecting, modifying, persisting, or uploading data.
+Downloads the latest snapshot without collecting, modifying, persisting, or uploading data.
 
 ### Success `200`
 
@@ -319,9 +397,25 @@ Cache-Control: no-store
 404 not_found
 ```
 
-The user must first load or refresh topology. The export contains only the server snapshot; the first release has no user annotation layer.
+## Topology snapshot schema
 
-## Snapshot source schema
+```json
+{
+  "schema_version": "1",
+  "snapshot_id": "local-generated-id",
+  "collected_at": "2026-08-03T03:00:00Z",
+  "mode": "passive",
+  "platform": "darwin",
+  "partial": false,
+  "warnings": [],
+  "sources": [],
+  "networks": [],
+  "nodes": [],
+  "edges": []
+}
+```
+
+### Source schema
 
 ```json
 {
@@ -341,14 +435,14 @@ Source types:
 - `address_membership`
 - `route_inference`
 
-Source status values:
+Source statuses:
 
 - `ok`
 - `warning`
 - `failed`
 - `not_run`
 
-## Network schema
+### Network schema
 
 ```json
 {
@@ -361,14 +455,14 @@ Source status values:
 }
 ```
 
-`interface_kind` initially includes `physical`, `virtual`, and `tunnel`. Tunnel networks are not active-discovery eligible.
+`interface_kind` includes `physical`, `virtual`, and `tunnel`. Tunnel networks are never active-discovery eligible in schema version `1`.
 
-## Evidence schema
+### Evidence schema
 
 ```json
 {
   "source": "arp",
-  "observed_at": "2026-08-03T01:00:00Z",
+  "observed_at": "2026-08-03T03:00:00Z",
   "summary": "Neighbor cache entry",
   "properties": {}
 }
@@ -376,7 +470,7 @@ Source status values:
 
 Evidence summaries must not contain raw command lines or unrestricted stderr.
 
-## Node schema
+### Node schema
 
 ```json
 {
@@ -387,16 +481,9 @@ Evidence summaries must not contain raw command lines or unrestricted stderr.
   "mac_addresses": ["02:00:00:00:00:10"],
   "interface_names": [],
   "properties": {},
-  "evidence": [
-    {
-      "source": "arp",
-      "observed_at": "2026-08-03T01:00:00Z",
-      "summary": "Neighbor cache entry",
-      "properties": {}
-    }
-  ],
+  "evidence": [],
   "confidence": "high",
-  "observed_at": "2026-08-03T01:00:00Z"
+  "observed_at": "2026-08-03T03:00:00Z"
 }
 ```
 
@@ -409,9 +496,9 @@ Node kinds:
 - `device`
 - `upstream_boundary`
 
-A label may use a hostname already present in approved command output. The server does not perform a separate reverse-DNS or online lookup.
+A label may use a name already present in approved local command output. The service performs no separate reverse-DNS or online lookup.
 
-## Edge schema
+### Edge schema
 
 ```json
 {
@@ -421,13 +508,7 @@ A label may use a hostname already present in approved command output. The serve
   "type": "member_of",
   "observed": false,
   "confidence": "medium",
-  "evidence": [
-    {
-      "source": "address_membership",
-      "summary": "Address belongs to subnet",
-      "properties": {}
-    }
-  ],
+  "evidence": [],
   "properties": {}
 }
 ```
@@ -445,7 +526,7 @@ Every edge endpoint must reference a node in the same snapshot.
 
 ## Response headers
 
-HTML and API responses use restrictive headers appropriate to a local application:
+HTML, static, and API responses use restrictive local-application headers:
 
 ```text
 Cache-Control: no-store
@@ -457,20 +538,20 @@ Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=()
 Content-Security-Policy: default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
 ```
 
-Static immutable asset caching may be introduced only with content-addressed filenames and matching documentation. The first release defaults to `no-store` for simplicity.
+No `Access-Control-Allow-Origin` header is emitted.
 
 ## Static route behavior
 
 - `/` serves `web/index.html`.
-- Explicit repository-owned asset paths serve regular files from `web/`.
+- Explicit local asset paths serve regular files under the canonical `web/` root.
 - Directory listing is disabled.
 - Unknown static paths return `404`.
-- Raw or encoded traversal, NUL bytes, separator ambiguity, and symlink escape are rejected.
-- API and static methods not defined by this contract return `405 method_not_allowed` or a minimal static `405` response as appropriate.
+- Raw or encoded traversal, repeated decoding, NUL bytes, alternate separators, and symlink escape are rejected.
+- Undefined API and static methods return `405` as appropriate.
 
 ## Compatibility
 
 - `schema_version` governs topology JSON.
 - Application version and schema version are independent.
-- Existing field names and meanings cannot change incompatibly within schema version `1`.
-- New enum values require clients to retain unknown-value resilience or a schema version change when they alter behavior materially.
+- Existing field names and meanings cannot change incompatibly inside schema version `1`.
+- Materially new behavior requires compatible fields or a schema/API version change.
