@@ -12,7 +12,7 @@ Apply compatible instructions in this order:
 2. this `AGENTS.md` bootstrap and routing file;
 3. `AGENT.md` project-specific guidance;
 4. the task-routed workflow under `skills/`;
-5. current source, configuration, tests, documentation, and exact-revision evidence.
+5. current planning, source, configuration, tests, documentation, and exact-revision evidence.
 
 The current file tree is evidence of the current state, not proof that the state is architecturally correct. When project guidance conflicts with an explicit user correction or stronger product evidence, correct the guidance and every affected implementation or documentation owner together.
 
@@ -26,7 +26,7 @@ Before planning, editing, generating, reviewing, validating, committing, or repo
 4. `skills/full-project-acceptance-hard-gates/SKILL.md` for validation, acceptance, readiness, or verdict work;
 5. `README.md`;
 6. `metadata.json`;
-7. `docs/design.md`, `docs/api-spec.md`, and `docs/questions.md` when relevant;
+7. `docs/design.md`, `docs/api-spec.md`, `docs/plan.md`, and `docs/questions.md` when planning or implementation behavior is relevant;
 8. affected source, tests, scripts, workflows, deployment files, configuration, and existing evidence.
 
 If a required rule source is missing or unreadable, stop the blocked operation and report the exact path and operation. Do not continue from memory or invent an inaccessible rule. Creating or repairing a rule file is allowed only when the user explicitly requests missing rule generation or rule repair.
@@ -45,7 +45,7 @@ A generation summary or static self-review is not independent acceptance evidenc
 
 HomeNetTopo is a local-first macOS network-discovery and topology-visualization project. It collects evidence visible from the current Mac, infers a best-effort logical topology, and serves a local interactive web page.
 
-The project must not claim complete physical visibility from a single endpoint. Product-specific runtime, scanning, privacy, API, UI, ownership, and testing constraints are defined in `AGENT.md`.
+The project must not claim complete physical visibility from a single endpoint. Product-specific runtime, scanning, privacy, API, UI, ownership, and testing constraints are defined in `AGENT.md`. The implementation requirement ledger and package sequence are owned by `docs/plan.md`.
 
 ## Working record
 
@@ -62,7 +62,7 @@ Before repository changes, establish:
 
 ## Output boundary
 
-Create or update only files required by the user's request, `AGENT.md`, the routed workflow, or established repository ownership.
+Create or update only files required by the user's request, `AGENT.md`, `docs/plan.md`, the routed workflow, or established repository ownership.
 
 Do not create a second project root, unrelated demo, duplicate rule system, arbitrary report, generated runtime inventory, local scan output, cache, log, credential file, compiled output, or real environment data.
 
