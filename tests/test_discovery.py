@@ -24,10 +24,21 @@ class DiscoveryValidationTests(unittest.TestCase):
     def request(self, networks=None, timeout=30):
         return validate_phase_a({"networks": networks or ["192.168.1.0/24"], "operation_timeout_seconds": timeout})
 
-    def test_equal_contained_and_collapsed_targets_pass(self):
+    def test_equal_contained_and_duplicate_targets_pass(self):
         self.assertEqual(str(validate_phase_b(self.request(), (interface(),))[0]), "192.168.1.0/24")
-        request = self.request(["192.168.1.0/24", "192.168.1.0/25"])
+        request = self.request(["192.168.1.0/24", "192.168.1.0/25", "192.168.1.0/24"])
         self.assertEqual(tuple(map(str, validate_phase_b(request, (interface(),)))), ("192.168.1.0/24",))
+
+    def test_adjacent_targets_on_separate_local_networks_are_not_merged(self):
+        local = (
+            interface("192.168.1.0/25", name="en0"),
+            interface("192.168.1.128/25", name="en1"),
+        )
+        request = self.request(["192.168.1.0/25", "192.168.1.128/25"])
+        self.assertEqual(
+            tuple(map(str, validate_phase_b(request, local))),
+            ("192.168.1.0/25", "192.168.1.128/25"),
+        )
 
     def test_supernet_noncanonical_overlap_adjacent_unrelated_and_tunnel_fail(self):
         cases = [
