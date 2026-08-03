@@ -45,6 +45,15 @@ def address_union_size(networks: Iterable[ipaddress.IPv4Network]) -> int:
     return sum(network.num_addresses for network in ipaddress.collapse_addresses(networks))
 
 
+def _remove_duplicate_and_contained(networks: Iterable[ipaddress.IPv4Network]) -> tuple[ipaddress.IPv4Network, ...]:
+    kept: list[ipaddress.IPv4Network] = []
+    for network in sorted(set(networks), key=lambda item: (item.prefixlen, int(item.network_address))):
+        if any(network == existing or network.subnet_of(existing) for existing in kept):
+            continue
+        kept.append(network)
+    return tuple(sorted(kept, key=lambda item: (int(item.network_address), item.prefixlen)))
+
+
 def network_is_active_eligible(network: ipaddress.IPv4Network) -> bool:
     return not (
         network.is_loopback
@@ -107,13 +116,26 @@ def validate_phase_b(request: DiscoveryRequest, interfaces: Iterable[InterfaceFa
     local_networks = eligible_local_networks(interfaces)
     if not local_networks:
         raise ValidationError("invalid_target", "No eligible local network is available.")
+
+    grouped: dict[ipaddress.IPv4Network, list[ipaddress.IPv4Network]] = {}
     for target in request.networks:
-        if not any(target == local or target.subnet_of(local) for local in local_networks):
+        containing = [local for local in local_networks if target == local or target.subnet_of(local)]
+        if not containing:
             raise ValidationError("invalid_target", "The requested network is outside eligible local networks.")
-    effective = tuple(ipaddress.collapse_addresses(request.networks))
-    if address_union_size(effective) > MAX_ADDRESSES:
+        owner = max(containing, key=lambda item: item.prefixlen)
+        grouped.setdefault(owner, []).append(target)
+
+    effective: list[ipaddress.IPv4Network] = []
+    for owner in sorted(grouped, key=lambda item: (int(item.network_address), item.prefixlen)):
+        for target in _remove_duplicate_and_contained(grouped[owner]):
+            if not (target == owner or target.subnet_of(owner)):
+                raise ValidationError("invalid_target", "The effective network is outside its eligible local network.")
+            effective.append(target)
+
+    result = tuple(effective)
+    if address_union_size(result) > MAX_ADDRESSES:
         raise ValidationError("target_too_large", "The effective target union exceeds the address limit.", status=413)
-    return effective
+    return result
 
 
 def parse_nmap_xml(text: str) -> tuple[ActiveHost, ...]:
