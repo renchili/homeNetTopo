@@ -30,12 +30,17 @@ def run_process(argv: list[str]) -> None:
         raise RuntimeError(f"command failed ({completed.returncode}): {' '.join(argv)}")
 
 
-def parse_metadata() -> None:
+def load_metadata() -> dict:
     metadata = json.loads((ROOT / "metadata.json").read_text(encoding="utf-8"))
     required = {"name", "status", "runtime", "collection_api", "active_discovery", "snapshot_policy"}
     missing = required - metadata.keys()
     if missing:
         raise RuntimeError(f"metadata missing keys: {sorted(missing)}")
+    return metadata
+
+
+def parse_metadata() -> None:
+    load_metadata()
 
 
 def consistency_guards() -> None:
@@ -57,23 +62,73 @@ def consistency_guards() -> None:
     missing = [path for path in required_paths if not (ROOT / path).is_file()]
     if missing:
         raise RuntimeError(f"required paths missing: {missing}")
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    import server as server_module
+    from homenettopo import commands, discovery
+
+    metadata = load_metadata()
+    active = metadata["active_discovery"]
+    command_limits = metadata["command_limits"]
+    http_limits = metadata["http_limits"]
+    expected_values = {
+        "bind": (metadata["local_bind"], server_module.BIND_ADDRESS),
+        "port": (metadata["default_port"], server_module.DEFAULT_PORT),
+        "body bytes": (http_limits["max_json_body_bytes"], discovery.MAX_BODY_BYTES),
+        "network count": (active["max_networks_per_request"], discovery.MAX_NETWORKS),
+        "address count": (active["max_addresses_per_request"], discovery.MAX_ADDRESSES),
+        "timeout default": (active["operation_timeout_default_seconds"], discovery.DEFAULT_OPERATION_TIMEOUT),
+        "timeout minimum": (active["operation_timeout_min_seconds"], discovery.MIN_OPERATION_TIMEOUT),
+        "timeout maximum": (active["operation_timeout_max_seconds"], discovery.MAX_OPERATION_TIMEOUT),
+        "host timeout": (active["nmap_host_timeout_seconds"], commands.NMAP_HOST_TIMEOUT_SECONDS),
+        "passive timeout": (command_limits["passive_timeout_seconds"], commands.PASSIVE_TIMEOUT_SECONDS),
+        "stdout limit": (command_limits["stdout_bytes"], commands.STDOUT_LIMIT),
+        "stderr limit": (command_limits["stderr_bytes"], commands.STDERR_LIMIT),
+        "kill grace": (command_limits["kill_grace_seconds"], commands.KILL_GRACE_SECONDS),
+    }
+    mismatches = [name for name, (documented, implemented) in expected_values.items() if documented != implemented]
+    if mismatches:
+        raise RuntimeError(f"metadata/source contract mismatch: {mismatches}")
+
     server = (ROOT / "server.py").read_text(encoding="utf-8")
     api = (ROOT / "docs/api-spec.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    agent = (ROOT / "AGENT.md").read_text(encoding="utf-8")
+    commands_source = (ROOT / "homenettopo/commands.py").read_text(encoding="utf-8")
+    models_source = (ROOT / "homenettopo/models.py").read_text(encoding="utf-8")
+    topology_source = (ROOT / "homenettopo/topology.py").read_text(encoding="utf-8")
+
     for route in ("/api/v1/topology/refresh", "/api/v1/discover", "/api/v1/topology/export"):
-        if route not in server or route not in api or route not in readme:
-            raise RuntimeError(f"route contract mismatch: {route}")
-    for value in ("1024", "16 KiB", "operation_timeout_seconds", "--host-timeout 5s", "-oX"):
-        if value not in api and value not in server:
-            raise RuntimeError(f"public contract value missing: {value}")
+        missing_owners = [name for name, text in (("server", server), ("api", api), ("readme", readme)) if route not in text]
+        if missing_owners:
+            raise RuntimeError(f"route contract mismatch for {route}: {missing_owners}")
+
+    fixed_arguments = ("-sn", "-n", "--max-retries", "--host-timeout", "-oX")
+    for value in fixed_arguments:
+        missing_owners = [name for name, text in (("commands", commands_source), ("api", api), ("readme", readme)) if value not in text]
+        if missing_owners:
+            raise RuntimeError(f"Nmap contract mismatch for {value}: {missing_owners}")
+
+    for value in ("route_inference", "address_membership"):
+        if value not in topology_source or value not in api:
+            raise RuntimeError(f"derived source contract mismatch: {value}")
+    if "ROUTES_TO" not in models_source or "EdgeType.ROUTES_TO" not in topology_source or "routes_to" not in api:
+        raise RuntimeError("routes_to contract is not connected across model, topology, and API")
+
+    if re.search(r"(?m)^fixtures/\s+", agent) or (ROOT / "fixtures").exists():
+        raise RuntimeError("independent fixtures directory is not authorized")
 
 
 def asset_guards() -> None:
     html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    app = (ROOT / "web/app.js").read_text(encoding="utf-8")
     if re.search(r"<script(?![^>]+src=)[^>]*>", html, re.IGNORECASE):
         raise RuntimeError("inline script violates CSP")
     if re.search(r"<style[^>]*>", html, re.IGNORECASE):
         raise RuntimeError("inline style violates CSP")
+    if "innerHTML" in app or "insertAdjacentHTML" in app:
+        raise RuntimeError("HTML string sink is not allowed in the frontend adapter")
     for path in (ROOT / "web").iterdir():
         if not path.is_file():
             continue
