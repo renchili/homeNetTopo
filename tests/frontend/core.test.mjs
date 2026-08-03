@@ -22,7 +22,7 @@ function snapshot(deviceCount = 3) {
   const edges = [
     { id: "host-if", source: "local-host", target: "interface:en0", type: "host_uses_interface", observed: true },
     { id: "if-subnet", source: "interface:en0", target: "subnet:192-168-1-0-24", type: "interface_attached_to_subnet", observed: true },
-    { id: "gateway-subnet", source: "gateway:192.168.1.1", target: "subnet:192-168-1-0-24", type: "gateway_for_subnet", observed: false },
+    { id: "gateway-subnet", source: "gateway:192.168.1.1", target: "subnet:192-168-1-0-24", type: "gateway_for_subnet", observed: true },
     { id: "gateway-up", source: "gateway:192.168.1.1", target: "upstream:default", type: "upstream_of", observed: false },
   ];
   for (let index = 0; index < deviceCount; index += 1) {
@@ -43,23 +43,27 @@ function rectanglesOverlap(a, b) {
   return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 }
 
-test("state reducer maps passive and active success", () => {
-  const passive = reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: snapshot() });
-  assert.equal(passive.phase, UI_STATES.PASSIVE_READY);
-  const active = reduceState(passive, { type: "ACTIVE_SUCCESS", snapshot: { ...snapshot(), mode: "active" } });
-  assert.equal(active.phase, UI_STATES.ACTIVE_READY);
+test("state reducer maps passive, partial, empty and active states", () => {
+  assert.equal(reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: snapshot() }).phase, UI_STATES.PASSIVE_READY);
+  assert.equal(reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: { ...snapshot(0), nodes: snapshot(0).nodes.filter((node) => node.kind !== "device") } }).phase, UI_STATES.EMPTY_READY);
+  assert.equal(reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: { ...snapshot(), partial: true } }).phase, UI_STATES.PARTIAL_READY);
+  assert.equal(reduceState(initialState(), { type: "ACTIVE_SUCCESS", snapshot: snapshot() }).phase, UI_STATES.ACTIVE_READY);
 });
 
 test("API errors map to recovery states", () => {
   assert.equal(mapApiError({ error: { code: "collection_in_progress" } }), UI_STATES.COLLECTION_CONFLICT);
   assert.equal(mapApiError({ error: { code: "invalid_target" } }), UI_STATES.VALIDATION_ERROR);
   assert.equal(mapApiError({ error: { code: "dependency_unavailable" } }), UI_STATES.DEPENDENCY_UNAVAILABLE);
+  assert.equal(mapApiError({ error: { code: "unsupported_platform" } }), UI_STATES.UNSUPPORTED_PLATFORM);
 });
 
-test("layout is deterministic and rectangles do not overlap", () => {
-  const first = layoutTopology(snapshot(12));
-  const second = layoutTopology({ ...snapshot(12), nodes: [...snapshot(12).nodes].reverse(), edges: [...snapshot(12).edges].reverse() });
-  assert.deepEqual(first, second);
+test("layout is pure, deterministic and rectangles do not overlap", () => {
+  const input = snapshot(12);
+  const before = JSON.stringify(input);
+  const first = layoutTopology(input);
+  const reordered = { ...snapshot(12), nodes: [...snapshot(12).nodes].reverse(), edges: [...snapshot(12).edges].reverse() };
+  assert.deepEqual(first, layoutTopology(reordered));
+  assert.equal(JSON.stringify(input), before);
   for (let left = 0; left < first.nodes.length; left += 1) {
     for (let right = left + 1; right < first.nodes.length; right += 1) {
       assert.equal(rectanglesOverlap(first.nodes[left], first.nodes[right]), false, `${first.nodes[left].id} overlaps ${first.nodes[right].id}`);
@@ -75,8 +79,9 @@ test("upstream column moves after compact four-column grid", () => {
   assert.ok(devices.every((node) => node.compact));
 });
 
-test("eligible targets and address totals are stable", () => {
+test("eligible targets and unique address totals are stable", () => {
   const networks = eligibleNetworks(snapshot());
   assert.deepEqual(networks.map((network) => network.cidr), ["192.168.1.0/24"]);
   assert.equal(selectedAddressCount(networks), 256);
+  assert.equal(selectedAddressCount([{ cidr: "10.0.0.0/24" }, { cidr: "10.0.0.0/25" }, { cidr: "10.0.1.0/24" }]), 512);
 });

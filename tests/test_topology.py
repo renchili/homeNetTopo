@@ -9,10 +9,12 @@ from homenettopo.topology import build_snapshot
 
 
 class TopologyTests(unittest.TestCase):
-    def parts(self):
-        interfaces = (InterfaceFact("en0", ("UP",), "physical", (InterfaceAddress("192.168.1.10", 24, "192.168.1.0/24"),)),)
-        routes = (RouteFact("0.0.0.0/0", "192.168.1.1", ("U", "G"), "en0", True),)
-        neighbors = (NeighborFact("192.168.1.20", "02:00:00:00:00:20", "en0", None, True),)
+    def parts(self, network="192.168.1.0/24"):
+        prefix = int(network.split("/")[1])
+        base = network.rsplit(".", 1)[0]
+        interfaces = (InterfaceFact("en0", ("UP",), "physical", (InterfaceAddress(f"{base}.10", prefix, network),)),)
+        routes = (RouteFact("0.0.0.0/0", f"{base}.1", ("U", "G"), "en0", True),)
+        neighbors = (NeighborFact(f"{base}.20", "02:00:00:00:00:20", "en0", None, True),)
         sources = (SourceStatus("interfaces", SourceStatusValue.OK), SourceStatus("routes", SourceStatusValue.OK), SourceStatus("neighbors", SourceStatusValue.OK))
         return interfaces, routes, neighbors, sources
 
@@ -32,6 +34,20 @@ class TopologyTests(unittest.TestCase):
         snapshot = build_snapshot(interfaces=self.parts()[0], routes=self.parts()[1], neighbors=(), sources=self.parts()[3], active_hosts=(ActiveHost("192.168.1.30"),), active_metadata=metadata, collected_at="2026-08-03T00:00:00Z")
         self.assertEqual(snapshot.mode, "active")
         self.assertTrue(any(node.id == "device:192.168.1.30" for node in snapshot.nodes))
+
+    def test_gateway_and_neighbor_evidence_merge_into_one_gateway_node(self):
+        interfaces, routes, _, sources = self.parts()
+        neighbors = (NeighborFact("192.168.1.1", "02:00:00:00:00:01", "en0", "router.local", True),)
+        snapshot = build_snapshot(interfaces=interfaces, routes=routes, neighbors=neighbors, sources=sources, collected_at="2026-08-03T00:00:00Z")
+        gateway = next(node for node in snapshot.nodes if node.id == "gateway:192.168.1.1")
+        self.assertEqual(gateway.label, "router.local")
+        self.assertEqual(gateway.mac_addresses, ("02:00:00:00:00:01",))
+        self.assertFalse(any(node.id == "device:192.168.1.1" for node in snapshot.nodes))
+
+    def test_documentation_network_is_visible_but_not_active_eligible(self):
+        interfaces, routes, neighbors, sources = self.parts("192.0.2.0/24")
+        snapshot = build_snapshot(interfaces=interfaces, routes=routes, neighbors=neighbors, sources=sources, collected_at="2026-08-03T00:00:00Z")
+        self.assertFalse(snapshot.networks[0].eligible_for_active_discovery)
 
 
 if __name__ == "__main__":
