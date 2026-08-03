@@ -50,6 +50,8 @@ def parse_ifconfig(text: str) -> tuple[InterfaceFact, ...]:
             current_lines.append(raw_line)
     if current_name is not None:
         blocks.append((current_name, current_lines))
+    if text.strip() and not blocks:
+        raise ValueError("ifconfig output did not contain recognizable interface blocks")
 
     result: list[InterfaceFact] = []
     for name, lines in blocks:
