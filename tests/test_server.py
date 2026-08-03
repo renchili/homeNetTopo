@@ -6,6 +6,7 @@ import threading
 import unittest
 from unittest import mock
 
+from homenettopo.commands import CommandResult
 from homenettopo.models import ActiveDiscoveryMetadata, TopologySnapshot
 from server import ApiError, AppState, HomeNetTopoServer
 
@@ -161,6 +162,36 @@ class ServerTests(unittest.TestCase):
         with RunningServer() as running:
             status, _, payload = running.request("OPTIONS", "/api/v1/discover")
             self.assertEqual((status, payload["error"]["code"]), (405, "method_not_allowed"))
+
+    def test_empty_successful_command_outputs_are_not_coherent(self):
+        state = AppState(port=8765, nmap_path=None)
+        empty = CommandResult("", "", 0, 1)
+        with (
+            mock.patch("server.platform.system", return_value="Darwin"),
+            mock.patch("server.run_command", side_effect=[empty, empty, empty]),
+            self.assertRaises(ApiError) as raised,
+        ):
+            state.collect_passive_parts()
+        self.assertEqual(raised.exception.code, "collection_failed")
+
+    def test_malformed_interface_output_can_produce_coherent_partial_routes(self):
+        state = AppState(port=8765, nmap_path=None)
+        outputs = (
+            CommandResult("not ifconfig output\n", "", 0, 1),
+            CommandResult(
+                "Routing tables\n\nInternet:\nDestination Gateway Flags Netif Expire\ndefault 192.0.2.1 UGScg en0\n",
+                "",
+                0,
+                1,
+            ),
+            CommandResult("", "", 0, 1),
+        )
+        with mock.patch("server.platform.system", return_value="Darwin"), mock.patch("server.run_command", side_effect=outputs):
+            parts = state.collect_passive_parts()
+        self.assertEqual(len(parts.routes), 1)
+        statuses = {source.type: source.status.value for source in parts.sources}
+        self.assertEqual(statuses["interfaces"], "failed")
+        self.assertEqual(statuses["routes"], "ok")
 
 
 if __name__ == "__main__":
