@@ -90,6 +90,10 @@ def consistency_guards() -> None:
     mismatches = [name for name, (documented, implemented) in expected_values.items() if documented != implemented]
     if mismatches:
         raise RuntimeError(f"metadata/source contract mismatch: {mismatches}")
+    if commands.RFC1918_RANGES != discovery.RFC1918_RANGES:
+        raise RuntimeError("command and discovery RFC1918 allowlists differ")
+    if "RFC 1918" not in metadata.get("network_scope", ""):
+        raise RuntimeError("metadata network scope must explicitly identify RFC 1918")
 
     server = (ROOT / "server.py").read_text(encoding="utf-8")
     api = (ROOT / "docs/api-spec.md").read_text(encoding="utf-8")
