@@ -29,10 +29,12 @@ def _normalize_destination(value: str) -> str:
 
 def parse_routes(text: str) -> tuple[RouteFact, ...]:
     routes: list[RouteFact] = []
+    candidate_lines = 0
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith(("Routing tables", "Internet:", "Destination")):
             continue
+        candidate_lines += 1
         parts = line.split()
         if len(parts) < 4:
             continue
@@ -43,4 +45,6 @@ def parse_routes(text: str) -> tuple[RouteFact, ...]:
         except ValueError:
             continue
         routes.append(RouteFact(normalized, gateway, tuple(flags), interface, destination == "default"))
+    if candidate_lines and not routes:
+        raise ValueError("route output did not contain recognizable IPv4 entries")
     return tuple(sorted(routes, key=lambda item: (not item.is_default, item.destination, item.gateway, item.interface)))
