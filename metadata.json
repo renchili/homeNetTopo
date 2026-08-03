@@ -13,7 +13,7 @@
   "surface": "local web application",
   "local_bind": "127.0.0.1",
   "default_port": 8765,
-  "network_scope": "requested private IPv4 networks equal to or contained by eligible non-tunnel local interface networks",
+  "network_scope": "requested RFC 1918 IPv4 networks equal to or contained by eligible non-tunnel local interface networks",
   "collection_api": {
     "passive_refresh": "POST /api/v1/topology/refresh",
     "active_discovery": "POST /api/v1/discover",
