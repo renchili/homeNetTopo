@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import platform
 import threading
 import urllib.parse
@@ -95,7 +94,10 @@ class AppState:
         for name, spec, parser in collectors:
             try:
                 result = run_command(spec)
-                values[name] = parser(result.stdout)
+                parsed = parser(result.stdout)
+                if name == "interfaces" and not parsed:
+                    raise ValueError("No interface facts were parsed.")
+                values[name] = parsed
             except CommandError as exc:
                 failure_codes.append(exc.code)
                 sources.append(SourceStatus(name, SourceStatusValue.FAILED, "Collection command failed."))
@@ -107,7 +109,7 @@ class AppState:
             else:
                 sources.append(SourceStatus(name, SourceStatusValue.OK, duration_ms=result.duration_ms))
 
-        if not values:
+        if not any(values.get(name) for name in ("interfaces", "routes", "neighbors")):
             if "command_timeout" in failure_codes:
                 raise ApiError(504, "command_timeout", "Passive collection timed out before a coherent snapshot could be produced.")
             raise ApiError(500, "collection_failed", "No coherent passive snapshot could be produced.")
