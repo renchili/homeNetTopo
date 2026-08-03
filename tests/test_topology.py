@@ -2,7 +2,7 @@ import unittest
 
 from homenettopo.discovery import ActiveHost
 from homenettopo.interfaces import InterfaceAddress, InterfaceFact
-from homenettopo.models import ActiveDiscoveryMetadata, SourceStatus, SourceStatusValue
+from homenettopo.models import ActiveDiscoveryMetadata, SourceStatus, SourceStatusValue, WarningItem
 from homenettopo.neighbors import NeighborFact
 from homenettopo.routes import RouteFact
 from homenettopo.topology import build_snapshot
@@ -24,10 +24,34 @@ class TopologyTests(unittest.TestCase):
         self.assertTrue({"local_host", "interface", "subnet", "gateway", "device", "upstream_boundary"}.issubset(kinds))
         membership = next(edge for edge in snapshot.edges if edge.type.value == "member_of")
         self.assertFalse(membership.observed)
+        self.assertIn("address_membership", {source.type for source in snapshot.sources})
+        self.assertIn("route_inference", {source.type for source in snapshot.sources})
+
+    def test_specific_route_creates_routes_to_boundary(self):
+        interfaces, default_routes, neighbors, sources = self.parts()
+        routes = (*default_routes, RouteFact("10.10.0.0/16", "192.168.1.1", ("U", "G"), "en0", False))
+        snapshot = build_snapshot(
+            interfaces=interfaces,
+            routes=routes,
+            neighbors=neighbors,
+            sources=sources,
+            collected_at="2026-08-03T00:00:00Z",
+        )
+        boundary = next(node for node in snapshot.nodes if node.label == "10.10.0.0/16")
+        route_edge = next(edge for edge in snapshot.edges if edge.type.value == "routes_to")
+        self.assertEqual(route_edge.target, boundary.id)
+        self.assertFalse(route_edge.observed)
+        self.assertEqual(route_edge.evidence[0].source, "route_inference")
 
     def test_same_input_is_deterministic(self):
         kwargs = dict(interfaces=self.parts()[0], routes=self.parts()[1], neighbors=self.parts()[2], sources=self.parts()[3], collected_at="2026-08-03T00:00:00Z")
         self.assertEqual(build_snapshot(**kwargs).to_dict(), build_snapshot(**kwargs).to_dict())
+
+    def test_snapshot_id_changes_when_snapshot_content_changes(self):
+        kwargs = dict(interfaces=self.parts()[0], routes=self.parts()[1], neighbors=self.parts()[2], sources=self.parts()[3], collected_at="2026-08-03T00:00:00Z")
+        baseline = build_snapshot(**kwargs)
+        warned = build_snapshot(**kwargs, warnings=(WarningItem("test_warning", "Synthetic warning", "test"),))
+        self.assertNotEqual(baseline.snapshot_id, warned.snapshot_id)
 
     def test_active_evidence_supplements_passive(self):
         metadata = ActiveDiscoveryMetadata(("192.168.1.0/24",), ("192.168.1.0/24",), True, 10, 1, 30)
