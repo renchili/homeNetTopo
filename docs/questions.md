@@ -27,7 +27,7 @@
 | Q-015 | Active validation sequence | RESOLVED | Phase A validates request syntax and absolute safety before commands; Phase B validates local-network containment after fresh passive collection | Nmap is forbidden until both phases pass. |
 | Q-016 | Unsupported-platform capabilities | RESOLVED | Health may work; capabilities report passive false and active unavailable with reason `unsupported_platform` | No collection command is attempted. |
 | Q-017 | Nmap capability disclosure | RESOLVED | Report availability and resolution source only | Full executable path is not exposed to the browser. |
-| Q-018 | Nmap output parser | RESOLVED | XML from stdout parsed with `xml.etree.ElementTree` | Deterministic fixture and version-tolerant structured parsing. |
+| Q-018 | Nmap output parser | RESOLVED | XML from stdout parsed with `xml.etree.ElementTree` | Version-tolerant structured parsing is tested with short inline synthetic XML inputs. |
 | Q-019 | Uncertain topology links | RESOLVED | Evidence, observed/inferred marker, and confidence | Prevents physical-topology overclaiming. |
 | Q-020 | Graph coordinate convention | RESOLVED | Node coordinates are top-left world coordinates | Layout and overlap tests use rectangle bounds consistently. |
 | Q-021 | Upstream graph position | RESOLVED | Dynamically placed after the right edge of the widest device grid | Fixed minimum `x=1160`, otherwise grid-right plus 48. |
