@@ -62,10 +62,12 @@ Nmap XML is parsed from stdout. The application does not enable port, service, v
 
 Validation occurs in two phases:
 
-1. request structure, IPv4 syntax, address classes, body size, count, union size, and operation timeout are checked before commands;
-2. after fresh passive collection, every target must equal or be a subnet of a private network assigned to an eligible non-tunnel local interface.
+1. request structure, canonical IPv4 syntax, RFC 1918 membership, body size, count, union size, and operation timeout are checked before commands;
+2. after fresh passive collection, every target must equal or be a subnet of an RFC 1918 network assigned to an eligible non-tunnel local interface.
 
-Supernets, noncanonical partial-overlap requests, adjacent networks, unrelated private ranges, tunnel-only networks, public ranges, special ranges, more than 32 networks, and more than 1024 unique addresses are rejected before Nmap.
+Only `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16` are eligible address classes. Supernets, noncanonical partial-overlap requests, adjacent networks, unrelated RFC 1918 ranges, tunnel-only networks, public and special ranges, more than 32 networks, and more than 1024 unique addresses are rejected before Nmap.
+
+Exact duplicates and contained targets may be removed only within the same containing local network. Adjacent sibling targets remain separate and are never widened into a new supernet.
 
 | Limit | Value |
 |---|---:|
@@ -107,7 +109,7 @@ The complete contract is in [`docs/api-spec.md`](docs/api-spec.md).
 
 The browser UI provides passive refresh, explicit active discovery, observed and inferred links, evidence and confidence details, deterministic SVG layout, pan and bounded zoom controls, keyboard selection, warnings, recovery states, and local JSON export.
 
-The graph is a logical view, not proof of physical cabling, switching, VLANs, wireless infrastructure, isolated devices, or networks hidden behind other routers.
+Specific IPv4 routes are represented as inferred `routes_to` relationships from a gateway to a destination boundary. The graph is a logical view, not proof of physical cabling, switching, VLANs, wireless infrastructure, isolated devices, or networks hidden behind other routers.
 
 ## Privacy and exclusions
 
