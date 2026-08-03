@@ -3,35 +3,42 @@
 ## Status vocabulary
 
 - `RESOLVED`: current requirement or repository evidence establishes the answer.
-- `DEFAULTED`: implementation may proceed with the stated default, but the choice can be revisited without changing the core product.
+- `DEFAULTED`: implementation may proceed with the stated default, but the choice can be revisited only through a coordinated contract change.
 - `OPEN`: a material product decision is not yet established.
 
 ## Decisions
 
 | ID | Question | Status | Current answer | Source or impact |
 |---|---|---|---|---|
-| Q-001 | What is the primary host platform? | RESOLVED | macOS | User requirement. Parsers and setup target macOS command output. |
-| Q-002 | Where is the interface served? | RESOLVED | Loopback only by default | Local-first privacy and security boundary. |
-| Q-003 | Can loading the page trigger active discovery? | RESOLVED | No | Passive snapshot and active discovery are separate operations. |
-| Q-004 | What active method is permitted by default? | RESOLVED | Nmap host discovery mode only | The first release discovers responsive hosts without inspecting ports or services. |
-| Q-005 | Which targets are eligible? | RESOLVED | Private IPv4 networks associated with eligible local interfaces | Public, loopback, link-local, multicast, unspecified, and oversized ranges are rejected. |
-| Q-006 | What is the initial active address limit? | DEFAULTED | 1024 addresses per request | Prevents accidental large operations; configurable later if source and docs agree. |
+| Q-001 | What is the primary host platform? | RESOLVED | macOS | Parsers, commands, setup, and acceptance target macOS. |
+| Q-002 | Where is the interface served? | RESOLVED | Loopback only on `127.0.0.1` | Remote access is out of scope. |
+| Q-003 | Can loading the page trigger active host discovery? | RESOLVED | No | Page load may collect local OS state but cannot invoke Nmap. |
+| Q-004 | What active method is permitted? | RESOLVED | Nmap `-sn -n` host discovery only | No port, service, vulnerability, or OS scanning. |
+| Q-005 | Which targets are eligible? | RESOLVED | Private IPv4 networks associated with eligible non-tunnel local interfaces | Public, special, unrelated, tunnel-only, and oversized ranges are rejected. |
+| Q-006 | What is the active address limit? | RESOLVED | 1024 unique addresses across at most 32 networks | Enforced before process invocation. |
 | Q-007 | Are cloud services required? | RESOLVED | No | Discovery data and UI remain local. |
-| Q-008 | Are external frontend assets required? | RESOLVED | No | The page must work offline after local files are present. |
-| Q-009 | How are uncertain links represented? | RESOLVED | Explicit evidence, observed/inferred marker, and confidence | Prevents the UI from claiming a proven physical topology. |
-| Q-010 | Is Nmap a mandatory runtime dependency? | RESOLVED | No | Passive discovery remains available; the UI reports when optional active discovery is unavailable. |
-| Q-011 | What implementation dependency posture is preferred? | DEFAULTED | Python standard library and native browser APIs | Keeps setup small; any new dependency requires a documented owner and reason. |
-| Q-012 | Should tunnel interfaces be actively queried automatically? | RESOLVED | No | Tunnel networks may represent remote infrastructure; show them passively and require explicit eligibility rules. |
-| Q-013 | What happens when JSON export is requested before a snapshot exists? | RESOLVED | Return `404 not_found` without collecting data | Export remains side-effect free; the user must first load or refresh the passive topology. |
+| Q-008 | Are external frontend assets required? | RESOLVED | No | The page works offline from repository-owned assets. |
+| Q-009 | How are uncertain links represented? | RESOLVED | Evidence, observed/inferred marker, and confidence | Prevents physical-topology overclaiming. |
+| Q-010 | Is Nmap mandatory? | RESOLVED | No | Passive discovery remains available. |
+| Q-011 | What dependency posture applies? | RESOLVED | Python 3.10+ standard library at runtime; Node 20+ built-in test runner only for frontend development tests | No npm packages or production Node dependency. |
+| Q-012 | Are tunnel networks active targets? | RESOLVED | No | Tunnel facts are shown passively only in the first release. |
+| Q-013 | What happens when export is requested without a snapshot? | RESOLVED | Return `404 not_found` without collecting | Export is side-effect free. |
+| Q-014 | Does the first release perform reverse DNS or online name/vendor lookup? | RESOLVED | No | Existing names in approved command output may be retained; no separate lookup occurs. |
+| Q-015 | Does the first release support user annotations or persistent device names? | RESOLVED | No | Avoids undefined storage, privacy, mutation, and export semantics. |
+| Q-016 | How is passive snapshot refresh controlled? | RESOLVED | Omitted or `refresh=true` performs a new passive collection; `refresh=false` returns the current in-memory snapshot or `404` | No automatic TTL. |
+| Q-017 | How are concurrent collection requests handled? | RESOLVED | One passive or active collection at a time; a second collection returns `409 collection_in_progress` | Failed collections preserve the previous snapshot. |
+| Q-018 | How are browser-originated active requests protected? | RESOLVED | Loopback Host allowlist, custom request header, matching Origin when present, cross-site Fetch Metadata rejection, and no permissive CORS | Covers cross-origin and DNS-rebinding-style requests. |
+| Q-019 | What are the fixed request and process bounds? | RESOLVED | 16 KiB JSON body; active timeout 1–120 seconds, default 30; passive command timeout 5 seconds; stdout 2 MiB; stderr 64 KiB; kill grace 2 seconds | Values are public contract and test boundaries. |
+| Q-020 | What owns the full regression entrypoint? | RESOLVED | `scripts/check.py`, run as `python3 scripts/check.py` | Runs compile checks, Python tests, frontend Node tests when Node is available, and repository consistency guards. |
 
-## Open product questions
+## Deferred product questions
 
-| ID | Question | Why it matters | Safe current behavior |
+| ID | Question | Why it matters | First-release behavior |
 |---|---|---|---|
-| Q-101 | Should the first release support IPv6 topology discovery? | It changes interface parsing, neighbor discovery, graph identity, validation, and API schemas. | Display IPv6 interface facts only if implemented coherently; do not perform active IPv6 discovery in the initial contract. |
-| Q-102 | Should user annotations persist between runs? | Persistence would store local device identifiers and requires a file format, migration rules, privacy controls, and backup behavior. | Keep annotations and topology snapshots in memory only; JSON export is user initiated. |
-| Q-103 | Should the server allow a configurable LAN bind? | Remote access requires a different authentication and browser-security model. | Keep the bind fixed to `127.0.0.1` in the first release. |
-| Q-104 | Should local vendor names be derived from MAC prefixes? | A bundled database increases repository size and needs update/licensing ownership; online lookup conflicts with local-first behavior. | Show MAC addresses without mandatory vendor lookup. |
-| Q-105 | Should discovery results be cached across process restarts? | Persistent cache can become stale and stores private network data. | Use process-memory caching only and expose collection timestamps. |
+| Q-101 | Should IPv6 topology discovery be added? | It changes parsing, identity, validation, and schemas. | IPv4 topology only; no active IPv6 discovery. |
+| Q-102 | Should user annotations be added later? | It requires a state owner, mutation contract, privacy policy, export behavior, and migrations if persisted. | No annotation feature. |
+| Q-103 | Should configurable LAN bind be added? | It requires authentication, authorization, CSRF, TLS/deployment, and remote threat modeling. | Fixed loopback bind. |
+| Q-104 | Should vendor or hostname enrichment be added? | A database or resolver adds licensing, update, privacy, timeout, and failure ownership. | No separate lookup; preserve only names already present in approved evidence. |
+| Q-105 | Should snapshots persist across restarts? | Persistence stores private network identifiers and introduces staleness and migration concerns. | Process memory only. |
 
-Open questions do not authorize speculative implementation. The safe current behavior remains controlling until the user or an approved project plan resolves the item.
+Deferred questions do not authorize speculative implementation. Their first-release behavior remains controlling until the user and all affected contract owners are updated together.
