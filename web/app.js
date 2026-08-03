@@ -78,9 +78,13 @@ function closeDiscoverDialog(restoreState = true) {
   dialogReturnFocus?.focus();
 }
 
+function networkOptionKey(network) {
+  return `${network.cidr}|${network.interface}`;
+}
+
 function selectedNetworks() {
-  const cidrs = [...elements["network-options"].querySelectorAll("input:checked")].map((input) => input.value);
-  return eligibleNetworks(state.snapshot).filter((network) => cidrs.includes(network.cidr));
+  const selectedKeys = new Set([...elements["network-options"].querySelectorAll("input:checked")].map((input) => input.value));
+  return eligibleNetworks(state.snapshot).filter((network) => selectedKeys.has(networkOptionKey(network)));
 }
 
 function updateAddressTotal() {
@@ -97,7 +101,7 @@ function renderNetworkOptions() {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.name = "network";
-    input.value = network.cidr;
+    input.value = networkOptionKey(network);
     input.addEventListener("change", updateAddressTotal);
     const span = document.createElement("span");
     span.textContent = `${network.cidr} via ${network.interface} · ${network.address_count} addresses`;
@@ -109,7 +113,7 @@ function renderNetworkOptions() {
 
 async function runActiveDiscovery(event) {
   event.preventDefault();
-  const networks = selectedNetworks().map((network) => network.cidr);
+  const networks = [...new Set(selectedNetworks().map((network) => network.cidr))];
   const timeout = Number(elements["operation-timeout"].value);
   if (!networks.length || !Number.isInteger(timeout) || timeout < 5 || timeout > 120) {
     elements["dialog-error"].textContent = "Select at least one network and enter a timeout from 5 through 120 seconds.";
@@ -212,7 +216,10 @@ function selectableKeyHandler(event) {
 function renderDetails() {
   const id = state.selectedId;
   if (!id || !state.snapshot) {
-    elements["details-content"].innerHTML = '<p class="muted">Select a node or edge to inspect evidence and confidence.</p>';
+    const message = document.createElement("p");
+    message.className = "muted";
+    message.textContent = "Select a node or edge to inspect evidence and confidence.";
+    elements["details-content"].replaceChildren(message);
     return;
   }
   const item = state.snapshot.nodes.find((node) => node.id === id) ?? state.snapshot.edges.find((edge) => edge.id === id);
