@@ -1,6 +1,6 @@
 # HomeNetTopo Implementation Plan
 
-## Status and ownership
+## Status and authority
 
 This document is the implementation plan for the first runnable HomeNetTopo release.
 
@@ -8,44 +8,40 @@ This document is the implementation plan for the first runnable HomeNetTopo rele
 - Long-term owner: `docs/plan.md`
 - Product authority: `AGENT.md` and `docs/questions.md`
 - Architecture authority: `docs/design.md`
-- Public contract authority: `docs/api-spec.md`
-- Update condition: change this plan whenever scope, ownership, public behavior, limits, or completion criteria change
+- Public API authority: `docs/api-spec.md`
+- Metadata authority: `metadata.json`
 
 This plan is not runtime evidence and does not assert that planned source already exists.
 
 ## Release outcome
 
-The first runnable release must let a macOS user start a loopback-only Python service, open a local web page, inspect a passive logical IPv4 topology, explicitly request bounded private-network host discovery when Nmap is available, inspect evidence and confidence, and export the latest in-memory snapshot as JSON.
+A macOS user can start a loopback-only Python service, explicitly request a passive topology refresh, inspect a logical IPv4 topology, optionally confirm bounded Nmap host discovery, inspect evidence and confidence, and download the latest in-memory snapshot as JSON.
 
-The release must remain useful without Nmap, cloud services, accounts, telemetry, persisted inventories, reverse-DNS enrichment, annotations, online vendor data, external frontend assets, or administrator privileges in the normal passive path.
+The release remains useful without Nmap, cloud services, accounts, telemetry, persistence, annotations, online enrichment, production Node, npm packages, external frontend assets, or administrator privileges in the normal passive path.
 
 ## Fixed first-release decisions
 
-- Supported platform: macOS.
-- Minimum Python: 3.10.
-- Runtime Python dependencies: standard library only.
-- Development-only frontend logic tests: Node 20+ built-in test runner, no npm packages.
-- Bind: `127.0.0.1` only.
-- Default port: `8765`.
-- Page load and passive refresh never invoke Nmap.
-- Active discovery requires explicit confirmation.
-- Active mode: Nmap `-sn -n` host discovery only.
-- Eligible targets: locally visible private IPv4 networks on non-tunnel interfaces.
-- Maximum requested networks: 32.
-- Maximum unique addresses: 1024.
-- Active timeout: default 30 seconds, valid range 1–120 seconds.
-- Maximum request body: 16 KiB.
-- Passive command timeout: 5 seconds.
-- Captured output: stdout 2 MiB, stderr 64 KiB.
-- Timed-out process kill grace: 2 seconds.
-- One passive or active collection at a time.
-- Default topology GET performs passive collection.
-- `refresh=false` and export never collect.
-- Snapshots remain in process memory with no automatic TTL.
-- Failed collection preserves the previous snapshot.
-- No reverse-DNS, online hostname, vendor lookup, user annotations, or persistent naming.
-- Observed facts and inferred relationships remain distinct in API and UI.
-- The UI states that the graph is a best-effort logical view, not a proven physical topology.
+- macOS, Python 3.10+, standard-library production runtime.
+- Repository-owned HTML, CSS, JavaScript, ES modules, and SVG.
+- Node.js 20+ built-in test runner for development-only frontend tests.
+- Bind `127.0.0.1`; default port `8765`.
+- Every GET endpoint is read-only and executes no collection command.
+- Passive refresh: protected `POST /api/v1/topology/refresh`.
+- Active discovery: protected `POST /api/v1/discover`.
+- Both collection POSTs require JSON, `X-HomeNetTopo-Request: 1`, accepted Host, matching Origin when present, and non-cross-site Fetch Metadata when present.
+- One collection at a time; a second collection returns `409 collection_in_progress`.
+- Nmap command: `-sn -n --max-retries 1 --host-timeout 5s -oX -`.
+- Nmap XML is parsed from stdout with `xml.etree.ElementTree`.
+- `operation_timeout_seconds` is the total Nmap process deadline: default 30, range 5–120.
+- Nmap per-host timeout is separately fixed at five seconds.
+- Maximum body 16 KiB, maximum 32 requested networks, maximum 1024 unique addresses.
+- Active targets must equal or be subnets of eligible non-tunnel local networks.
+- Supernets, partial overlaps, adjacent networks, tunnel-only networks, and unrelated private networks are rejected.
+- Snapshots remain in process memory without TTL.
+- Failed operations preserve the previous snapshot.
+- No reverse DNS, online vendor lookup, annotations, persistence, LAN bind, active IPv6, port scan, service scan, or OS scan.
+- Graph node coordinates are top-left world coordinates.
+- The upstream graph column is computed dynamically after the device grid.
 
 ## Planned repository layout
 
@@ -86,7 +82,7 @@ fixtures/
     arp_incomplete.txt
     ifconfig_multi_interface.txt
     ifconfig_utun_point_to_point.txt
-    nmap_host_discovery.txt
+    nmap_host_discovery.xml
     route_default.txt
     route_specific.txt
 scripts/
@@ -100,59 +96,59 @@ docs/
 metadata.json
 ```
 
-No nested application root, generated scan output, runtime inventory, real network identifier, package cache, compiled artifact, test report, or local export belongs in source control.
+No nested project root, real network inventory, runtime export, scan log, cache, test report, compiled output, or secret belongs in source control.
 
 ## Atomic requirement ledger
 
-Plan status vocabulary:
+Status vocabulary:
 
-- `PLANNED`: required and mapped, source not yet present.
-- `BLOCKED`: implementation cannot proceed without a controlling decision or permission.
-- `DONE`: source, test definitions, and documentation are statically consistent; this is not runtime acceptance.
+- `PLANNED`: required and mapped; source is not present yet.
+- `BLOCKED`: cannot proceed without a controlling decision or permission.
+- `DONE`: source, tests, and documentation are statically consistent; this does not mean runtime acceptance passed.
 
-| ID | Requirement | Surface | Primary owner | Test/static owner | Documentation owner | Status |
-|---|---|---|---|---|---|---|
-| HT-001 | Start with Python 3.10+ on macOS and bind to IPv4 loopback | Service | `server.py` | `tests/test_server.py` | `README.md` | PLANNED |
-| HT-002 | Return coherent health on any host and structured unsupported-platform errors for collection | API | `server.py` | `tests/test_server.py` | `docs/api-spec.md` | PLANNED |
-| HT-003 | Execute only typed approved commands without a shell | Backend | `homenettopo/commands.py` | `tests/test_commands.py` | `AGENT.md`, `docs/design.md` | PLANNED |
-| HT-004 | Resolve and canonicalize Nmap safely while using absolute macOS system-tool paths | Backend | `homenettopo/commands.py`, `homenettopo/discovery.py` | `tests/test_commands.py`, `tests/test_discovery.py` | `docs/design.md` | PLANNED |
-| HT-005 | Enforce command timeouts, output limits, process cleanup, and normalized errors | Backend | `homenettopo/commands.py` | `tests/test_commands.py` | `docs/design.md`, `docs/api-spec.md` | PLANNED |
-| HT-006 | Parse macOS interfaces, IPv4 addresses, prefixes, flags, and `utun` point-to-point output | Passive discovery | `homenettopo/interfaces.py` | `tests/test_interfaces.py`, interface fixtures | `docs/design.md` | PLANNED |
-| HT-007 | Parse default and route-specific IPv4 gateways from `netstat` output | Passive discovery | `homenettopo/routes.py` | `tests/test_routes.py`, route fixtures | `docs/design.md` | PLANNED |
-| HT-008 | Parse complete and incomplete ARP entries without fabricating devices | Passive discovery | `homenettopo/neighbors.py` | `tests/test_neighbors.py`, ARP fixtures | `docs/design.md` | PLANNED |
-| HT-009 | Retain names present in approved evidence without separate DNS or online lookup | Evidence | parsers and `homenettopo/topology.py` | parser/topology tests | `AGENT.md`, `docs/api-spec.md` | PLANNED |
-| HT-010 | Produce coherent partial snapshots when one passive source fails | Backend/API | collectors, `homenettopo/topology.py`, `server.py` | parser, topology, and server tests | `docs/api-spec.md` | PLANNED |
-| HT-011 | Validate active targets, timeout, network count, and unique address count before Nmap | Active discovery | `homenettopo/discovery.py` | `tests/test_discovery.py` | `docs/design.md`, `docs/api-spec.md` | PLANNED |
-| HT-012 | Exclude tunnel, public, special, unrelated, and oversized targets | Active discovery | `homenettopo/discovery.py` | `tests/test_discovery.py` | `docs/questions.md` | PLANNED |
-| HT-013 | Invoke only fixed Nmap host-discovery arguments and parse only host-up evidence | Active discovery | `homenettopo/discovery.py` | `tests/test_discovery.py` | `docs/design.md` | PLANNED |
-| HT-014 | Build stable nodes, edges, sources, warnings, confidence, and snapshot metadata | Topology | `homenettopo/models.py`, `homenettopo/topology.py` | `tests/test_models.py`, `tests/test_topology.py` | `docs/api-spec.md` | PLANNED |
-| HT-015 | Merge compatible observations conservatively and retain conflicts as warnings | Topology | `homenettopo/topology.py` | `tests/test_topology.py` | `docs/design.md` | PLANNED |
-| HT-016 | Implement health, capabilities, passive topology, active discovery, and export endpoints | API | `server.py` | `tests/test_server.py` | `docs/api-spec.md` | PLANNED |
-| HT-017 | Implement one collection lock, immediate `409` conflicts, and atomic snapshot replacement | Service state | `server.py` | `tests/test_server.py` | `docs/design.md`, `docs/api-spec.md` | PLANNED |
-| HT-018 | Implement default refresh, read-only `refresh=false`, side-effect-free export, and no snapshot TTL | API/cache | `server.py` | `tests/test_server.py` | `docs/api-spec.md` | PLANNED |
-| HT-019 | Validate Host for every request and reject non-loopback/DNS-rebinding-style values | HTTP security | `server.py` | `tests/test_static_security.py`, `tests/test_server.py` | `AGENT.md`, `docs/api-spec.md` | PLANNED |
-| HT-020 | Protect active POST with content type, custom header, Origin, Fetch Metadata, and no permissive CORS | HTTP security | `server.py`, `web/app.js` | `tests/test_server.py`, `tests/test_web_contract.py` | `docs/api-spec.md` | PLANNED |
-| HT-021 | Enforce body limits, methods, structured errors, and no raw command or filesystem leakage | API | `server.py` | `tests/test_server.py` | `docs/api-spec.md` | PLANNED |
-| HT-022 | Serve local static assets without traversal, symlink escape, directory listing, or external dependency | Web delivery | `server.py`, `web/` | `tests/test_static_security.py`, `tests/test_web_contract.py` | `docs/design.md` | PLANNED |
-| HT-023 | Render deterministic layered SVG topology with pan, zoom, fit, reset, selection, details, evidence, and confidence | Browser UI | `web/core.mjs`, `web/app.js`, `web/styles.css` | Node logic tests and web contract tests | `docs/design.md` | PLANNED |
-| HT-024 | Implement complete loading, empty, partial, dependency, validation, conflict, timeout, request-error, and unsupported states | Browser UI | `web/core.mjs`, `web/app.js`, `web/index.html` | frontend logic and contract tests | `docs/design.md` | PLANNED |
-| HT-025 | Provide keyboard operation, visible focus, dialog focus management, non-gesture graph controls, 200% zoom support, and reduced motion | Accessibility/UI | `web/index.html`, `web/app.js`, `web/styles.css` | frontend contract tests; later browser evidence | `docs/design.md` | PLANNED |
-| HT-026 | Keep network identifiers, logs, caches, exports, and generated output out of source control | Repository/privacy | `.gitignore`, all modules | `scripts/check.py`, repository inspection | `AGENT.md`, `README.md` | PLANNED |
-| HT-027 | Provide deterministic Python and Node tests plus a repository-relative full regression entrypoint | Verification | `tests/`, `scripts/check.py` | self-verifying test entrypoint | `README.md`, `docs/design.md` | PLANNED |
-| HT-028 | Document exact startup, Nmap setup, limits, security behavior, inference limits, and verification only after source exists | Operator docs | `README.md` | documentation consistency guards | `README.md` | PLANNED |
-| HT-029 | Explicitly exclude annotations, reverse DNS, online vendor lookup, persistent cache, LAN bind, and active IPv6 from first release | Scope control | all owners | requirements/documentation guards | `AGENT.md`, `docs/questions.md` | PLANNED |
+| ID | Requirement | Primary owner | Test/static owner | Documentation owner | Status |
+|---|---|---|---|---|---|
+| HT-001 | Start with Python 3.10+ on macOS and bind to IPv4 loopback | `server.py` | `tests/test_server.py` | `README.md` | PLANNED |
+| HT-002 | Health works without collection and capabilities define exact unsupported-platform behavior | `server.py` | `tests/test_server.py` | `docs/api-spec.md` | PLANNED |
+| HT-003 | Execute only typed approved commands with no shell or caller-defined executable | `homenettopo/commands.py` | `tests/test_commands.py` | `AGENT.md`, `docs/design.md` | PLANNED |
+| HT-004 | Resolve Nmap safely and expose only resolution source, never full path | `commands.py`, `discovery.py` | command/discovery tests | `docs/api-spec.md` | PLANNED |
+| HT-005 | Enforce passive deadlines, Nmap operation deadline, output limits, and terminate/kill cleanup | `commands.py` | `tests/test_commands.py` | design/API | PLANNED |
+| HT-006 | Parse macOS interfaces, IPv4 addresses, masks, flags, and `utun` point-to-point output | `interfaces.py` | interface fixtures/tests | design | PLANNED |
+| HT-007 | Parse default and route-specific IPv4 gateways from `netstat` | `routes.py` | route fixtures/tests | design | PLANNED |
+| HT-008 | Parse complete and incomplete ARP records without fabricating devices | `neighbors.py` | ARP fixtures/tests | design | PLANNED |
+| HT-009 | Retain names already present in approved evidence without separate resolution | parsers, `topology.py` | parser/topology tests | AGENT/API | PLANNED |
+| HT-010 | Produce coherent partial passive snapshots while total passive failure preserves prior state | collectors, `topology.py`, `server.py` | parser/topology/server tests | API | PLANNED |
+| HT-011 | Perform Phase A validation before lock or commands | `discovery.py`, `server.py` | discovery/server negative tests | design/API | PLANNED |
+| HT-012 | Perform Phase B containment validation after fresh passive collection | `discovery.py`, `server.py` | exact containment tests | design/API | PLANNED |
+| HT-013 | Reject supernets, partial overlaps, adjacent networks, unrelated private space, tunnels, and special/public ranges | `discovery.py` | boundary matrix | AGENT/questions | PLANNED |
+| HT-014 | Enforce 32-network and 1024-address union limits before Nmap | `discovery.py` | 32/33 and 1024/1025 tests | API | PLANNED |
+| HT-015 | Invoke fixed Nmap XML command only after both validation phases | `discovery.py`, `commands.py` | exact arguments and no-bypass tests | design/API | PLANNED |
+| HT-016 | Parse only host-up address/status evidence from Nmap XML | `discovery.py` | XML fixtures and malformed XML tests | design | PLANNED |
+| HT-017 | Keep total operation timeout separate from fixed Nmap per-host timeout | `discovery.py`, `commands.py` | timeout construction and deadline tests | API/metadata | PLANNED |
+| HT-018 | Build stable nodes, edges, sources, networks, warnings, confidence, and active metadata | `models.py`, `topology.py` | model/topology tests | API | PLANNED |
+| HT-019 | Merge compatible evidence conservatively and retain conflicts visibly | `topology.py` | conflict and determinism tests | design | PLANNED |
+| HT-020 | Implement read-only health, capabilities, topology, and export GET endpoints | `server.py` | prove no command invocation | API | PLANNED |
+| HT-021 | Implement protected passive-refresh POST that never invokes Nmap | `server.py`, collectors | server tests | API/README | PLANNED |
+| HT-022 | Implement protected active-discovery POST with Phase A, passive collection, Phase B, then Nmap | `server.py`, `discovery.py` | server/discovery tests | API | PLANNED |
+| HT-023 | Serialize collection with one lock and immediate `409` conflicts | `server.py` | concurrency tests | design/API | PLANNED |
+| HT-024 | Atomically replace successful snapshots and preserve prior state on every failure path | `server.py` | snapshot lifecycle tests | design/API | PLANNED |
+| HT-025 | Validate Host for every request and reject DNS-rebinding-style values | `server.py` | static-security/server tests | AGENT/API | PLANNED |
+| HT-026 | Protect both collection POSTs with custom header, Origin, Fetch Metadata, content type, and no CORS/preflight bypass | `server.py`, `web/app.js` | positive/negative browser-boundary tests | API | PLANNED |
+| HT-027 | Enforce body limits, methods, error envelopes, and no sensitive command/path leakage | `server.py` | server tests | API | PLANNED |
+| HT-028 | Serve only contained local assets with traversal, decoding, symlink, MIME, and listing protection | `server.py` | static-security tests | design | PLANNED |
+| HT-029 | Render deterministic layered SVG topology with dynamic upstream placement and no rectangle overlap | `web/core.mjs`, `web/app.js` | Node layout tests | design | PLANNED |
+| HT-030 | Implement complete loading, empty, partial, unavailable, validation, conflict, timeout, request-error, and unsupported states | `core.mjs`, `app.js`, `index.html` | Node and contract tests | design | PLANNED |
+| HT-031 | Provide keyboard operation, focus management, non-gesture controls, 200% zoom support, and reduced motion | web owners | contract tests plus later browser evidence | design | PLANNED |
+| HT-032 | Provide deterministic Python and Node tests and a full repository-relative regression entrypoint | `tests/`, `scripts/check.py` | self-verifying entrypoint | README/design | PLANNED |
+| HT-033 | Keep runtime/private/generated data out of source control | `.gitignore`, all owners | regression hygiene stage | AGENT/README | PLANNED |
+| HT-034 | Document exact implementation only after matching source exists | README and docs | consistency guards | README | PLANNED |
+| HT-035 | Enforce first-release exclusions across metadata, model, API, UI, and tests | all owners | requirements/contract guards | AGENT/questions | PLANNED |
 
-No requirement is currently blocked. Deferred questions use the fixed first-release behavior in `docs/questions.md`.
+No requirement is currently blocked.
 
-## Package 1: repository foundation and domain model
+## Package 1: repository foundation and model
 
-Create:
-
-- `.gitignore` covering macOS, Python, environment, cache, log, export, local inventory, Node cache, and generated-output paths;
-- `homenettopo/__init__.py` with application version;
-- `homenettopo/models.py` with validated dataclasses and enums;
-- `tests/__init__.py`, fixture directories, and initial model tests;
-- `scripts/check.py` skeleton that fails clearly until required test owners exist.
+Create `.gitignore`, package/test roots, `models.py`, initial synthetic fixtures, and `scripts/check.py` skeleton.
 
 Model owners:
 
@@ -171,24 +167,21 @@ Model rules:
 
 - RFC 3339 UTC timestamps;
 - schema version independent from application version;
-- deterministic node and edge identifiers;
-- deterministic serialization order;
-- validated kinds, edge types, confidence, and source statuses;
-- every edge endpoint must exist;
-- no annotation fields in schema version `1`;
-- names are evidence-backed strings only, not enrichment results.
+- deterministic IDs and serialization order;
+- validated node kinds, edge types, confidence, and source statuses;
+- every edge endpoint exists;
+- no annotation or enrichment fields in schema version `1`;
+- active metadata distinguishes operation timeout, host timeout, requested targets, and effective collapsed targets.
 
 Completion gate:
 
-- every public field in `docs/api-spec.md` has one model or serialization owner;
-- tests cover valid serialization, enum rejection, duplicate IDs, missing edge endpoints, timestamp shape, and deterministic output;
-- fixtures contain only documentation-reserved addresses and locally administered synthetic MACs.
+- every API field has one owner;
+- tests reject invalid enum values, duplicate IDs, missing endpoints, malformed timestamps, and unstable ordering;
+- fixtures use documentation-reserved IPs and synthetic locally administered MACs.
 
-## Package 2: approved command runner and passive collectors
+## Package 2: commands and passive collectors
 
-Implement typed command specifications in `homenettopo/commands.py`.
-
-Approved commands:
+Implement typed command specifications:
 
 ```text
 /sbin/ifconfig -a
@@ -196,237 +189,196 @@ Approved commands:
 /usr/sbin/arp -an
 ```
 
-The command API accepts a typed specification, not caller-defined executable and arguments. It disables shell execution, bounds environment influence, enforces timeout/output limits, canonicalizes executable paths, and normalizes missing executable, non-zero exit, timeout, termination, truncation, and decoding failures.
+The runner accepts only typed specifications, disables shell execution, bounds environment influence, enforces deadlines and output caps, performs terminate/kill cleanup, and normalizes missing executable, non-zero exit, timeout, truncation, and decoding failures.
 
-Implement pure parsers:
-
-- `interfaces.py`: interface blocks, flags, IPv4 addresses, hexadecimal netmasks, point-to-point peers, and `utun` output;
-- `routes.py`: destination, gateway, flags, interface, default route, and route-specific evidence;
-- `neighbors.py`: address, optional name from ARP text, MAC normalization, interface, incomplete entry, duplicates, and malformed-line warnings.
-
-No parser initiates DNS or online lookup.
+Parsers remain pure over fixture text where practical.
 
 Completion gate:
 
-- parser and invocation logic are separable;
-- incomplete lines produce warnings rather than fabricated facts;
-- tests cover multiple addresses, physical/virtual/tunnel interfaces, missing route, incomplete ARP, duplicate ARP, malformed text, timeout, kill escalation, output truncation, absolute system paths, and generic-command rejection.
+- caller-defined executable/arguments are impossible through the public command API;
+- tests cover physical, virtual, and tunnel interfaces; multiple addresses; missing route; incomplete and duplicate ARP; malformed lines; timeouts; kill escalation; truncation; and absolute paths.
 
-## Package 3: active target validator and Nmap adapter
+## Package 3: active validation and Nmap XML
 
-Implement two layers in `homenettopo/discovery.py`:
+### Phase A
 
-1. pure target eligibility and request validation;
-2. Nmap resolution, fixed argument construction, and host-up parsing.
+Pure validation before lock or commands:
 
-Validation order:
+- request object and body size;
+- 1–32 strings;
+- canonical IPv4 syntax;
+- disallowed address classes;
+- absolute union limit;
+- total operation timeout range.
 
-1. validate body structure;
-2. require 1–32 network strings;
-3. parse canonical IPv4 networks;
-4. reject loopback, link-local, multicast, unspecified, public, reserved-only, unrelated private, and tunnel-only networks;
-5. collapse overlaps;
-6. calculate unique addresses;
-7. reject more than 1024 addresses;
-8. validate timeout from 1 through 120 seconds, default 30;
-9. resolve Nmap;
-10. construct arguments only from canonical validated values.
+### Phase B
 
-Nmap resolution order and canonicalization follow `docs/design.md`. Arguments are fixed to host discovery without name, port, or service resolution.
+After fresh passive collection under lock:
+
+- derive eligible non-tunnel local networks;
+- require each target to be equal to or a subnet of one eligible local network;
+- reject supernets, partial overlaps, adjacent ranges, tunnel-only ranges, and unrelated private ranges;
+- collapse duplicate and contained targets;
+- recalculate final union.
+
+### Nmap
+
+Resolution order follows `docs/design.md`. Public capabilities expose resolution source only.
+
+Fixed command:
+
+```text
+<canonical-nmap-path> -sn -n --max-retries 1 --host-timeout 5s -oX - <effective-targets...>
+```
+
+The subprocess runner applies `operation_timeout_seconds` as the total deadline. XML is parsed with `xml.etree.ElementTree`; only up-host status and address elements become evidence.
 
 Completion gate:
 
-- exact 1024 and 1025 address boundaries tested;
-- exact 32 and 33 network boundaries tested;
-- overlapping network deduplication tested;
-- tunnel and unrelated private networks rejected;
-- missing, non-executable, and canonicalized Nmap paths tested;
-- approved arguments tested exactly;
-- malformed output and timeout normalized;
-- no HTTP path bypasses the validator.
+- equal and contained targets pass;
+- supernet, partial-overlap, adjacent, unrelated, tunnel, public, special, 1025-address, and 33-network cases fail;
+- no Nmap resolution or invocation occurs before both phases pass;
+- XML success, malformed XML, missing status/address, timeout, and unavailable executable cases are covered.
 
-## Package 4: topology construction and provenance
-
-Implement deterministic transformation in `homenettopo/topology.py`.
+## Package 4: topology construction
 
 Construction order:
 
-1. local-host node;
-2. interface nodes and host-to-interface edges;
-3. subnet nodes and interface-to-subnet edges;
-4. gateway nodes from route evidence;
-5. neighbor and active device nodes;
-6. inferred address-membership edges;
-7. upstream boundary nodes and route edges;
-8. compatible evidence merge;
-9. conflict and partial-source warnings;
-10. confidence calculation;
-11. deterministic sorting.
+1. local host;
+2. interfaces and host-to-interface edges;
+3. subnets and interface-to-subnet edges;
+4. gateways from route evidence;
+5. passive and active devices;
+6. inferred address membership;
+7. upstream boundaries;
+8. conservative merges;
+9. conflict and source warnings;
+10. confidence;
+11. deterministic ordering.
 
-Required invariants:
+Invariants:
 
 - every edge endpoint exists;
 - inferred membership remains inferred;
-- gateway/device identities merge only with compatible evidence;
+- gateway/device merge requires compatible evidence;
 - conflicting names and MACs remain inspectable;
 - active evidence supplements passive evidence;
-- no reverse-DNS or annotation fields appear;
-- repeated construction from the same normalized input produces identical JSON apart from explicit snapshot identity/time fields.
-
-Completion gate:
-
-- tests cover empty neighbors, multi-interface, multiple subnet, tunnel, gateway merge, active/passive merge, conflicting evidence, partial sources, disconnected components, and deterministic order;
-- every confidence value maps to an evidence rule documented in code and design.
+- repeated normalized input yields identical JSON apart from explicit snapshot ID/time.
 
 ## Package 5: loopback HTTP service
 
-Implement `server.py` using the Python standard library.
+Startup:
 
-Startup responsibilities:
+- parse port and optional Nmap path;
+- reject non-loopback bind;
+- create Host allowlist from actual port;
+- initialize collection lock and snapshot owner;
+- serve API/static routes;
+- stop cleanly.
 
-- parse documented port and optional Nmap path;
-- reject non-loopback bind configuration;
-- create actual-port Host allowlist;
-- initialize one collection lock and latest-snapshot owner;
-- serve API and static routes;
-- stop cleanly on interruption.
+Request pipeline for collection POSTs:
 
-Request pipeline:
+1. request ID;
+2. Host validation;
+3. method/path routing;
+4. custom header, Origin, Fetch Metadata, content type;
+5. body limit and JSON parse;
+6. endpoint-specific pre-command validation;
+7. acquire collection lock;
+8. run collection flow;
+9. atomically publish success/partial result;
+10. release lock and serialize response.
 
-1. assign local request ID;
-2. validate Host;
-3. route path and method;
-4. for active POST, validate content type, custom header, Origin, and Fetch Metadata;
-5. enforce request-body limit;
-6. acquire collection lock when collection is required;
-7. execute collection and atomically publish success/partial result;
-8. normalize response and release the lock.
+Endpoint matrix:
 
-Endpoint behavior:
-
-| Endpoint | Collection | Snapshot behavior |
+| Endpoint | Commands | State mutation |
 |---|---|---|
 | `GET /api/v1/health` | none | none |
-| `GET /api/v1/capabilities` | platform and executable checks | none |
-| `GET /api/v1/topology` | passive | replace on success/partial success |
-| `GET /api/v1/topology?refresh=true` | passive | replace on success/partial success |
-| `GET /api/v1/topology?refresh=false` | none | current or `404` |
-| `POST /api/v1/discover` | fresh passive plus active | replace only on full active success |
-| `GET /api/v1/topology/export` | none | download current or `404` |
-
-Concurrency behavior:
-
-- one collection at a time;
-- second collection returns `409 collection_in_progress` immediately;
-- no waiting or queue;
-- failed requests preserve previous snapshot;
-- active failure does not publish intermediate passive data.
+| `GET /api/v1/capabilities` | executable metadata check only; no discovery | none |
+| `GET /api/v1/topology` | none | none |
+| `POST /api/v1/topology/refresh` | passive only | replace on success/coherent partial |
+| `POST /api/v1/discover` | passive then validated Nmap | replace only on active success |
+| `GET /api/v1/topology/export` | none | none |
 
 Completion gate:
 
-- tests cover every documented success and error status;
-- passive endpoint proves Nmap is never invoked;
-- active endpoint proves validation occurs before lock-owned process invocation;
-- invalid Host, mismatched Origin, cross-site Fetch Metadata, missing custom header, CORS preflight, wrong content type, large body, invalid query, concurrency, snapshot preservation, and export behavior are tested;
-- error payloads contain no raw command, stderr, environment, or filesystem leakage.
+- tests prove every GET is command-free;
+- both POSTs enforce browser boundary;
+- passive refresh never calls Nmap;
+- active request cannot reach Nmap before Phase A and Phase B;
+- active failure does not publish intermediate passive data;
+- invalid Host/origin/header/content type/body/method/query, concurrency, unsupported platform, timeout, and export cases are covered.
 
-## Package 6: static delivery and browser interface
+## Package 6: static delivery and browser UI
 
 ### Static delivery
 
-`server.py` serves only canonical regular files from `web/`.
-
-Tests cover:
-
-- raw and encoded traversal;
-- repeated decoding attempts;
-- NUL bytes and alternate separators;
-- symlink escape;
-- directory paths and listing;
-- missing files;
-- explicit MIME types;
-- required security headers;
-- absence of permissive CORS.
+Tests cover raw and encoded traversal, repeated decoding, NUL bytes, separator ambiguity, symlink escape, directories, missing files, MIME types, security headers, and no CORS.
 
 ### Page structure
 
 ```text
 header
-  product title
-  snapshot timestamp and mode
-  passive refresh
-  active discovery
-  export JSON
+  title, timestamp/mode, passive refresh, active discover, export
 status region
-  capability and source status
-  topology limitation
-  warning/error summary
+  capability, limitation, source warnings, error summary
 main
-  graph toolbar
-  SVG topology canvas
-  details panel
-active discovery dialog
-  eligible network checkboxes
-  unique address total
-  timeout input
-  confirm/cancel
+  graph toolbar, SVG canvas, details panel
+active dialog
+  eligible targets, address total, operation timeout, confirm/cancel
 ```
+
+Initial load calls protected passive-refresh POST.
 
 ### Pure frontend owner
 
-`web/core.mjs` owns:
+`web/core.mjs` owns state reduction, API mapping, target display, deterministic graph layout, selection, truncation, compact mode, and export filename.
 
-- UI state reducer;
-- API response/error mapping;
-- network eligibility presentation;
-- deterministic graph layout;
-- selection state;
-- label truncation;
-- compact-mode choice;
-- export filename logic.
+### Coordinate system and layout
 
-Node built-in tests execute these functions directly.
-
-### Deterministic layout
-
-Left-to-right columns:
+All node coordinates are top-left world coordinates.
 
 ```text
-local host          x = 0
-interfaces          x = 240
-subnets             x = 520
-gateways/devices    x = 820+
-upstream boundaries x = 1160
+node_width = 180
+node_height = 72
+horizontal_gap = 48
+vertical_gap = 28
+column_stride = 228
+host_x = 0
+interface_x = 240
+subnet_x = 520
+device_start_x = 820
+minimum_upstream_x = 1160
 ```
 
-Rules:
+Three device columns are used by default and four for more than 30 devices in a subnet.
 
-- node size 180 × 72 world units;
-- minimum gaps 48 horizontal and 28 vertical;
-- stable interface/CIDR/address sorting;
-- one expandable vertical lane per subnet;
-- gateway first, then devices in a three-column grid;
-- more than 30 devices uses four-column compact mode;
-- disconnected components receive separate lanes;
-- fit view adds 48 world units padding;
-- layout test asserts determinism and no node overlap.
+```text
+device_grid_right = device_start_x + (column_count - 1) * column_stride + node_width
+upstream_x = max(minimum_upstream_x, device_grid_right + horizontal_gap)
+```
 
-### Visual rules
+Each subnet has an expandable vertical lane. Disconnected components receive separate lanes. Fit adds 48 units padding.
+
+Node tests prove deterministic output and non-overlapping rectangles for normal, compact, disconnected, reordered-input, and upstream-node cases.
+
+### Visual and interaction rules
 
 - system UI font;
-- base text 16 px, supporting text no smaller than 13 px;
-- spacing scale 4/8/12/16/24/32 px;
+- 16 px base text, 13 px minimum supporting text;
+- spacing 4/8/12/16/24/32 px;
 - visible 3 px focus outline with 2 px offset;
-- solid observed edges;
-- dashed inferred edges plus textual explanation;
-- selected state uses outline/shape as well as color;
-- responsive graph/details split with stacked narrow layout;
-- no horizontal page overflow at 200 percent zoom;
-- reduced-motion preference disables nonessential transitions.
+- observed edges solid, inferred edges dashed plus textual explanation;
+- selection not color-only;
+- desktop split and narrow stacked layout;
+- no horizontal page overflow at 200% zoom;
+- reduced motion disables nonessential transitions;
+- pan and pointer-centered bounded zoom;
+- zoom-in/out, fit, and reset buttons;
+- focused graph items selectable with Enter/Space;
+- Escape closes dialog or clears selection.
 
-### UI states
-
-Required states:
+Required UI states:
 
 ```text
 BOOT
@@ -444,100 +396,19 @@ REQUEST_ERROR
 UNSUPPORTED_PLATFORM
 ```
 
-State transitions and focus behavior follow `docs/design.md`. Duplicate active submit is disabled; Escape closes dialog or clears selection; Enter/Space selects focused graph items; zoom and fit have buttons in addition to gestures.
+## Package 7: verification, documentation, and hygiene
 
-Completion gate:
-
-- no required asset or request leaves loopback origin;
-- frontend adds `X-HomeNetTopo-Request: 1` to active POST;
-- copy distinguishes logical inference from physical certainty;
-- all controls have names, visible focus, disabled reasons, and keyboard paths;
-- long labels, addresses, warnings, and evidence wrap or scroll in their owner;
-- Python static contract tests verify local assets, CSP compatibility, IDs/hooks, labels, and external URL absence;
-- Node tests verify state transitions, error mapping, layout, selection, and compact mode;
-- browser interaction remains separately executed acceptance evidence.
-
-## Package 7: regression, documentation, and repository hygiene
-
-Implement `scripts/check.py` as the repository-relative full static regression entrypoint.
-
-Normal command:
-
-```text
-python3 scripts/check.py
-```
-
-Required stages:
-
-1. compile Python source with non-zero failure behavior;
-2. parse `metadata.json`;
-3. run Python `unittest` suite;
-4. run repository/documentation path and public-contract consistency guards;
-5. scan frontend assets for external URLs and inline CSP violations;
-6. run `node --test tests/frontend/core.test.mjs` with Node 20+;
-7. scan tracked paths for prohibited runtime and private artifacts;
-8. print a stage summary and exit non-zero on any required failure.
-
-A documented `--python-only` developer mode may skip Node but must print `NOT RUN` and cannot be used as full-regression or release evidence.
-
-Update `README.md`, `metadata.json`, `docs/design.md`, `docs/api-spec.md`, and `docs/questions.md` to match exact implementation.
-
-README after source exists must include:
-
-- supported macOS and Python versions;
-- production runtime versus development test dependencies;
-- exact startup options and loopback URL;
-- optional Nmap setup and resolution behavior;
-- passive versus active behavior;
-- fixed request, timeout, network, and address limits;
-- Host/origin boundary at an operator-appropriate level;
-- snapshot refresh and export behavior;
-- privacy, no enrichment, no annotation, and no persistence behavior;
-- topology inference limitations;
-- exact Python, Node, and full regression commands;
-- manual browser and real-network checks labeled as manual evidence.
-
-Completion gate:
-
-- no real addresses, hostnames, MACs, logs, exports, caches, generated reports, or build output committed;
-- documentation has no implemented or verified claim without matching path/evidence;
-- `metadata.json.status` changes from `bootstrap` only when runnable source exists;
-- repository-relative commands and paths work independent of current directory where documented;
-- CI, browser, runtime, or release success is not claimed without exact-revision evidence.
-
-## API implementation matrix
-
-| Contract area | Source owner | Required tests |
-|---|---|---|
-| Host boundary | `server.py` | valid loopback forms; missing, malformed, alternate-domain, and DNS-rebinding-style Host |
-| Origin boundary | `server.py`, `web/app.js` | custom header, matching/mismatched Origin, Fetch Metadata, no CORS, OPTIONS rejection |
-| Error envelope | `server.py` | each status/error code, request ID, no sensitive leakage |
-| Health | `server.py` | no collection and cross-platform platform reporting |
-| Capabilities | `server.py`, `discovery.py` | Nmap present/absent, exact public limits, unsupported platform |
-| Passive topology | collectors, `topology.py`, `server.py` | success, coherent partial, total failure, no Nmap, collection conflict |
-| Cached topology | `server.py` | `refresh=false` hit/miss, no collection, no TTL mutation |
-| Active discovery | `discovery.py`, `topology.py`, `server.py` | success, all validation failures, dependency absence, timeout, conflict, snapshot preservation |
-| Export | `server.py` | latest download, no snapshot, headers, no collection |
-| Static assets | `server.py` | containment, MIME, headers, listing/traversal/symlink rejection |
-| Node/edge model | `models.py`, `topology.py` | exact fields, references, evidence, confidence, deterministic order |
-
-## Verification strategy
-
-### Python deterministic suite
+### Python suite
 
 ```text
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Tests use injected command adapters, synthetic normalized evidence, fixture text, and ephemeral local ports. They must not inspect or probe the test machine's real LAN.
-
-### Frontend logic suite
+### Frontend suite
 
 ```text
 node --test tests/frontend/core.test.mjs
 ```
-
-No npm package install is required. The suite covers pure state, error mapping, graph layout, overlap avoidance, compact mode, selection, and deterministic sorting.
 
 ### Full regression
 
@@ -545,60 +416,74 @@ No npm package install is required. The suite covers pure state, error mapping, 
 python3 scripts/check.py
 ```
 
-A successful full regression requires all required stages, including Node tests, to complete with a zero exit status.
+Required stages:
 
-### Separate acceptance evidence
+1. compile Python source;
+2. parse `metadata.json`;
+3. run Python tests;
+4. run path and public-contract consistency guards;
+5. scan frontend assets for external URLs and CSP violations;
+6. run Node tests with Node 20+;
+7. scan tracked paths for prohibited runtime/private artifacts;
+8. print stage summary and exit non-zero on any required failure.
 
-Formal project acceptance later requires exact-revision evidence for:
+A `--python-only` developer mode may report Node as `NOT RUN` but cannot be used as full-regression or release evidence.
 
-- startup on supported macOS;
-- health, capabilities, passive refresh, cached read, export, and errors;
-- invalid Host and cross-origin active request rejection;
-- Nmap-unavailable behavior;
-- one authorized bounded active discovery on an eligible test network;
-- collection conflict behavior;
-- graph pan, zoom, fit, reset, selection, details, keyboard operation, dialog focus, error recovery, reduced motion, and 200-percent zoom;
-- representative Wi-Fi/Ethernet, tunnel, empty-neighbor, partial-source, and timeout states where environments permit.
+README after implementation must include exact startup, optional Nmap setup, resolution-source behavior, protected passive refresh, active confirmation, containment rule, operation and host timeout distinction, limits, snapshot lifecycle, privacy, exclusions, topology limitations, and exact verification commands.
 
-The plan defines these checks but does not claim they have run.
+## API implementation matrix
+
+| Area | Source owner | Required tests |
+|---|---|---|
+| Host boundary | `server.py` | accepted loopback forms; missing, malformed, alternate-domain, IPv6-literal, rebinding-style values |
+| Collection origin boundary | `server.py`, `app.js` | header, Origin, Fetch Metadata, no CORS, OPTIONS rejection for both POSTs |
+| Health/capabilities | `server.py`, `discovery.py` | supported/unsupported platform; Nmap present/absent; source without full path |
+| Read-only topology/export | `server.py` | hit/miss, no command, no state mutation |
+| Passive refresh | collectors, topology, server | success, coherent partial, total failure, timeout, conflict, no Nmap |
+| Phase A | discovery/server | malformed body, count, syntax, special/public, absolute union, timeout |
+| Phase B | discovery/server | equal, contained, supernet, partial overlap, adjacent, unrelated, tunnel |
+| Nmap | discovery/commands | exact XML arguments, total deadline, host timeout, XML parsing, unavailable/malformed/timeout |
+| Snapshot lifecycle | server | atomic replacement, prior-state preservation, no intermediate active publication |
+| Static assets | server | containment, decoding, MIME, headers, listing/symlink rejection |
+| Graph | core.mjs | coordinate convention, dynamic upstream, no overlap, compact mode, deterministic order |
 
 ## Risk register
 
 | Risk | Impact | Planned control |
 |---|---|---|
-| macOS output varies by release and interface | missed evidence | fixture families, tolerant parsers, source warnings |
-| ARP cache is incomplete or stale | missing devices | timestamps, source labels, no completeness claim |
-| Tunnel routes resemble local LANs | unintended remote discovery | passive-only tunnel policy and validator rejection |
-| Large private ranges cause long operations | delay or broad discovery | 32-network and 1024-address limits, bounded timeout |
-| Browser reaches loopback through malicious origin/Host | unauthorized discovery request | Host allowlist, custom header, Origin/Fetch Metadata checks, no CORS |
-| Concurrent collection corrupts or races snapshot | inconsistent output | one collection lock and atomic replacement |
-| Nmap absent | active discovery unavailable | passive-first product and capability state |
-| Child process hangs or produces large output | resource exhaustion | timeout, output caps, terminate/kill sequence |
-| Device evidence conflicts | wrong identity merge | conservative keys and visible warnings |
-| SVG becomes unreadable with many nodes | poor usability | deterministic lanes, compact mode, pan/zoom/fit |
-| Static server exposes unintended files | local data exposure | canonical web root, symlink containment, no listing |
-| CSP and assets diverge | broken or weakened page | external/inline asset guards and header tests |
-| Documentation overstates readiness | false acceptance | planned/bootstrap status and exact-evidence rules |
+| macOS output variation | missed evidence | fixture families, tolerant parsers, warnings |
+| Stale/incomplete ARP | missing devices | timestamps, evidence labels, no completeness claim |
+| Target supernet or partial overlap | discovery outside attached LAN | explicit subnet containment and negative tests |
+| Tunnel route resembles LAN | unintended remote probe | tunnel exclusion in Phase B |
+| Large request | delay/broad probe | count, union, body, and timeout limits |
+| Cross-origin loopback trigger | unauthorized command execution | all collection routes protected POSTs; GETs read-only |
+| Nmap human-output variation | parser instability | XML stdout and standard-library parser |
+| Timeout ambiguity | misleading deadline | total operation timeout separate from fixed host timeout |
+| Concurrent collection | snapshot race | one lock and atomic replacement |
+| Device/upstream layout overlap | unusable graph | top-left convention and dynamic upstream calculation |
+| Static-file escape | local exposure | canonical root and negative tests |
+| Documentation overclaim | false readiness | bootstrap/planned status and exact-evidence rules |
 
 ## Static completion criteria
 
-Generation work is statically complete only when:
+Generation is statically complete only when:
 
-1. every ledger row is `DONE` or explicitly `BLOCKED` by a controlling decision;
-2. every planned source owner exists with one clear responsibility;
-3. models, collectors, topology, API, static delivery, frontend, tests, scripts, and documentation agree;
-4. page load and passive refresh cannot invoke Nmap;
-5. all active paths pass Host/origin and target validation before process invocation;
-6. one collection lock and atomic snapshot semantics are implemented and tested;
-7. refresh, cache, failure preservation, and export behavior exactly match the API contract;
-8. topology provenance and confidence remain visible from evidence through JSON and UI;
-9. reverse DNS, online enrichment, annotations, persistence, LAN bind, and active IPv6 remain absent;
-10. every documented API and UI state has source and test ownership;
-11. static containment and security headers are implemented and tested;
-12. keyboard, focus, non-gesture graph controls, responsive layout, and reduced motion are implemented;
-13. Python tests, Node tests, and `scripts/check.py` are defined and consistent;
-14. repository hygiene excludes private and generated runtime data;
-15. README commands correspond to source that exists;
-16. runtime, browser, CI, and real-network evidence gaps are reported without being presented as passed.
+1. every ledger row is `DONE` or explicitly `BLOCKED`;
+2. every source/test/document owner exists;
+3. all GET routes are read-only and command-free;
+4. both collection POSTs enforce Host and origin boundary;
+5. Phase A runs before lock/commands and Phase B runs after fresh passive evidence;
+6. target containment rejects supernets, partial overlaps, adjacent ranges, tunnels, and unrelated ranges;
+7. no Nmap resolution/invocation occurs before both validation phases pass;
+8. Nmap uses XML and timeout semantics remain distinct;
+9. collection lock and snapshot replacement/preservation are implemented and tested;
+10. topology evidence and confidence remain visible through API and UI;
+11. graph coordinates are top-left, upstream is dynamic, and rectangle overlap tests pass statically;
+12. every UI state and accessibility rule has source and tests;
+13. static containment and restrictive headers are implemented and tested;
+14. Python, Node, and full-regression entrypoints agree;
+15. first-release exclusions remain absent from model/API/UI;
+16. README commands correspond to existing source;
+17. runtime, browser, CI, and real-network evidence gaps are not presented as passed.
 
-Static completion under the generation workflow is not formal acceptance or release readiness.
+Static completion is not formal runtime acceptance or release readiness.
