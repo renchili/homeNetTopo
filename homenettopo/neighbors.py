@@ -6,8 +6,6 @@ import ipaddress
 import re
 from dataclasses import dataclass
 
-_ARP_RE = re.compile(r"^\?(?:\s+\((?P<address>[^)]+)\)|\s+\((?P<name>[^)]+)\))")
-
 
 @dataclass(frozen=True)
 class NeighborFact:
@@ -24,10 +22,12 @@ def _normalize_mac(value: str) -> str:
 
 def parse_neighbors(text: str) -> tuple[NeighborFact, ...]:
     items: dict[tuple[str, str | None], NeighborFact] = {}
+    candidate_lines = 0
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
+        candidate_lines += 1
         address_match = re.search(r"\(([^)]+)\)", line)
         if not address_match:
             continue
@@ -45,4 +45,6 @@ def parse_neighbors(text: str) -> tuple[NeighborFact, ...]:
         mac = _normalize_mac(mac_match.group(1)) if mac_match and not incomplete else None
         fact = NeighborFact(address, mac, interface, name, not incomplete and mac is not None)
         items[(address, interface)] = fact
+    if candidate_lines and not items:
+        raise ValueError("ARP output did not contain recognizable IPv4 neighbor entries")
     return tuple(sorted(items.values(), key=lambda item: (ipaddress.IPv4Address(item.address), item.interface or "")))
