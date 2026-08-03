@@ -11,15 +11,24 @@
   "surface": "local web application",
   "local_bind": "127.0.0.1",
   "default_port": 8765,
-  "network_scope": "locally visible private IPv4 networks on eligible non-tunnel interfaces",
+  "network_scope": "requested private IPv4 networks equal to or contained by eligible non-tunnel local interface networks",
+  "collection_api": {
+    "passive_refresh": "POST /api/v1/topology/refresh",
+    "active_discovery": "POST /api/v1/discover",
+    "read_only_topology": "GET /api/v1/topology",
+    "export": "GET /api/v1/topology/export",
+    "custom_header": "X-HomeNetTopo-Request: 1"
+  },
   "active_discovery": {
     "enabled_by_default": false,
-    "method": "nmap -sn -n",
+    "method": "nmap -sn -n --max-retries 1 --host-timeout 5s -oX -",
+    "output_format": "xml-stdout",
     "max_networks_per_request": 32,
     "max_addresses_per_request": 1024,
-    "timeout_default_seconds": 30,
-    "timeout_min_seconds": 1,
-    "timeout_max_seconds": 120
+    "operation_timeout_default_seconds": 30,
+    "operation_timeout_min_seconds": 5,
+    "operation_timeout_max_seconds": 120,
+    "nmap_host_timeout_seconds": 5
   },
   "http_limits": {
     "max_json_body_bytes": 16384
@@ -30,13 +39,34 @@
     "stderr_bytes": 65536,
     "kill_grace_seconds": 2
   },
+  "snapshot_policy": {
+    "persistence": "process-memory-only",
+    "automatic_ttl": false,
+    "read_only_gets_start_commands": false,
+    "max_concurrent_collections": 1,
+    "failed_collection_preserves_previous": true
+  },
+  "capability_disclosure": {
+    "nmap_full_path_exposed": false,
+    "nmap_resolution_source_exposed": true,
+    "unsupported_platform_reason": "unsupported_platform"
+  },
+  "graph_layout": {
+    "coordinate_convention": "top-left-world-coordinates",
+    "node_width": 180,
+    "node_height": 72,
+    "minimum_horizontal_gap": 48,
+    "minimum_vertical_gap": 28,
+    "upstream_column": "dynamic-after-device-grid"
+  },
   "first_release_exclusions": [
     "reverse-dns-enrichment",
     "online-hostname-or-vendor-lookup",
     "user-annotations",
     "persistent-snapshots",
     "lan-bind",
-    "active-ipv6-discovery"
+    "active-ipv6-discovery",
+    "port-or-service-scanning"
   ],
   "privacy": {
     "cloud_required": false,
@@ -44,5 +74,5 @@
     "external_frontend_assets_required": false,
     "automatic_persistence": false
   },
-  "product_prompt": "On a Mac, collect local interface, IPv4 routing, gateway, ARP and optional bounded Nmap host-discovery evidence; infer a best-effort logical home-network topology; and display observed facts and inferred relationships in an interactive loopback-only web page without claiming complete physical visibility."
+  "product_prompt": "On a Mac, collect local interface, IPv4 routing, gateway, ARP and optional bounded Nmap XML host-discovery evidence; infer a best-effort logical home-network topology; and display observed facts and inferred relationships in an interactive loopback-only web page without claiming complete physical visibility."
 }
