@@ -15,6 +15,10 @@ MAX_ADDRESSES = 1024
 DEFAULT_OPERATION_TIMEOUT = 30
 MIN_OPERATION_TIMEOUT = 5
 MAX_OPERATION_TIMEOUT = 120
+RFC1918_RANGES = tuple(
+    ipaddress.IPv4Network(value)
+    for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
 DOCUMENTATION_RANGES = tuple(
     ipaddress.IPv4Network(value)
     for value in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
@@ -55,13 +59,13 @@ def _remove_duplicate_and_contained(networks: Iterable[ipaddress.IPv4Network]) -
 
 
 def network_is_active_eligible(network: ipaddress.IPv4Network) -> bool:
-    return not (
+    within_rfc1918 = any(network == private or network.subnet_of(private) for private in RFC1918_RANGES)
+    return within_rfc1918 and not (
         network.is_loopback
         or network.is_link_local
         or network.is_multicast
         or network.is_unspecified
         or network.is_reserved
-        or not network.is_private
         or any(network.overlaps(documentation) for documentation in DOCUMENTATION_RANGES)
     )
 
