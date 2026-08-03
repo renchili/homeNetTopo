@@ -41,19 +41,24 @@ class ActiveHost:
     mac_address: str | None = None
 
 
-def _address_union_size(networks: Iterable[ipaddress.IPv4Network]) -> int:
+def address_union_size(networks: Iterable[ipaddress.IPv4Network]) -> int:
     return sum(network.num_addresses for network in ipaddress.collapse_addresses(networks))
 
 
-def _validate_network_class(network: ipaddress.IPv4Network) -> None:
-    if (
+def network_is_active_eligible(network: ipaddress.IPv4Network) -> bool:
+    return not (
         network.is_loopback
         or network.is_link_local
         or network.is_multicast
         or network.is_unspecified
+        or network.is_reserved
         or not network.is_private
-        or any(network.subnet_of(doc) or doc.subnet_of(network) for doc in DOCUMENTATION_RANGES)
-    ):
+        or any(network.overlaps(documentation) for documentation in DOCUMENTATION_RANGES)
+    )
+
+
+def _validate_network_class(network: ipaddress.IPv4Network) -> None:
+    if not network_is_active_eligible(network):
         raise ValidationError("invalid_target", "The requested network is not eligible for active discovery.")
 
 
@@ -78,7 +83,7 @@ def validate_phase_a(body: Any) -> DiscoveryRequest:
             raise ValidationError("invalid_target", "IPv6 targets are not supported.")
         _validate_network_class(network)
         parsed.append(network)
-    if _address_union_size(parsed) > MAX_ADDRESSES:
+    if address_union_size(parsed) > MAX_ADDRESSES:
         raise ValidationError("target_too_large", "The requested targets exceed the address limit.", status=413)
     timeout = body.get("operation_timeout_seconds", DEFAULT_OPERATION_TIMEOUT)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not MIN_OPERATION_TIMEOUT <= timeout <= MAX_OPERATION_TIMEOUT:
@@ -93,7 +98,7 @@ def eligible_local_networks(interfaces: Iterable[InterfaceFact]) -> tuple[ipaddr
             continue
         for address in interface.addresses:
             network = ipaddress.IPv4Network(address.network)
-            if network.is_private and not any(network.overlaps(doc) for doc in DOCUMENTATION_RANGES):
+            if network_is_active_eligible(network):
                 networks.add(network)
     return tuple(sorted(networks, key=lambda item: (int(item.network_address), item.prefixlen)))
 
@@ -106,7 +111,7 @@ def validate_phase_b(request: DiscoveryRequest, interfaces: Iterable[InterfaceFa
         if not any(target == local or target.subnet_of(local) for local in local_networks):
             raise ValidationError("invalid_target", "The requested network is outside eligible local networks.")
     effective = tuple(ipaddress.collapse_addresses(request.networks))
-    if _address_union_size(effective) > MAX_ADDRESSES:
+    if address_union_size(effective) > MAX_ADDRESSES:
         raise ValidationError("target_too_large", "The effective target union exceeds the address limit.", status=413)
     return effective
 
@@ -116,6 +121,8 @@ def parse_nmap_xml(text: str) -> tuple[ActiveHost, ...]:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
         raise ValidationError("collection_failed", "Nmap returned malformed XML.", status=500) from exc
+    if root.tag != "nmaprun":
+        raise ValidationError("collection_failed", "Nmap XML has an unexpected root element.", status=500)
     hosts: dict[str, ActiveHost] = {}
     for host in root.findall("host"):
         status = host.find("status")

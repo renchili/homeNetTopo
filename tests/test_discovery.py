@@ -2,16 +2,16 @@ from pathlib import Path
 import ipaddress
 import unittest
 
-from homenettopo.discovery import ValidationError, parse_nmap_xml, validate_phase_a, validate_phase_b
+from homenettopo.discovery import ValidationError, eligible_local_networks, parse_nmap_xml, validate_phase_a, validate_phase_b
 from homenettopo.interfaces import InterfaceAddress, InterfaceFact
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "macos"
 
 
-def interface(network="192.168.1.0/24", kind="physical"):
+def interface(network="192.168.1.0/24", kind="physical", name="en0"):
     net = ipaddress.IPv4Network(network)
-    address = str(next(net.hosts()))
-    return InterfaceFact("en0", ("UP",), kind, (InterfaceAddress(address, net.prefixlen, str(net)),))
+    address = str(next(net.hosts())) if net.num_addresses > 2 else str(net.network_address)
+    return InterfaceFact(name, ("UP",), kind, (InterfaceAddress(address, net.prefixlen, str(net)),))
 
 
 class DiscoveryValidationTests(unittest.TestCase):
@@ -35,26 +35,42 @@ class DiscoveryValidationTests(unittest.TestCase):
             with self.subTest(targets=targets), self.assertRaises(ValidationError):
                 validate_phase_b(self.request(targets), (local,))
 
+    def test_loopback_link_local_reserved_documentation_and_tunnel_are_not_local_eligible(self):
+        facts = (
+            interface("127.0.0.0/8", name="lo0"),
+            interface("169.254.0.0/16", name="en1"),
+            interface("240.0.0.0/4", name="en2"),
+            interface("192.0.2.0/24", name="en3"),
+            interface("10.0.0.0/24", kind="tunnel", name="utun0"),
+            interface("192.168.1.0/24", name="en0"),
+        )
+        self.assertEqual(tuple(map(str, eligible_local_networks(facts))), ("192.168.1.0/24",))
+
     def test_network_count_address_union_and_timeout_boundaries(self):
         networks = [f"10.0.{index}.0/27" for index in range(32)]
         self.assertEqual(len(self.request(networks, 5).networks), 32)
         self.assertEqual(self.request(["10.0.0.0/22"], 120).operation_timeout_seconds, 120)
-        for invalid in (
+        invalid_requests = (
             {"networks": networks + ["10.1.0.0/27"]},
             {"networks": ["10.0.0.0/22", "10.0.4.0/32"]},
             {"networks": ["10.0.0.0/24"], "operation_timeout_seconds": 4},
             {"networks": ["10.0.0.0/24"], "operation_timeout_seconds": 121},
-        ):
+        )
+        for invalid in invalid_requests:
             with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
                 validate_phase_a(invalid)
 
-    def test_rejects_public_documentation_ipv6_and_unknown_fields(self):
-        for body in (
+    def test_rejects_public_special_documentation_ipv6_and_unknown_fields(self):
+        bodies = (
             {"networks": ["8.8.8.0/24"]},
+            {"networks": ["127.0.0.0/8"]},
+            {"networks": ["169.254.0.0/16"]},
+            {"networks": ["240.0.0.0/4"]},
             {"networks": ["192.0.2.0/24"]},
             {"networks": ["2001:db8::/64"]},
             {"networks": ["10.0.0.0/24"], "extra": True},
-        ):
+        )
+        for body in bodies:
             with self.subTest(body=body), self.assertRaises(ValidationError):
                 validate_phase_a(body)
 
@@ -64,9 +80,10 @@ class DiscoveryValidationTests(unittest.TestCase):
         self.assertEqual(hosts[0].mac_address, "02:00:00:00:00:20")
         self.assertEqual(parse_nmap_xml("<nmaprun><host><status state='up'/></host></nmaprun>"), ())
 
-    def test_malformed_xml_fails(self):
-        with self.assertRaises(ValidationError):
-            parse_nmap_xml("<nmaprun>")
+    def test_malformed_or_unexpected_xml_fails(self):
+        for value in ("<nmaprun>", "<not-nmap/>"):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                parse_nmap_xml(value)
 
 
 if __name__ == "__main__":

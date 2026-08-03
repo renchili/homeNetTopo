@@ -7,7 +7,7 @@ import ipaddress
 from collections import defaultdict
 from typing import Iterable
 
-from .discovery import ActiveHost
+from .discovery import ActiveHost, network_is_active_eligible
 from .interfaces import InterfaceFact
 from .models import (
     ActiveDiscoveryMetadata,
@@ -26,11 +26,6 @@ from .models import (
 from .neighbors import NeighborFact
 from .routes import RouteFact
 
-_DOCUMENTATION_RANGES = tuple(
-    ipaddress.IPv4Network(value)
-    for value in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
-)
-
 
 def _slug(value: str) -> str:
     return value.replace("/", "-").replace(":", "-").replace(".", "-")
@@ -39,10 +34,6 @@ def _slug(value: str) -> str:
 def _snapshot_id(mode: str, node_ids: Iterable[str], collected_at: str) -> str:
     payload = "|".join((mode, collected_at, *sorted(node_ids))).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:20]
-
-
-def _is_documentation_network(network: ipaddress.IPv4Network) -> bool:
-    return any(network.overlaps(item) for item in _DOCUMENTATION_RANGES)
 
 
 def build_snapshot(
@@ -88,31 +79,25 @@ def build_snapshot(
             confidence=Confidence.HIGH,
             observed_at=timestamp,
         )
-        host_edge_id = f"edge:{host_id}:{interface_id}"
-        edges[host_edge_id] = Edge(
-            host_edge_id,
-            host_id,
-            interface_id,
-            EdgeType.HOST_USES_INTERFACE,
-            True,
-            Confidence.HIGH,
-            (evidence,),
-        )
+        edge_id = f"edge:{host_id}:{interface_id}"
+        edges[edge_id] = Edge(edge_id, host_id, interface_id, EdgeType.HOST_USES_INTERFACE, True, Confidence.HIGH, (evidence,))
         for address in interface.addresses:
             network = ipaddress.IPv4Network(address.network)
             subnet_id = f"subnet:{_slug(str(network))}"
             subnet_networks[subnet_id] = network
-            eligible = interface.kind != "tunnel" and network.is_private and not _is_documentation_network(network)
-            reason = "eligible_private_local_network" if eligible else (
-                "tunnel_network" if interface.kind == "tunnel" else "non_eligible_or_documentation_network"
-            )
+            eligible = interface.kind != "tunnel" and network_is_active_eligible(network)
+            if eligible:
+                reason = "eligible_private_local_network"
+            elif interface.kind == "tunnel":
+                reason = "tunnel_network"
+            elif network.is_loopback:
+                reason = "loopback_network"
+            elif network.is_link_local:
+                reason = "link_local_network"
+            else:
+                reason = "non_eligible_or_documentation_network"
             networks[(str(network), interface.name)] = NetworkDescriptor(
-                str(network),
-                interface.name,
-                interface.kind,
-                eligible,
-                reason,
-                network.num_addresses,
+                str(network), interface.name, interface.kind, eligible, reason, network.num_addresses
             )
             nodes.setdefault(
                 subnet_id,
@@ -140,9 +125,7 @@ def build_snapshot(
     def matching_subnet(address: str) -> str | None:
         ip = ipaddress.IPv4Address(address)
         candidates = [(node_id, network) for node_id, network in subnet_networks.items() if ip in network]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: item[1].prefixlen)[0]
+        return max(candidates, key=lambda item: item[1].prefixlen)[0] if candidates else None
 
     for route in route_items:
         try:
@@ -159,13 +142,12 @@ def build_snapshot(
             {"destination": route.destination, "interface": route.interface, "flags": list(route.flags)},
         )
         existing = nodes.get(gateway_id)
-        combined_evidence = (*existing.evidence, evidence) if existing else (evidence,)
         nodes[gateway_id] = Node(
             gateway_id,
             NodeKind.GATEWAY,
             address,
             addresses=(address,),
-            evidence=combined_evidence,
+            evidence=(*existing.evidence, evidence) if existing else (evidence,),
             confidence=Confidence.HIGH,
             observed_at=timestamp,
         )
@@ -205,16 +187,15 @@ def build_snapshot(
                 (evidence,),
             )
 
-    observation_macs: dict[str, set[str]] = defaultdict(set)
-    observation_names: dict[str, set[str]] = defaultdict(set)
-    observation_evidence: dict[str, list[Evidence]] = defaultdict(list)
-
+    macs_by_address: dict[str, set[str]] = defaultdict(set)
+    names_by_address: dict[str, set[str]] = defaultdict(set)
+    evidence_by_address: dict[str, list[Evidence]] = defaultdict(list)
     for neighbor in neighbor_items:
         if neighbor.mac_address:
-            observation_macs[neighbor.address].add(neighbor.mac_address)
+            macs_by_address[neighbor.address].add(neighbor.mac_address)
         if neighbor.name:
-            observation_names[neighbor.address].add(neighbor.name)
-        observation_evidence[neighbor.address].append(
+            names_by_address[neighbor.address].add(neighbor.name)
+        evidence_by_address[neighbor.address].append(
             Evidence(
                 "neighbors",
                 "ARP neighbor cache entry",
@@ -224,26 +205,18 @@ def build_snapshot(
         )
     for host in active_items:
         if host.mac_address:
-            observation_macs[host.address].add(host.mac_address)
-        observation_evidence[host.address].append(Evidence("nmap", "Host reported up", timestamp))
+            macs_by_address[host.address].add(host.mac_address)
+        evidence_by_address[host.address].append(Evidence("nmap", "Host reported up", timestamp))
 
-    observed_addresses = sorted(
-        set(observation_macs) | set(observation_names) | set(observation_evidence),
-        key=ipaddress.IPv4Address,
-    )
-    for address in observed_addresses:
-        macs = tuple(sorted(observation_macs[address]))
-        names = tuple(sorted(observation_names[address]))
-        evidence = tuple(observation_evidence[address])
+    addresses = sorted(set(macs_by_address) | set(names_by_address) | set(evidence_by_address), key=ipaddress.IPv4Address)
+    for address in addresses:
+        macs = tuple(sorted(macs_by_address[address]))
+        names = tuple(sorted(names_by_address[address]))
+        evidence = tuple(evidence_by_address[address])
         if len(macs) > 1 or len(names) > 1:
             warning_list.append(
-                WarningItem(
-                    "conflicting_device_evidence",
-                    f"Conflicting names or MAC addresses were retained for {address}.",
-                    "topology",
-                )
+                WarningItem("conflicting_device_evidence", f"Conflicting names or MAC addresses were retained for {address}.", "topology")
             )
-
         gateway_id = gateway_by_address.get(address)
         if gateway_id:
             gateway = nodes[gateway_id]
@@ -254,12 +227,11 @@ def build_snapshot(
                 addresses=(address,),
                 mac_addresses=macs,
                 properties={"names": list(names)},
-                evidence=tuple((*gateway.evidence, *evidence)),
+                evidence=(*gateway.evidence, *evidence),
                 confidence=Confidence.HIGH,
                 observed_at=timestamp,
             )
             continue
-
         device_id = f"device:{address}"
         nodes[device_id] = Node(
             device_id,
@@ -297,7 +269,16 @@ def build_snapshot(
         partial=any(source.status.value == "failed" for source in source_items),
         warnings=tuple(sorted(warning_list, key=lambda item: (item.code, item.message, item.source or ""))),
         sources=tuple(sorted(source_items, key=lambda item: item.type)),
-        networks=tuple(sorted(networks.values(), key=lambda item: (ipaddress.IPv4Network(item.cidr).network_address, ipaddress.IPv4Network(item.cidr).prefixlen, item.interface))),
+        networks=tuple(
+            sorted(
+                networks.values(),
+                key=lambda item: (
+                    int(ipaddress.IPv4Network(item.cidr).network_address),
+                    ipaddress.IPv4Network(item.cidr).prefixlen,
+                    item.interface,
+                ),
+            )
+        ),
         nodes=node_values,
         edges=tuple(sorted(edges.values(), key=lambda item: item.id)),
         active_discovery=active_metadata,

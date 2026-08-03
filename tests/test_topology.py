@@ -10,9 +10,9 @@ from homenettopo.topology import build_snapshot
 
 class TopologyTests(unittest.TestCase):
     def parts(self, network="192.168.1.0/24"):
-        prefix = int(network.split("/")[1])
-        base = network.rsplit(".", 1)[0]
-        interfaces = (InterfaceFact("en0", ("UP",), "physical", (InterfaceAddress(f"{base}.10", prefix, network),)),)
+        net_prefix, prefix = network.split("/")
+        base = net_prefix.rsplit(".", 1)[0]
+        interfaces = (InterfaceFact("en0", ("UP",), "physical", (InterfaceAddress(f"{base}.10", int(prefix), network),)),)
         routes = (RouteFact("0.0.0.0/0", f"{base}.1", ("U", "G"), "en0", True),)
         neighbors = (NeighborFact(f"{base}.20", "02:00:00:00:00:20", "en0", None, True),)
         sources = (SourceStatus("interfaces", SourceStatusValue.OK), SourceStatus("routes", SourceStatusValue.OK), SourceStatus("neighbors", SourceStatusValue.OK))
@@ -44,10 +44,13 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(gateway.mac_addresses, ("02:00:00:00:00:01",))
         self.assertFalse(any(node.id == "device:192.168.1.1" for node in snapshot.nodes))
 
-    def test_documentation_network_is_visible_but_not_active_eligible(self):
-        interfaces, routes, neighbors, sources = self.parts("192.0.2.0/24")
-        snapshot = build_snapshot(interfaces=interfaces, routes=routes, neighbors=neighbors, sources=sources, collected_at="2026-08-03T00:00:00Z")
-        self.assertFalse(snapshot.networks[0].eligible_for_active_discovery)
+    def test_special_and_documentation_networks_are_visible_but_not_active_eligible(self):
+        cases = ("192.0.2.0/24", "127.0.0.0/8", "169.254.0.0/16")
+        for network in cases:
+            with self.subTest(network=network):
+                interfaces, routes, neighbors, sources = self.parts(network)
+                snapshot = build_snapshot(interfaces=interfaces, routes=routes, neighbors=neighbors, sources=sources, collected_at="2026-08-03T00:00:00Z")
+                self.assertFalse(snapshot.networks[0].eligible_for_active_discovery)
 
 
 if __name__ == "__main__":
