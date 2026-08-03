@@ -220,7 +220,7 @@ Minimum node kinds:
 
 Every node and edge must carry enough provenance to distinguish observed facts from inference. Device-to-subnet and upstream relationships inferred from addresses or routes must remain inferred. Confidence and evidence labels must remain visible in the API and UI.
 
-## Planned ownership
+## Current ownership
 
 ```text
 server.py                         HTTP routes, browser boundary, collection lock, snapshot owner, static delivery
@@ -235,14 +235,15 @@ web/index.html                    accessible page structure
 web/core.mjs                      pure UI state, API mapping, and deterministic layout
 web/app.js                        fetch, DOM/SVG, pointer/keyboard, focus, download adapter
 web/styles.css                    visual tokens, responsive layout, focus, reduced motion
-tests/                            deterministic Python tests
+tests/                            deterministic Python tests with short synthetic parser inputs inline
 tests/frontend/core.test.mjs      Node built-in tests for pure frontend logic
-fixtures/                         sanitized synthetic command-output fixtures
 scripts/check.py                  repository-relative full regression entrypoint
-docs/                             design, API, plan, and decisions
+docs/                             design, API, ownership, and decisions
 README.md                         operator setup and usage
 metadata.json                     compact fixed product contract
 ```
+
+A path listed here records the current owner only. It does not authorize creation of additional files or directories. Short single-use parser inputs remain inline in their owning test modules. A separate fixture or sample file requires a demonstrated format, size, reuse, readability, or tooling need plus explicit authorization for the exact path.
 
 ## Deterministic graph-layout boundary
 
@@ -311,4 +312,4 @@ local host inventories
 packet captures
 ```
 
-Fixtures must use documentation-reserved addresses and clearly synthetic locally administered MAC values. Do not commit real local network identifiers.
+Test data must be clearly synthetic and use documentation-reserved addresses and locally administered MAC values. Short single-use inputs stay inline. Do not commit real local network identifiers, command logs, packet captures, scan exports, or user runtime data.
