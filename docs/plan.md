@@ -9,7 +9,7 @@
 - Public API authority: `docs/api-spec.md`
 - Metadata authority: `metadata.json`
 
-This document records implementation ownership. It is not runtime evidence, an acceptance report, or automatic authorization for additional files.
+This document records implementation ownership. It is not runtime evidence, an acceptance report, an implementation requirement ledger, or automatic authorization for additional files.
 
 ## User-intent boundary
 
@@ -32,7 +32,7 @@ Current test-data policy:
 
 - short single-use parser inputs are inline constants in their owning test modules;
 - there is no `fixtures/`, `samples/`, `examples/`, `demos/`, `reports/`, or generated-artifact directory requirement;
-- a separate data file is allowed only when native format, size, reuse, or tooling makes inline data materially worse and the exact path is separately authorized;
+- a separate data file is allowed only when native format, size, reuse, readability, or tooling makes inline data materially worse and the exact path is separately authorized;
 - real network identities, command logs, packet captures, scan exports, and user runtime data must not enter source control.
 
 ## Current owners
@@ -86,10 +86,10 @@ node --test tests/frontend/core.test.mjs
 python3 scripts/check.py
 ```
 
-These commands are defined but were not run during static generation or this repair.
+These commands define the verification entrypoints. A passing or failing status requires executed evidence tied to the exact revision; source definitions alone are not execution evidence.
 
 ## Acceptance boundary
 
 Formal implementation acceptance must independently recheck the exact revision, repository delta, artifact necessity, source and documentation consistency, test execution, browser interaction, supported-macOS startup, and real command boundaries.
 
-The previous plan-only PASS is withdrawn. Current status remains unverified until the independent acceptance workflow produces a verdict from current evidence.
+The implementation remains unverified until the independent acceptance workflow produces a verdict from current evidence.
