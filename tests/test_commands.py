@@ -109,12 +109,14 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(spec.argv[9:], ("192.168.1.0/25", "192.168.1.128/25"))
 
     @mock.patch("homenettopo.commands._verified_executable", return_value="/opt/homebrew/bin/nmap")
-    def test_nmap_rejects_option_injection_special_ranges_large_union_and_non_integer_timeout(self, _verified):
+    def test_nmap_rejects_option_injection_non_rfc1918_special_large_union_and_non_integer_timeout(self, _verified):
         cases = (
             (["--script"], 30),
             (["8.8.8.0/24"], 30),
             (["127.0.0.0/8"], 30),
             (["169.254.0.0/16"], 30),
+            (["192.0.0.0/24"], 30),
+            (["198.18.0.0/15"], 30),
             (["192.0.2.0/24"], 30),
             (["10.0.0.0/21"], 30),
             (["10.0.0.0/24"], 30.0),
