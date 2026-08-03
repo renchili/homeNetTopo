@@ -82,19 +82,20 @@ Requirements:
 
 ## Active-target containment rule
 
-An active target is eligible only when it is equal to or a subnet of one eligible private IPv4 network assigned to a non-tunnel local interface.
+An active target is eligible only when it is equal to or a subnet of one eligible RFC 1918 IPv4 network assigned to a non-tunnel local interface.
 
 A target must be rejected when it is:
 
 - a supernet of an eligible local network;
 - merely overlapping an eligible local network;
 - adjacent to but outside an eligible local network;
-- unrelated private space;
+- unrelated RFC 1918 space;
+- outside `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`;
 - loopback, link-local, multicast, unspecified, public, or reserved-only documentation space;
 - associated only with a tunnel interface;
 - above the fixed network-count or unique-address limits.
 
-After every requested target passes containment validation, duplicate and contained targets may be collapsed before the unique-address union is calculated.
+After every requested target passes containment validation, exact duplicates and contained targets may be removed only within the same containing eligible local network. Adjacent sibling targets must not be merged into a broader network.
 
 ## Two-phase active validation
 
@@ -109,7 +110,7 @@ Validate:
 - body size and JSON object shape;
 - 1–32 network strings;
 - canonical IPv4 syntax;
-- disallowed address classes;
+- RFC 1918 membership and disallowed address classes;
 - absolute unique-address limit;
 - `operation_timeout_seconds` integer range.
 
@@ -120,10 +121,12 @@ Phase A failure must not acquire the collection lock or start any command.
 Under the collection lock:
 
 1. run the approved passive commands;
-2. derive eligible non-tunnel local networks;
+2. derive eligible non-tunnel local RFC 1918 networks;
 3. require every requested target to be equal to or contained by one eligible local network;
-4. collapse duplicate or contained targets and recalculate the final unique-address union;
-5. reject any target that is a supernet, partial overlap, adjacent network, tunnel-only network, or unrelated private network.
+4. group targets by their most-specific containing local network;
+5. remove only exact duplicates and contained targets within each group, without merging adjacent siblings;
+6. recalculate the final unique-address union;
+7. reject any target that is a supernet, partial overlap, adjacent network, tunnel-only network, unrelated RFC 1918 network, or non-RFC1918 network.
 
 Only after Phase A and Phase B succeed may the service resolve and invoke Nmap. The rule is **no Nmap invocation before final validation**, not “no passive command before validation.”
 
