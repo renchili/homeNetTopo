@@ -1,2 +1,0 @@
-utun4: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
-	inet 203.0.113.10 --> 203.0.113.10 netmask 0xffffffff

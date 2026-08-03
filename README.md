@@ -4,7 +4,7 @@ Home Net Topology (`homeNetTopo`) is a local-first macOS application that collec
 
 ## Implementation status
 
-The repository now contains the planned Python service, macOS parsers, bounded Nmap adapter, topology model, static browser interface, synthetic fixtures, deterministic test definitions, and full-regression entrypoint.
+The repository contains the Python service, macOS parsers, bounded Nmap adapter, topology model, static browser interface, deterministic test definitions with inline synthetic parser inputs, and a full-regression entrypoint.
 
 **This revision has not been executed or runtime-accepted.** Source presence is not evidence that startup, tests, browser behavior, Nmap discovery, or real-network collection succeeds on a supported Mac.
 
@@ -67,8 +67,6 @@ Validation occurs in two phases:
 
 Supernets, noncanonical partial-overlap requests, adjacent networks, unrelated private ranges, tunnel-only networks, public ranges, special ranges, more than 32 networks, and more than 1024 unique addresses are rejected before Nmap.
 
-Limits:
-
 | Limit | Value |
 |---|---:|
 | JSON body | 16 KiB |
@@ -107,17 +105,7 @@ The complete contract is in [`docs/api-spec.md`](docs/api-spec.md).
 
 ## Interface
 
-The browser UI provides:
-
-- passive refresh and explicit active discovery;
-- observed versus inferred link presentation;
-- evidence, confidence, warnings, addresses, interfaces, and timestamps;
-- deterministic left-to-right SVG layout;
-- pan, bounded zoom, fit, reset, keyboard selection, and details;
-- focus-managed active-discovery dialog;
-- loading, empty, partial, unavailable, validation, conflict, timeout, request-error, and unsupported-platform states;
-- reduced-motion and narrow-layout behavior;
-- local JSON export.
+The browser UI provides passive refresh, explicit active discovery, observed and inferred links, evidence and confidence details, deterministic SVG layout, pan and bounded zoom controls, keyboard selection, warnings, recovery states, and local JSON export.
 
 The graph is a logical view, not proof of physical cabling, switching, VLANs, wireless infrastructure, isolated devices, or networks hidden behind other routers.
 
@@ -127,25 +115,13 @@ Topology data remains in process memory unless the user downloads an export. The
 
 The first release excludes reverse-DNS enrichment, online hostname or vendor lookup, user annotations, persistent naming, persistent snapshots, LAN bind, active IPv6, and port/service/OS scanning. Names already present in approved command output may be retained with evidence.
 
-Do not commit real local IP addresses, hostnames, MAC addresses, logs, packet captures, scan output, or exported snapshots. Repository fixtures are synthetic.
+Do not commit real local IP addresses, hostnames, MAC addresses, logs, packet captures, scan output, or exported snapshots. Short synthetic parser samples are embedded directly in their owning tests; the project does not require a separate fixture directory.
 
 ## Verification commands
 
-Python suite:
-
 ```text
 python3 -m unittest discover -s tests -p 'test_*.py'
-```
-
-Frontend pure-logic suite:
-
-```text
 node --test tests/frontend/core.test.mjs
-```
-
-Full regression:
-
-```text
 python3 scripts/check.py
 ```
 

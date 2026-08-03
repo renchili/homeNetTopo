@@ -1,11 +1,17 @@
-from pathlib import Path
 import ipaddress
 import unittest
 
 from homenettopo.discovery import ValidationError, eligible_local_networks, parse_nmap_xml, validate_phase_a, validate_phase_b
 from homenettopo.interfaces import InterfaceAddress, InterfaceFact
 
-FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "macos"
+
+NMAP_HOST_DISCOVERY_XML = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun>
+  <host><status state="up"/><address addr="192.0.2.20" addrtype="ipv4"/><address addr="02:00:00:00:00:20" addrtype="mac"/></host>
+  <host><status state="down"/><address addr="192.0.2.21" addrtype="ipv4"/></host>
+</nmaprun>
+"""
 
 
 def interface(network="192.168.1.0/24", kind="physical", name="en0"):
@@ -75,7 +81,7 @@ class DiscoveryValidationTests(unittest.TestCase):
                 validate_phase_a(body)
 
     def test_parses_only_up_hosts_with_addresses(self):
-        hosts = parse_nmap_xml((FIXTURES / "nmap_host_discovery.xml").read_text())
+        hosts = parse_nmap_xml(NMAP_HOST_DISCOVERY_XML)
         self.assertEqual([host.address for host in hosts], ["192.0.2.20"])
         self.assertEqual(hosts[0].mac_address, "02:00:00:00:00:20")
         self.assertEqual(parse_nmap_xml("<nmaprun><host><status state='up'/></host></nmaprun>"), ())
