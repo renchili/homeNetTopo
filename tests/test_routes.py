@@ -16,7 +16,7 @@ Routing tables
 
 Internet:
 Destination        Gateway            Flags               Netif Expire
-10.10/16           192.0.2.2          UGSc                  en0
+10.10.0.0/16       192.0.2.2          UGSc                  en0
 """
 
 
