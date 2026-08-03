@@ -31,6 +31,11 @@ class RouteParserTests(unittest.TestCase):
         route = parse_routes(SPECIFIC_ROUTE)[0]
         self.assertEqual(route.destination, "10.10.0.0/16")
 
+    def test_header_only_output_is_empty_but_unrecognized_entries_fail(self):
+        self.assertEqual(parse_routes("Routing tables\n\nInternet:\nDestination Gateway Flags Netif\n"), ())
+        with self.assertRaises(ValueError):
+            parse_routes("unexpected route line\n")
+
 
 if __name__ == "__main__":
     unittest.main()
