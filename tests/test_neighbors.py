@@ -23,6 +23,11 @@ class NeighborParserTests(unittest.TestCase):
         self.assertFalse(neighbor.complete)
         self.assertIsNone(neighbor.mac_address)
 
+    def test_empty_output_is_empty_but_unrecognized_entries_fail(self):
+        self.assertEqual(parse_neighbors(""), ())
+        with self.assertRaises(ValueError):
+            parse_neighbors("not arp output\n")
+
 
 if __name__ == "__main__":
     unittest.main()
