@@ -4,7 +4,7 @@ Home Net Topology (`homeNetTopo`) is a planned local-first macOS tool that colle
 
 ## Repository status
 
-**Bootstrap only.** This revision contains project rules, product metadata, architecture, API design, and decision records. It does not yet contain a runnable server, discovery implementation, web interface, or test suite.
+**Bootstrap only.** This revision contains project rules, product metadata, architecture, API design, implementation planning, and decision records. It does not yet contain a runnable server, discovery implementation, web interface, or test suite.
 
 Do not treat the design documents as executed behavior or runtime evidence.
 
@@ -47,7 +47,7 @@ homenettopo/              macOS discovery, parsing, validation, and topology log
 web/                      local browser interface and assets
 tests/                    deterministic parser, API, topology, and security tests
 fixtures/                 sanitized macOS command-output fixtures
-docs/                     design, API contract, and decision register
+docs/                     design, API contract, implementation plan, and decision register
 AGENT.md                  project-specific repository guidance
 metadata.json             compact product metadata
 ```
@@ -58,6 +58,7 @@ This layout is a design target, not an implementation claim. See [docs/design.md
 
 - [Project-specific rules](AGENT.md)
 - [Architecture and interaction design](docs/design.md)
+- [Implementation plan and requirement ledger](docs/plan.md)
 - [Planned local API contract](docs/api-spec.md)
 - [Decisions and open questions](docs/questions.md)
 - [Product metadata](metadata.json)
