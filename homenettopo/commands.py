@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import selectors
 import shutil
@@ -10,7 +11,6 @@ import subprocess
 import time
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Iterable
 
 PASSIVE_TIMEOUT_SECONDS = 5
@@ -18,6 +18,8 @@ STDOUT_LIMIT = 2 * 1024 * 1024
 STDERR_LIMIT = 64 * 1024
 KILL_GRACE_SECONDS = 2
 NMAP_HOST_TIMEOUT_SECONDS = 5
+MAX_NETWORKS = 32
+MAX_ADDRESSES = 1024
 
 
 class CommandError(RuntimeError):
@@ -94,13 +96,33 @@ def resolve_nmap(explicit_path: str | None = None) -> NmapResolution:
     return NmapResolution(None, "unavailable")
 
 
+def _canonical_targets(networks: Iterable[str]) -> tuple[str, ...]:
+    parsed: list[ipaddress.IPv4Network] = []
+    for value in networks:
+        if not isinstance(value, str):
+            raise CommandError("invalid_target", "Nmap targets must be canonical IPv4 networks.")
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as exc:
+            raise CommandError("invalid_target", "Nmap targets must be canonical IPv4 networks.") from exc
+        if not isinstance(network, ipaddress.IPv4Network) or not network.is_private:
+            raise CommandError("invalid_target", "Nmap targets must be private IPv4 networks.")
+        parsed.append(network)
+    if not 1 <= len(parsed) <= MAX_NETWORKS:
+        raise CommandError("invalid_target", "Nmap requires between 1 and 32 validated networks.")
+    collapsed = tuple(ipaddress.collapse_addresses(parsed))
+    if sum(network.num_addresses for network in collapsed) > MAX_ADDRESSES:
+        raise CommandError("invalid_target", "Nmap target union exceeds the address limit.")
+    return tuple(str(network) for network in collapsed)
+
+
 def nmap_spec(path: str, networks: Iterable[str], operation_timeout_seconds: int) -> CommandSpec:
     verified = _verified_executable(path)
     if not verified or verified != os.path.realpath(path):
         raise CommandError("dependency_unavailable", "Nmap is unavailable.")
-    targets = tuple(networks)
-    if not targets:
-        raise CommandError("invalid_target", "At least one validated target is required.")
+    if isinstance(operation_timeout_seconds, bool) or not 5 <= operation_timeout_seconds <= 120:
+        raise CommandError("invalid_target", "Nmap operation timeout is outside the allowed range.")
+    targets = _canonical_targets(networks)
     argv = (
         verified,
         "-sn",
@@ -116,6 +138,28 @@ def nmap_spec(path: str, networks: Iterable[str], operation_timeout_seconds: int
     return CommandSpec(CommandKind.NMAP, argv, operation_timeout_seconds)
 
 
+def _validate_spec(spec: CommandSpec) -> None:
+    expected = {
+        CommandKind.INTERFACES: interfaces_spec(),
+        CommandKind.ROUTES: routes_spec(),
+        CommandKind.NEIGHBORS: neighbors_spec(),
+    }
+    if spec.kind in expected:
+        if spec != expected[spec.kind]:
+            raise CommandError("collection_failed", "Command specification is not approved.")
+        return
+    if spec.kind is not CommandKind.NMAP or len(spec.argv) < 10:
+        raise CommandError("collection_failed", "Command specification is not approved.")
+    executable = _verified_executable(spec.argv[0])
+    if executable != spec.argv[0]:
+        raise CommandError("dependency_unavailable", "Nmap is unavailable.")
+    fixed = ("-sn", "-n", "--max-retries", "1", "--host-timeout", "5s", "-oX", "-")
+    if spec.argv[1:9] != fixed or spec.timeout_seconds < 5 or spec.timeout_seconds > 120:
+        raise CommandError("collection_failed", "Nmap command specification is not approved.")
+    if _canonical_targets(spec.argv[9:]) != spec.argv[9:]:
+        raise CommandError("collection_failed", "Nmap targets are not canonical.")
+
+
 def _stop_process(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
@@ -128,8 +172,7 @@ def _stop_process(process: subprocess.Popen[bytes]) -> None:
 
 
 def run_command(spec: CommandSpec) -> CommandResult:
-    if not spec.argv or not os.path.isabs(spec.argv[0]):
-        raise CommandError("collection_failed", "Command specification is not approved.")
+    _validate_spec(spec)
     started = time.monotonic()
     try:
         process = subprocess.Popen(

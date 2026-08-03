@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun scanner="nmap" args="nmap -sn -n -oX - 192.0.2.0/24">
+  <host><status state="up" reason="arp-response"/><address addr="192.0.2.20" addrtype="ipv4"/><address addr="02:00:00:00:00:20" addrtype="mac"/></host>
+  <host><status state="down" reason="no-response"/><address addr="192.0.2.21" addrtype="ipv4"/></host>
+</nmaprun>

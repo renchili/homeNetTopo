@@ -1,13 +1,15 @@
 {
   "name": "homeNetTopo",
   "display_name": "Home Net Topology",
-  "status": "bootstrap",
+  "version": "0.1.0",
+  "status": "implemented-unverified",
   "platform": "macOS",
   "runtime": {
     "python_minimum": "3.10",
     "production_dependencies": "standard-library-only",
     "frontend_test_runtime": "Node.js 20+ built-in test runner"
   },
+  "entrypoint": "python3 server.py",
   "surface": "local web application",
   "local_bind": "127.0.0.1",
   "default_port": 8765,
@@ -68,11 +70,18 @@
     "active-ipv6-discovery",
     "port-or-service-scanning"
   ],
+  "verification": {
+    "source_generated": true,
+    "tests_defined": true,
+    "tests_executed": false,
+    "browser_executed": false,
+    "real_network_executed": false,
+    "ci_executed": false
+  },
   "privacy": {
     "cloud_required": false,
     "telemetry_required": false,
     "external_frontend_assets_required": false,
     "automatic_persistence": false
-  },
-  "product_prompt": "On a Mac, collect local interface, IPv4 routing, gateway, ARP and optional bounded Nmap XML host-discovery evidence; infer a best-effort logical home-network topology; and display observed facts and inferred relationships in an interactive loopback-only web page without claiming complete physical visibility."
+  }
 }

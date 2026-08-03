@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home Net Topology</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <p class="eyebrow">LOCAL NETWORK EVIDENCE</p>
+      <h1>Home Net Topology</h1>
+      <p id="snapshot-meta" class="muted">No snapshot loaded.</p>
+    </div>
+    <div class="header-actions" aria-label="Topology actions">
+      <button id="refresh-button" type="button">Refresh passive</button>
+      <button id="discover-button" type="button" disabled aria-describedby="discover-reason">Discover devices</button>
+      <button id="export-button" type="button" disabled>Export JSON</button>
+    </div>
+  </header>
+
+  <section class="notice" aria-labelledby="limitation-title">
+    <h2 id="limitation-title">Logical view, not physical proof</h2>
+    <p>This page shows evidence visible from this Mac and deterministic inferences. Hidden switches, VLANs, isolated clients, VPN paths, and sleeping devices may be absent.</p>
+  </section>
+
+  <section id="status-region" class="status-region" aria-live="polite" aria-atomic="true">
+    <p id="status-text">Preparing passive collection…</p>
+    <p id="discover-reason" class="muted"></p>
+    <ul id="warning-list" class="warning-list"></ul>
+  </section>
+
+  <main class="workspace">
+    <section class="graph-panel" aria-labelledby="graph-title">
+      <div class="graph-toolbar">
+        <h2 id="graph-title">Topology</h2>
+        <div role="group" aria-label="Graph view controls">
+          <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+          <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+          <button id="fit-view" type="button">Fit</button>
+          <button id="reset-view" type="button">Reset</button>
+        </div>
+      </div>
+      <div id="graph-viewport" class="graph-viewport" tabindex="0" aria-label="Interactive topology graph">
+        <svg id="topology-svg" role="img" aria-labelledby="graph-title graph-description">
+          <desc id="graph-description">A left-to-right logical network topology. Solid links are observed and dashed links are inferred.</desc>
+          <g id="graph-scene"></g>
+        </svg>
+      </div>
+    </section>
+
+    <aside id="details-panel" class="details-panel" aria-labelledby="details-title">
+      <h2 id="details-title">Details</h2>
+      <div id="details-content"><p class="muted">Select a node or edge to inspect evidence and confidence.</p></div>
+    </aside>
+  </main>
+
+  <dialog id="discover-dialog" aria-labelledby="discover-title">
+    <form id="discover-form" method="dialog">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">EXPLICIT ACTIVE ACTION</p>
+          <h2 id="discover-title">Discover devices with Nmap</h2>
+        </div>
+        <button id="dialog-close" class="icon-button" type="button" aria-label="Close discovery dialog">×</button>
+      </div>
+      <p>Nmap will run host discovery only. No ports, services, operating-system detection, DNS lookup, or public targets are used.</p>
+      <fieldset>
+        <legend>Eligible local networks</legend>
+        <div id="network-options" class="network-options"></div>
+      </fieldset>
+      <label for="operation-timeout">Total operation timeout (5–120 seconds)</label>
+      <input id="operation-timeout" name="operation_timeout_seconds" type="number" min="5" max="120" value="30" required>
+      <p id="address-total" class="muted">0 addresses selected.</p>
+      <div id="dialog-error" class="field-error" role="alert"></div>
+      <div class="dialog-actions">
+        <button id="dialog-cancel" type="button">Cancel</button>
+        <button id="dialog-confirm" class="primary" type="submit">Run bounded discovery</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

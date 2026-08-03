@@ -1,36 +1,89 @@
 # Home Net Topology
 
-Home Net Topology (`homeNetTopo`) is a planned local-first macOS tool that collects network evidence visible from the current Mac, infers a best-effort logical topology, and renders it as an interactive local web page.
+Home Net Topology (`homeNetTopo`) is a local-first macOS application that collects network evidence visible from the current Mac, builds a best-effort logical topology, and serves an interactive loopback-only web page.
 
-## Repository status
+## Implementation status
 
-**Bootstrap only.** This revision contains project rules, metadata, architecture, API design, implementation planning, and decisions. It does not yet contain a runnable server, discovery implementation, web interface, tests, regression script, or release artifact.
+The repository now contains the planned Python service, macOS parsers, bounded Nmap adapter, topology model, static browser interface, synthetic fixtures, deterministic test definitions, and full-regression entrypoint.
 
-Planning documents are not runtime evidence.
+**This revision has not been executed or runtime-accepted.** Source presence is not evidence that startup, tests, browser behavior, Nmap discovery, or real-network collection succeeds on a supported Mac.
 
-## Intended first release
+## Requirements
 
-The planned implementation will:
+Production:
 
-- run on macOS with Python 3.10 or newer;
-- read `/sbin/ifconfig -a`, `/usr/sbin/netstat -rn -f inet`, and `/usr/sbin/arp -an` through typed command specifications;
-- expose only read-only GET endpoints and protected POST endpoints for collection;
-- perform passive collection through `POST /api/v1/topology/refresh`;
-- optionally run Nmap XML host discovery through `POST /api/v1/discover` after explicit confirmation;
-- restrict every active target to a network equal to or contained by an eligible non-tunnel local network;
-- reject supernets, partial overlaps, adjacent networks, tunnel-only networks, unrelated private ranges, and public/special ranges;
-- limit requests to 32 networks and 1024 unique addresses;
-- distinguish a total Nmap operation deadline from a fixed five-second Nmap per-host timeout;
-- build topology nodes and edges with evidence, warnings, observed/inferred markers, and confidence;
-- serve repository-owned HTML, CSS, JavaScript, ES modules, and SVG on `127.0.0.1:8765`;
-- serialize collection with one lock and preserve the previous snapshot on failure;
-- render deterministic non-overlapping graph lanes with dynamic upstream positioning;
-- support pan, zoom, fit, reset, keyboard selection, details, warnings, refresh, and JSON export;
-- work without cloud accounts, telemetry, persistence, production Node, npm packages, CDNs, or external frontend assets.
+- macOS;
+- Python 3.10 or newer;
+- Python standard library;
+- optional Nmap for active host discovery.
 
-## Endpoint model
+Development verification additionally requires Node.js 20 or newer. No npm packages are used.
 
-Read-only endpoints never execute collection commands:
+## Start the service
+
+```text
+python3 server.py
+```
+
+The default URL is:
+
+```text
+http://127.0.0.1:8765
+```
+
+Optional arguments:
+
+```text
+python3 server.py --port 8765
+python3 server.py --nmap-path /opt/homebrew/bin/nmap
+```
+
+The first release rejects any bind other than `127.0.0.1`.
+
+## Discovery behavior
+
+Initial page load sends a protected passive refresh request. Passive collection executes only:
+
+```text
+/sbin/ifconfig -a
+/usr/sbin/netstat -rn -f inet
+/usr/sbin/arp -an
+```
+
+Active discovery requires a separate confirmation and uses only:
+
+```text
+<canonical-nmap-path> -sn -n --max-retries 1 --host-timeout 5s -oX - <validated-targets...>
+```
+
+Nmap XML is parsed from stdout. The application does not enable port, service, vulnerability, credential, operating-system, DNS, or internet-wide scanning.
+
+## Active target safety
+
+Validation occurs in two phases:
+
+1. request structure, IPv4 syntax, address classes, body size, count, union size, and operation timeout are checked before commands;
+2. after fresh passive collection, every target must equal or be a subnet of a private network assigned to an eligible non-tunnel local interface.
+
+Supernets, noncanonical partial-overlap requests, adjacent networks, unrelated private ranges, tunnel-only networks, public ranges, special ranges, more than 32 networks, and more than 1024 unique addresses are rejected before Nmap.
+
+Limits:
+
+| Limit | Value |
+|---|---:|
+| JSON body | 16 KiB |
+| Requested networks | 1–32 |
+| Unique target addresses | at most 1024 |
+| Total Nmap operation timeout | default 30 seconds; range 5–120 |
+| Nmap per-host timeout | fixed 5 seconds |
+| Passive command timeout | 5 seconds |
+| Captured stdout | 2 MiB |
+| Captured stderr | 64 KiB |
+| Terminate-to-kill grace | 2 seconds |
+
+## Local API
+
+Read-only routes never start collection commands:
 
 ```text
 GET /api/v1/health
@@ -39,142 +92,83 @@ GET /api/v1/topology
 GET /api/v1/topology/export
 ```
 
-Collection endpoints:
+Collection routes:
 
 ```text
 POST /api/v1/topology/refresh
 POST /api/v1/discover
 ```
 
-Both collection POSTs require JSON, `X-HomeNetTopo-Request: 1`, an accepted loopback Host, and same-origin browser metadata when those headers are present.
+Both collection routes require JSON, `X-HomeNetTopo-Request: 1`, an accepted loopback Host, matching Origin when present, and `Sec-Fetch-Site: same-origin` or `none` when present. The server emits no permissive CORS headers and does not accept API preflight as an authorization path.
 
-## Active discovery plan
+Only one collection can run at a time. A concurrent collection returns `409 collection_in_progress`. Successful snapshots replace the latest snapshot atomically; failures preserve the prior snapshot. Snapshots have no TTL and are not persisted across restarts.
 
-The fixed Nmap command shape is:
+The complete contract is in [`docs/api-spec.md`](docs/api-spec.md).
 
-```text
-<canonical-nmap-path> -sn -n --max-retries 1 --host-timeout 5s -oX - <validated-targets...>
-```
+## Interface
 
-Nmap XML stdout is parsed with the Python standard library. Port, service, OS, script, and name-resolution data are not used.
+The browser UI provides:
 
-Validation has two phases:
+- passive refresh and explicit active discovery;
+- observed versus inferred link presentation;
+- evidence, confidence, warnings, addresses, interfaces, and timestamps;
+- deterministic left-to-right SVG layout;
+- pan, bounded zoom, fit, reset, keyboard selection, and details;
+- focus-managed active-discovery dialog;
+- loading, empty, partial, unavailable, validation, conflict, timeout, request-error, and unsupported-platform states;
+- reduced-motion and narrow-layout behavior;
+- local JSON export.
 
-1. request syntax and absolute safety checks before lock or commands;
-2. local-network containment checks after fresh passive collection.
+The graph is a logical view, not proof of physical cabling, switching, VLANs, wireless infrastructure, isolated devices, or networks hidden behind other routers.
 
-Nmap is not resolved or invoked until both phases pass.
+## Privacy and exclusions
 
-## Fixed limits
+Topology data remains in process memory unless the user downloads an export. The application does not require cloud services, accounts, telemetry, CDNs, or externally hosted assets.
 
-- JSON body: 16 KiB maximum.
-- Requested networks: 1–32.
-- Unique active addresses: at most 1024.
-- Active-operation timeout: default 30 seconds, range 5–120 seconds.
-- Nmap per-host timeout: fixed 5 seconds.
-- Passive command timeout: 5 seconds.
-- Captured stdout: 2 MiB.
-- Captured stderr: 64 KiB.
-- Process terminate/kill grace: 2 seconds.
+The first release excludes reverse-DNS enrichment, online hostname or vendor lookup, user annotations, persistent naming, persistent snapshots, LAN bind, active IPv6, and port/service/OS scanning. Names already present in approved command output may be retained with evidence.
 
-## First-release exclusions
+Do not commit real local IP addresses, hostnames, MAC addresses, logs, packet captures, scan output, or exported snapshots. Repository fixtures are synthetic.
 
-The first release does not include:
+## Verification commands
 
-- reverse-DNS enrichment;
-- online hostname or MAC-vendor lookup;
-- user annotations or persistent device naming;
-- snapshot persistence across restarts;
-- configurable LAN bind;
-- active IPv6 discovery;
-- port, service, vulnerability, credential, or operating-system scanning.
-
-Names already present in approved command output may be displayed with source evidence.
-
-## Important limitation
-
-A single Mac cannot prove an entire physical network. Hidden switches, VLANs, wireless infrastructure, isolated clients, sleeping devices, filtered responses, VPN paths, and networks behind other routers may be incomplete or invisible.
-
-The product must present inferred relationships as inference rather than certainty.
-
-## Safety and privacy defaults
-
-- The service binds to IPv4 loopback only.
-- All GET routes are read-only.
-- Initial page load explicitly triggers protected passive refresh; it never invokes Nmap.
-- Active discovery requires a separate confirmation flow.
-- One passive or active collection may run at a time.
-- Failed operations preserve the previous snapshot.
-- Topology data remains in process memory unless downloaded by the user.
-- No results are uploaded or automatically persisted.
-- Real local addresses, hostnames, MACs, logs, and exports must not be committed.
-
-## Planned architecture
-
-```text
-server.py                         loopback HTTP/API, browser boundary, lock, snapshot, static delivery
-homenettopo/                      commands, parsers, validation, XML discovery, models, topology
-web/index.html                    accessible page structure
-web/core.mjs                      pure UI state and deterministic graph layout
-web/app.js                        fetch, DOM/SVG, input, focus, and download adapter
-web/styles.css                    visual tokens and responsive behavior
-tests/                            deterministic Python tests
-tests/frontend/core.test.mjs      Node built-in frontend logic tests
-fixtures/                         sanitized macOS and Nmap XML fixtures
-scripts/check.py                  full static regression entrypoint
-docs/                             design, API, plan, and decisions
-AGENT.md                          project-specific constraints
-metadata.json                     compact fixed contract
-```
-
-This is a design target, not an implementation claim.
-
-## Documentation
-
-- [Project guidance](AGENT.md)
-- [Architecture and interaction design](docs/design.md)
-- [Implementation plan and requirement ledger](docs/plan.md)
-- [Local API contract](docs/api-spec.md)
-- [Resolved and deferred decisions](docs/questions.md)
-- [Product metadata](metadata.json)
-
-## Intended operator flow
-
-After matching source exists:
-
-1. start the local Python service on macOS;
-2. open the loopback URL;
-3. let the page issue a protected passive refresh;
-4. inspect the latest logical topology and source warnings;
-5. optionally install Nmap and confirm bounded discovery;
-6. inspect evidence and confidence;
-7. download the latest snapshot as JSON.
-
-Exact startup options will be documented as executable instructions only when their source exists.
-
-## Planned verification entrypoints
+Python suite:
 
 ```text
 python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+Frontend pure-logic suite:
+
+```text
 node --test tests/frontend/core.test.mjs
+```
+
+Full regression:
+
+```text
 python3 scripts/check.py
 ```
 
-Node.js 20+ is development-only. Full regression requires both Python and Node stages. These commands are planned, not evidence that tests currently exist or pass.
+A Python-only developer mode is available:
 
-## Current verification status
+```text
+python3 scripts/check.py --python-only
+```
 
-- Source implementation: not present.
-- Automated tests: not present.
-- Regression script: not present.
-- Runtime checks: not run.
-- Browser checks: not run.
+It reports frontend tests as `NOT RUN` and must not be cited as full-regression or release evidence.
+
+## Evidence status for this revision
+
+- Static source generation: complete.
+- Test definitions: present.
+- Python tests: not run.
+- Frontend tests: not run.
+- Full regression: not run.
+- macOS startup: not run.
+- Browser interaction: not run.
+- Nmap discovery: not run.
 - Real-network checks: not run.
-- CI workflows: not present.
-- Release artifacts: not present.
+- CI: not configured or run.
+- Release artifact: not produced.
 
-Future verification claims must identify the exact commit and evidence used.
-
-## Contribution constraints
-
-Before editing, read `AGENTS.md`, `AGENT.md`, the routed workflow under `skills/`, and `docs/plan.md`. Keep source, tests, API behavior, graph layout, limits, security boundaries, metadata, and documentation consistent. Do not commit generated inventories, runtime exports, logs, caches, packet captures, or real network identifiers.
+See [`docs/plan.md`](docs/plan.md) for implementation ownership and [`docs/design.md`](docs/design.md) for architecture and interaction rules.

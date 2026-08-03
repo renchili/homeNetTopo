@@ -47,13 +47,24 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _enum_value(value: Any) -> Any:
+def _parse_utc(value: str) -> None:
+    if not value.endswith("Z"):
+        raise ModelError("timestamp must be RFC 3339 UTC")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ModelError("timestamp must be RFC 3339 UTC") from exc
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ModelError("timestamp must be RFC 3339 UTC")
+
+
+def _json_value(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
-    if isinstance(value, list):
-        return [_enum_value(item) for item in value]
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
     if isinstance(value, dict):
-        return {key: _enum_value(item) for key, item in value.items()}
+        return {key: _json_value(item) for key, item in sorted(value.items())}
     return value
 
 
@@ -144,24 +155,43 @@ class TopologySnapshot:
     active_discovery: ActiveDiscoveryMetadata | None = None
 
     def validate(self) -> None:
+        _parse_utc(self.collected_at)
         node_ids = [node.id for node in self.nodes]
-        if len(node_ids) != len(set(node_ids)):
-            raise ModelError("duplicate node id")
+        if not all(node_ids) or len(node_ids) != len(set(node_ids)):
+            raise ModelError("node ids must be nonempty and unique")
         edge_ids = [edge.id for edge in self.edges]
-        if len(edge_ids) != len(set(edge_ids)):
-            raise ModelError("duplicate edge id")
+        if not all(edge_ids) or len(edge_ids) != len(set(edge_ids)):
+            raise ModelError("edge ids must be nonempty and unique")
         known = set(node_ids)
+        for node in self.nodes:
+            if not isinstance(node.kind, NodeKind) or not isinstance(node.confidence, Confidence):
+                raise ModelError("invalid node enum value")
+            if node.observed_at is not None:
+                _parse_utc(node.observed_at)
+            for evidence in node.evidence:
+                if evidence.observed_at is not None:
+                    _parse_utc(evidence.observed_at)
         for edge in self.edges:
             if edge.source not in known or edge.target not in known:
                 raise ModelError(f"edge endpoint missing: {edge.id}")
+            if not isinstance(edge.type, EdgeType) or not isinstance(edge.confidence, Confidence):
+                raise ModelError("invalid edge enum value")
+        for source in self.sources:
+            if not isinstance(source.status, SourceStatusValue):
+                raise ModelError("invalid source status")
         if self.mode not in {"passive", "active"}:
             raise ModelError("invalid snapshot mode")
         if self.mode == "active" and self.active_discovery is None:
             raise ModelError("active snapshot requires active metadata")
+        if self.mode == "passive" and self.active_discovery is not None:
+            raise ModelError("passive snapshot cannot contain active metadata")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return _enum_value(asdict(self))
+        payload = _json_value(asdict(self))
+        if payload["active_discovery"] is None:
+            del payload["active_discovery"]
+        return payload
 
 
 def sorted_evidence(items: Iterable[Evidence]) -> tuple[Evidence, ...]:
