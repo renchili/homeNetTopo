@@ -1,0 +1,22 @@
+{
+  "name": "homeNetTopo",
+  "display_name": "Home Net Topology",
+  "status": "bootstrap",
+  "platform": "macOS",
+  "runtime": "Python 3",
+  "surface": "local web application",
+  "local_bind": "127.0.0.1",
+  "default_port": 8765,
+  "network_scope": "locally visible private IPv4 networks",
+  "active_discovery": {
+    "enabled_by_default": false,
+    "method": "nmap -sn",
+    "max_addresses_per_request": 1024
+  },
+  "privacy": {
+    "cloud_required": false,
+    "telemetry_required": false,
+    "external_frontend_assets_required": false
+  },
+  "product_prompt": "On a Mac, collect local interface, routing, gateway, ARP and optional bounded host-discovery evidence; infer a best-effort logical home-network topology; and display observed facts and inferred relationships in an interactive local-only web page without claiming complete physical visibility."
+}
