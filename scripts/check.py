@@ -57,6 +57,9 @@ def consistency_guards() -> None:
         "web/core.mjs",
         "web/app.js",
         "web/styles.css",
+        "tests/test_discovery.py",
+        "tests/test_server.py",
+        "tests/test_web_contract.py",
         "tests/frontend/core.test.mjs",
     ]
     missing = [path for path in required_paths if not (ROOT / path).is_file()]
@@ -67,6 +70,7 @@ def consistency_guards() -> None:
         sys.path.insert(0, str(ROOT))
     import server as server_module
     from homenettopo import commands, discovery, routes
+    from homenettopo.interfaces import InterfaceAddress, InterfaceFact
 
     metadata = load_metadata()
     active = metadata["active_discovery"]
@@ -99,6 +103,17 @@ def consistency_guards() -> None:
     if commands._canonical_targets(validated_targets) != validated_targets:
         raise RuntimeError("the command layer must preserve contained targets validated under distinct Phase B owners")
 
+    overlap_request = discovery.validate_phase_a({
+        "networks": list(validated_targets),
+        "operation_timeout_seconds": 30,
+    })
+    overlap_interfaces = (
+        InterfaceFact("en0", ("UP",), "physical", (InterfaceAddress("192.168.1.1", 24, "192.168.1.0/24"),)),
+        InterfaceFact("en1", ("UP",), "physical", (InterfaceAddress("192.168.1.2", 25, "192.168.1.0/25"),)),
+    )
+    if tuple(map(str, discovery.validate_phase_b(overlap_request, overlap_interfaces))) != validated_targets:
+        raise RuntimeError("Phase B must preserve targets owned by overlapping local networks")
+
     invalid_route_output = (
         "Routing tables\n\nInternet:\n"
         "Destination Gateway Flags Netif\n"
@@ -128,6 +143,9 @@ def consistency_guards() -> None:
     commands_source = (ROOT / "homenettopo/commands.py").read_text(encoding="utf-8")
     models_source = (ROOT / "homenettopo/models.py").read_text(encoding="utf-8")
     topology_source = (ROOT / "homenettopo/topology.py").read_text(encoding="utf-8")
+    discovery_tests = (ROOT / "tests/test_discovery.py").read_text(encoding="utf-8")
+    server_tests = (ROOT / "tests/test_server.py").read_text(encoding="utf-8")
+    web_tests = (ROOT / "tests/test_web_contract.py").read_text(encoding="utf-8")
 
     for route in ("/api/v1/topology/refresh", "/api/v1/discover", "/api/v1/topology/export"):
         missing_owners = [name for name, text in (("server", server), ("api", api), ("readme", readme)) if route not in text]
@@ -148,6 +166,29 @@ def consistency_guards() -> None:
         if "adjacent sibling targets" not in text.lower():
             raise RuntimeError(f"active-target contract mismatch in {owner}: adjacent siblings are not explicit")
 
+    expected_test_markers = {
+        "tests/test_discovery.py": (
+            "test_contained_targets_owned_by_overlapping_local_networks_remain_separate",
+        ),
+        "tests/test_server.py": (
+            "test_real_active_discover_rejects_phase_b_before_resolving_nmap",
+            "test_real_active_discover_preserves_phase_b_effective_targets_and_order",
+            "test_real_active_discover_command_failure_preserves_previous_snapshot",
+        ),
+        "tests/test_web_contract.py": (
+            "test_status_and_validation_states_have_focus_owners_and_recovery_logic",
+        ),
+    }
+    test_sources = {
+        "tests/test_discovery.py": discovery_tests,
+        "tests/test_server.py": server_tests,
+        "tests/test_web_contract.py": web_tests,
+    }
+    for path, markers in expected_test_markers.items():
+        missing_markers = [marker for marker in markers if marker not in test_sources[path]]
+        if missing_markers:
+            raise RuntimeError(f"required regression definitions missing from {path}: {missing_markers}")
+
     for value in ("route_inference", "address_membership"):
         if value not in topology_source or value not in api:
             raise RuntimeError(f"derived source contract mismatch: {value}")
@@ -167,6 +208,21 @@ def asset_guards() -> None:
         raise RuntimeError("inline style violates CSP")
     if "innerHTML" in app or "insertAdjacentHTML" in app:
         raise RuntimeError("HTML string sink is not allowed in the frontend adapter")
+    if 'id="status-heading" tabindex="-1"' not in html:
+        raise RuntimeError("the status surface lacks a programmatic focus owner")
+    if 'id="dialog-error" class="field-error" role="alert" tabindex="-1"' not in html:
+        raise RuntimeError("the discovery dialog lacks a focusable validation summary")
+    for marker in (
+        "focusStatusHeading",
+        "focusDialogValidation",
+        "requestAnimationFrame",
+        'setAttribute("aria-invalid", "true")',
+        "restoreFocus: false",
+        "No neighbor devices observed",
+        "Unsupported platform",
+    ):
+        if marker not in app:
+            raise RuntimeError(f"frontend focus/recovery contract missing: {marker}")
     for path in (ROOT / "web").iterdir():
         if not path.is_file():
             continue
@@ -177,6 +233,8 @@ def asset_guards() -> None:
 
 
 def hygiene_guards() -> None:
+    if (ROOT / "tests/__init__.py").exists():
+        raise RuntimeError("tests/__init__.py is an unnecessary package marker for unittest discovery")
     completed = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, check=False, capture_output=True)
     if completed.returncode != 0:
         raise RuntimeError("git ls-files failed")
