@@ -27,6 +27,7 @@
   </section>
 
   <section id="status-region" class="status-region" aria-live="polite" aria-atomic="true">
+    <h2 id="status-heading" tabindex="-1">Topology status</h2>
     <p id="status-text">Preparing passive collection…</p>
     <p id="discover-reason" class="muted"></p>
     <ul id="warning-list" class="warning-list"></ul>
@@ -72,9 +73,9 @@
         <div id="network-options" class="network-options"></div>
       </fieldset>
       <label for="operation-timeout">Total operation timeout (5–120 seconds)</label>
-      <input id="operation-timeout" name="operation_timeout_seconds" type="number" min="5" max="120" value="30" required>
+      <input id="operation-timeout" name="operation_timeout_seconds" type="number" min="5" max="120" value="30" required aria-describedby="dialog-error">
       <p id="address-total" class="muted">0 addresses selected.</p>
-      <div id="dialog-error" class="field-error" role="alert"></div>
+      <div id="dialog-error" class="field-error" role="alert" tabindex="-1"></div>
       <div class="dialog-actions">
         <button id="dialog-cancel" type="button">Cancel</button>
         <button id="dialog-confirm" class="primary" type="submit">Run bounded discovery</button>
