@@ -82,7 +82,9 @@ The server emits no permissive CORS headers. API `OPTIONS` is not an authorizati
 
 Only one passive or active collection may run at a time.
 
-A second collection request returns immediately:
+The browser uses one shared collection-in-flight state. While a passive or active request is pending, it suppresses every second passive or active start and ignores stale completion events that do not match the current operation.
+
+A collection request from another client while the server lock is held returns immediately:
 
 ```text
 409 collection_in_progress
@@ -207,7 +209,7 @@ The full Nmap executable path is never returned.
 }
 ```
 
-Capability reporting does not execute `ifconfig`, `netstat`, `arp`, or Nmap discovery.
+Capability reporting does not execute `ifconfig`, `netstat`, `arp`, or Nmap discovery. If an active request reports `424 dependency_unavailable`, the browser marks active discovery unavailable while retaining passive use. The next successful passive refresh calls this endpoint again; restored Nmap availability re-enables active discovery without a page reload.
 
 ## `GET /api/v1/topology`
 
@@ -248,7 +250,7 @@ The body must be a JSON object with no fields in schema version `1`.
 
 ### Success `200`
 
-Returns a passive snapshot and replaces the latest snapshot atomically.
+Returns a passive snapshot and replaces the latest snapshot atomically. After success, the browser re-reads `/api/v1/capabilities` so an installed or restored Nmap executable can become available without reloading the page.
 
 A coherent partial result returns `200` with:
 
@@ -317,13 +319,20 @@ Phase A failure must not acquire the collection lock and must not execute any co
 Under the collection lock:
 
 1. run approved passive commands;
-2. derive eligible RFC 1918 networks assigned to non-tunnel local interfaces;
-3. require each requested target to be equal to or a subnet of one eligible local network;
-4. assign each target to its most-specific containing local network;
-5. reject supernets, partial overlaps, adjacent networks outside the owner, tunnel-only networks, unrelated RFC 1918 ranges, and non-RFC1918 ranges;
-6. remove exact duplicates and contained targets only within the same owner group;
-7. keep adjacent sibling targets and targets owned by different overlapping local networks separate;
-8. recalculate the final unique-address union and require at most 1024 addresses.
+2. require usable interface evidence before active containment is evaluated;
+3. derive eligible RFC 1918 networks assigned to non-tunnel local interfaces;
+4. require each requested target to be equal to or a subnet of one eligible local network;
+5. assign each target to its most-specific containing local network;
+6. reject supernets, partial overlaps, adjacent networks outside the owner, tunnel-only networks, unrelated RFC 1918 ranges, and non-RFC1918 ranges;
+7. remove exact duplicates and contained targets only within the same owner group;
+8. keep adjacent sibling targets and targets owned by different overlapping local networks separate;
+9. recalculate the final unique-address union and require at most 1024 addresses.
+
+Interface evidence failure is distinct from target rejection:
+
+- interface command timeout returns `504 command_timeout`;
+- unavailable or unparseable interface evidence returns `500 collection_failed`;
+- successful interface collection with no eligible local RFC 1918 network returns `400 invalid_target`.
 
 Passive commands are permitted between Phase A and Phase B because they establish current local eligibility. **Nmap must not be resolved or invoked until both phases pass.**
 
@@ -335,7 +344,19 @@ Passive commands are permitted between Phase A and Phase B because they establis
 
 The command adapter rechecks canonical IPv4 syntax, RFC 1918 membership, target count, deterministic ordering, exact duplicate removal, and the unique-address union. It must preserve contained targets that Phase B retained under different owner groups and must not merge adjacent sibling targets into a broader network.
 
-The subprocess runner enforces `operation_timeout_seconds` as the total process deadline. XML stdout is parsed with `xml.etree.ElementTree`. Only host-up address and status evidence is accepted; port, service, OS, script, and name-resolution data are ignored or rejected.
+The subprocess runner enforces `operation_timeout_seconds` as the total process deadline. XML stdout is parsed with `xml.etree.ElementTree`.
+
+Before Nmap evidence can be merged or counted:
+
+1. the XML root must be `nmaprun`;
+2. only hosts with status `up` are considered;
+3. every accepted host must contain a valid IPv4 address;
+4. every MAC address must normalize to six lowercase hexadecimal octets;
+5. every accepted IPv4 address must belong to at least one Phase B effective target network;
+6. duplicate IPv4 hosts are reduced deterministically;
+7. malformed or out-of-effective-target evidence returns `500 collection_failed`.
+
+Port, service, OS, script, and name-resolution data are ignored or rejected. Nmap evidence validation occurs before topology construction, active metadata publication, or snapshot replacement.
 
 ### Success `200`
 
@@ -365,7 +386,7 @@ The subprocess runner enforces `operation_timeout_seconds` as the total process 
 }
 ```
 
-`effective_networks` is the ordered Phase B result after owner-scoped duplicate and containment reduction. It does not collapse across owner groups or widen adjacent targets.
+`effective_networks` is the ordered Phase B result after owner-scoped duplicate and containment reduction. It does not collapse across owner groups or widen adjacent targets. `hosts_reported_up` counts only validated hosts inside those effective networks.
 
 The successful merged snapshot replaces the latest snapshot atomically.
 
@@ -384,7 +405,7 @@ The successful merged snapshot replaces the latest snapshot atomically.
 - `501 unsupported_platform`
 - `504 command_timeout`
 
-A failed active operation preserves the previous snapshot and does not publish its intermediate passive data.
+A failed active operation preserves the previous snapshot and does not publish its intermediate passive data. Invalid Nmap IPv4, malformed MAC, and a host outside the effective target set are `500 collection_failed` failures.
 
 ## `GET /api/v1/topology/export`
 
