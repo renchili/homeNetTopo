@@ -335,4 +335,4 @@ local host inventories
 packet captures
 ```
 
-Test data must be clearly synthetic and use documentation-reserved addresses and locally administered MAC values. Short single-use inputs stay inline. Do not commit real local network identifiers, command logs, packet captures, scan exports, or user runtime data.
+Test data must be clearly synthetic. Tests that do not depend on private-address semantics should prefer documentation-reserved IPv4 ranges. Tests for RFC 1918 eligibility, containment, owner grouping, address-union limits, or active-discovery evidence may use explicitly synthetic RFC 1918 addresses because those address classes are the behavior under test. Synthetic MAC values must use locally administered addresses. Short single-use inputs stay inline. Do not commit real local network identifiers, command logs, packet captures, scan exports, or user runtime data.
