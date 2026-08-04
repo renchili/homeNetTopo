@@ -1,4 +1,9 @@
-"""Validated domain models and deterministic JSON serialization."""
+"""Define validated topology models and deterministic JSON serialization.
+
+Model validation is the final schema boundary before data is returned by the
+HTTP service or written to an export.  Constructors stay lightweight; the
+snapshot validates the complete graph and all nested values together.
+"""
 
 from __future__ import annotations
 
@@ -17,12 +22,16 @@ class ModelError(ValueError):
 
 
 class Confidence(str, Enum):
+    """Evidence-strength labels exposed by the public snapshot schema."""
+
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
 
 
 class NodeKind(str, Enum):
+    """Closed set of node kinds rendered by the browser."""
+
     LOCAL_HOST = "local_host"
     INTERFACE = "interface"
     SUBNET = "subnet"
@@ -32,6 +41,8 @@ class NodeKind(str, Enum):
 
 
 class EdgeType(str, Enum):
+    """Closed set of observed and inferred topology relationships."""
+
     HOST_USES_INTERFACE = "host_uses_interface"
     INTERFACE_ATTACHED_TO_SUBNET = "interface_attached_to_subnet"
     GATEWAY_FOR_SUBNET = "gateway_for_subnet"
@@ -41,6 +52,8 @@ class EdgeType(str, Enum):
 
 
 class SourceStatusValue(str, Enum):
+    """Collection or inference status for one named evidence source."""
+
     OK = "ok"
     WARNING = "warning"
     FAILED = "failed"
@@ -48,10 +61,14 @@ class SourceStatusValue(str, Enum):
 
 
 def utc_now() -> str:
+    """Return a second-precision RFC 3339 UTC timestamp."""
+
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _parse_utc(value: str) -> None:
+    """Require the exact UTC timestamp form used by snapshot serialization."""
+
     if not isinstance(value, str) or not value.endswith("Z"):
         raise ModelError("timestamp must be RFC 3339 UTC")
     try:
@@ -63,6 +80,8 @@ def _parse_utc(value: str) -> None:
 
 
 def _json_value(value: Any) -> Any:
+    """Convert enums and immutable containers to stable JSON-compatible data."""
+
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, (list, tuple)):
@@ -73,6 +92,8 @@ def _json_value(value: Any) -> Any:
 
 
 def _validate_json_value(value: Any) -> None:
+    """Reject properties that cannot be represented by the public JSON API."""
+
     if value is None or isinstance(value, (str, int, float, bool)):
         return
     if isinstance(value, (list, tuple)):
@@ -89,6 +110,8 @@ def _validate_json_value(value: Any) -> None:
 
 
 def _validate_address(value: str) -> None:
+    """Require canonical IPv4 host or network notation."""
+
     if not isinstance(value, str):
         raise ModelError("addresses must be strings")
     try:
@@ -101,6 +124,8 @@ def _validate_address(value: str) -> None:
 
 
 def _validate_evidence(evidence: Evidence) -> None:
+    """Validate one provenance record and its JSON properties."""
+
     if not evidence.source or not evidence.summary:
         raise ModelError("evidence source and summary must be nonempty")
     if evidence.observed_at is not None:
@@ -109,12 +134,16 @@ def _validate_evidence(evidence: Evidence) -> None:
 
 
 def _nonnegative_integer(value: Any, label: str) -> None:
+    """Reject booleans and negative values where counters are required."""
+
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ModelError(f"{label} must be a nonnegative integer")
 
 
 @dataclass(frozen=True)
 class Evidence:
+    """Provenance attached to a node or edge."""
+
     source: str
     summary: str
     observed_at: str | None = None
@@ -123,6 +152,8 @@ class Evidence:
 
 @dataclass(frozen=True)
 class SourceStatus:
+    """Outcome and duration for one command or derived evidence source."""
+
     type: str
     status: SourceStatusValue
     message: str | None = None
@@ -131,6 +162,8 @@ class SourceStatus:
 
 @dataclass(frozen=True)
 class NetworkDescriptor:
+    """Interface-owned network and its active-discovery eligibility."""
+
     cidr: str
     interface: str
     interface_kind: str
@@ -141,6 +174,8 @@ class NetworkDescriptor:
 
 @dataclass(frozen=True)
 class WarningItem:
+    """User-visible nonfatal uncertainty or partial-collection warning."""
+
     code: str
     message: str
     source: str | None = None
@@ -148,6 +183,8 @@ class WarningItem:
 
 @dataclass(frozen=True)
 class Node:
+    """Validated logical topology node with evidence and confidence."""
+
     id: str
     kind: NodeKind
     label: str
@@ -162,6 +199,8 @@ class Node:
 
 @dataclass(frozen=True)
 class Edge:
+    """Directed observed or inferred relationship between known nodes."""
+
     id: str
     source: str
     target: str
@@ -174,6 +213,8 @@ class Edge:
 
 @dataclass(frozen=True)
 class ActiveDiscoveryMetadata:
+    """Public audit metadata for one completed bounded active operation."""
+
     requested_networks: tuple[str, ...]
     effective_networks: tuple[str, ...]
     completed: bool
@@ -186,6 +227,8 @@ class ActiveDiscoveryMetadata:
 
 @dataclass(frozen=True)
 class TopologySnapshot:
+    """Complete immutable API snapshot and graph integrity boundary."""
+
     schema_version: str
     snapshot_id: str
     collected_at: str
@@ -200,6 +243,8 @@ class TopologySnapshot:
     active_discovery: ActiveDiscoveryMetadata | None = None
 
     def validate(self) -> None:
+        """Validate nested values, graph endpoints, and mode-specific metadata."""
+
         if self.schema_version != "1":
             raise ModelError("unsupported schema version")
         if not isinstance(self.snapshot_id, str) or not self.snapshot_id:
@@ -303,6 +348,8 @@ class TopologySnapshot:
                 raise ModelError("active discovery metadata does not match the fixed command contract")
 
     def to_dict(self) -> dict[str, Any]:
+        """Validate and serialize with deterministic mapping and enum ordering."""
+
         self.validate()
         payload = _json_value(asdict(self))
         if payload["active_discovery"] is None:
@@ -311,4 +358,6 @@ class TopologySnapshot:
 
 
 def sorted_evidence(items: Iterable[Evidence]) -> tuple[Evidence, ...]:
+    """Return evidence in the canonical serialization order."""
+
     return tuple(sorted(items, key=lambda item: (item.source, item.summary, item.observed_at or "")))
