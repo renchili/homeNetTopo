@@ -48,15 +48,19 @@ function rectanglesOverlap(a, b) {
 }
 
 test("state reducer maps ready states and restores after dialog cancellation", () => {
-  const passive = reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: snapshot() });
-  assert.equal(passive.phase, UI_STATES.PASSIVE_READY);
-  assert.equal(reduceState({ ...passive, phase: UI_STATES.ACTIVE_CONFIRM }, { type: "ACTIVE_CANCEL" }).phase, UI_STATES.PASSIVE_READY);
+  const passive = reduceState(initialState(), { type: "PASSIVE_START" });
+  const passiveReady = reduceState(passive, { type: "PASSIVE_SUCCESS", snapshot: snapshot() });
+  assert.equal(passiveReady.phase, UI_STATES.PASSIVE_READY);
+  assert.equal(reduceState({ ...passiveReady, phase: UI_STATES.ACTIVE_CONFIRM }, { type: "ACTIVE_CANCEL" }).phase, UI_STATES.PASSIVE_READY);
   const activeSnapshot = { ...snapshot(), mode: "active" };
-  const active = reduceState(passive, { type: "ACTIVE_SUCCESS", snapshot: activeSnapshot });
+  const activeRunning = reduceState(passiveReady, { type: "ACTIVE_START" });
+  const active = reduceState(activeRunning, { type: "ACTIVE_SUCCESS", snapshot: activeSnapshot });
   assert.equal(active.phase, UI_STATES.ACTIVE_READY);
   assert.equal(reduceState({ ...active, phase: UI_STATES.ACTIVE_CONFIRM }, { type: "ACTIVE_CANCEL" }).phase, UI_STATES.ACTIVE_READY);
-  assert.equal(reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: { ...snapshot(0), nodes: snapshot(0).nodes.filter((node) => node.kind !== "device") } }).phase, UI_STATES.EMPTY_READY);
-  assert.equal(reduceState(initialState(), { type: "PASSIVE_SUCCESS", snapshot: { ...snapshot(), partial: true } }).phase, UI_STATES.PARTIAL_READY);
+  const emptyRunning = reduceState(initialState(), { type: "PASSIVE_START" });
+  assert.equal(reduceState(emptyRunning, { type: "PASSIVE_SUCCESS", snapshot: { ...snapshot(0), nodes: snapshot(0).nodes.filter((node) => node.kind !== "device") } }).phase, UI_STATES.EMPTY_READY);
+  const partialRunning = reduceState(initialState(), { type: "PASSIVE_START" });
+  assert.equal(reduceState(partialRunning, { type: "PASSIVE_SUCCESS", snapshot: { ...snapshot(), partial: true } }).phase, UI_STATES.PARTIAL_READY);
 });
 
 test("API errors map to recovery states", () => {
@@ -66,23 +70,68 @@ test("API errors map to recovery states", () => {
   assert.equal(mapApiError({ error: { code: "unsupported_platform" } }), UI_STATES.UNSUPPORTED_PLATFORM);
 });
 
-test("runtime dependency failure disables active capability", () => {
-  const state = {
+test("collection state prevents interleaving and ignores stale completions", () => {
+  const passive = reduceState(initialState(), { type: "PASSIVE_START" });
+  assert.equal(passive.collectionInFlight, "passive");
+  assert.equal(passive.phase, UI_STATES.LOADING_PASSIVE);
+  assert.strictEqual(reduceState(passive, { type: "ACTIVE_START" }), passive);
+  assert.strictEqual(reduceState(passive, { type: "ACTIVE_SUCCESS", snapshot: { ...snapshot(), mode: "active" } }), passive);
+
+  const ready = reduceState(passive, { type: "PASSIVE_SUCCESS", snapshot: snapshot() });
+  assert.equal(ready.collectionInFlight, null);
+  const active = reduceState(ready, { type: "ACTIVE_START" });
+  assert.equal(active.collectionInFlight, "active");
+  assert.equal(active.phase, UI_STATES.ACTIVE_RUNNING);
+  assert.strictEqual(reduceState(active, { type: "PASSIVE_START" }), active);
+  assert.strictEqual(reduceState(active, {
+    type: "ERROR",
+    collection: "passive",
+    phase: UI_STATES.COLLECTION_CONFLICT,
+    error: { error: { code: "collection_in_progress" } },
+  }), active);
+  const failed = reduceState(active, {
+    type: "ERROR",
+    collection: "active",
+    phase: UI_STATES.REQUEST_ERROR,
+    error: { error: { code: "collection_failed" } },
+  });
+  assert.equal(failed.collectionInFlight, null);
+  assert.equal(failed.phase, UI_STATES.REQUEST_ERROR);
+});
+
+test("runtime dependency failure disables and refreshed capabilities restore active discovery", () => {
+  const ready = {
     ...initialState(),
+    phase: UI_STATES.PASSIVE_READY,
+    snapshot: snapshot(),
     capabilities: {
       passive_collection: true,
       active_discovery: { available: true, unavailable_reason: null, resolution_source: "homebrew_arm64" },
     },
   };
-  const next = reduceState(state, {
+  const running = reduceState(ready, { type: "ACTIVE_START" });
+  const unavailable = reduceState(running, {
     type: "ERROR",
+    collection: "active",
     phase: UI_STATES.DEPENDENCY_UNAVAILABLE,
     error: { error: { code: "dependency_unavailable", details: { resolution_source: "unavailable" } } },
   });
-  assert.equal(next.phase, UI_STATES.DEPENDENCY_UNAVAILABLE);
-  assert.equal(next.capabilities.active_discovery.available, false);
-  assert.equal(next.capabilities.active_discovery.unavailable_reason, "dependency_unavailable");
-  assert.equal(next.capabilities.active_discovery.resolution_source, "unavailable");
+  assert.equal(unavailable.phase, UI_STATES.DEPENDENCY_UNAVAILABLE);
+  assert.equal(unavailable.collectionInFlight, null);
+  assert.equal(unavailable.capabilities.active_discovery.available, false);
+  assert.equal(unavailable.capabilities.active_discovery.unavailable_reason, "dependency_unavailable");
+  assert.equal(unavailable.capabilities.active_discovery.resolution_source, "unavailable");
+
+  const recovered = reduceState(unavailable, {
+    type: "CAPABILITIES",
+    capabilities: {
+      passive_collection: true,
+      active_discovery: { available: true, unavailable_reason: null, resolution_source: "homebrew_arm64" },
+    },
+  });
+  assert.equal(recovered.phase, UI_STATES.PASSIVE_READY);
+  assert.equal(recovered.error, null);
+  assert.equal(recovered.capabilities.active_discovery.available, true);
 });
 
 test("layout is pure, deterministic and rectangles do not overlap", () => {
