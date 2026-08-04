@@ -79,11 +79,14 @@ test("API errors map to recovery states", () => {
 test("collection state prevents interleaving and ignores stale completions", () => {
   const passive = reduceState(initialState(), { type: "PASSIVE_START" });
   assert.equal(passive.collectionInFlight, "passive");
+  assert.equal(passive.phase, UI_STATES.LOADING_PASSIVE);
   assert.strictEqual(reduceState(passive, { type: "ACTIVE_START" }), passive);
   assert.strictEqual(reduceState(passive, { type: "ACTIVE_SUCCESS", snapshot: { ...snapshot(), mode: "active" } }), passive);
   const ready = reduceState(passive, { type: "PASSIVE_SUCCESS", snapshot: snapshot() });
+  assert.equal(ready.collectionInFlight, null);
   const active = reduceState(ready, { type: "ACTIVE_START" });
   assert.equal(active.collectionInFlight, "active");
+  assert.equal(active.phase, UI_STATES.ACTIVE_RUNNING);
   assert.strictEqual(reduceState(active, { type: "PASSIVE_START" }), active);
   assert.strictEqual(reduceState(active, { type: "ERROR", phase: UI_STATES.REQUEST_ERROR, error: { error: { code: "request_error" } } }), active);
   assert.strictEqual(reduceState(active, { type: "ERROR", collection: "passive", phase: UI_STATES.COLLECTION_CONFLICT, error: { error: { code: "collection_in_progress" } } }), active);
@@ -105,8 +108,11 @@ test("runtime dependency failure disables and refreshed capabilities restore act
     phase: UI_STATES.DEPENDENCY_UNAVAILABLE,
     error: { error: { code: "dependency_unavailable", details: { resolution_source: "unavailable" } } },
   });
+  assert.equal(unavailable.phase, UI_STATES.DEPENDENCY_UNAVAILABLE);
   assert.equal(unavailable.collectionInFlight, null);
   assert.equal(unavailable.capabilities.active_discovery.available, false);
+  assert.equal(unavailable.capabilities.active_discovery.unavailable_reason, "dependency_unavailable");
+  assert.equal(unavailable.capabilities.active_discovery.resolution_source, "unavailable");
   const recovered = reduceState(unavailable, {
     type: "CAPABILITIES",
     capabilities: { passive_collection: true, active_discovery: { available: true, unavailable_reason: null, resolution_source: "homebrew_arm64" } },
