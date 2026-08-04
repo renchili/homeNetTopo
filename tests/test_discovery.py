@@ -1,7 +1,15 @@
 import ipaddress
 import unittest
 
-from homenettopo.discovery import ValidationError, eligible_local_networks, parse_nmap_xml, validate_phase_a, validate_phase_b
+from homenettopo.discovery import (
+    ActiveHost,
+    ValidationError,
+    eligible_local_networks,
+    parse_nmap_xml,
+    validate_active_hosts,
+    validate_phase_a,
+    validate_phase_b,
+)
 from homenettopo.interfaces import InterfaceAddress, InterfaceFact
 
 
@@ -114,8 +122,30 @@ class DiscoveryValidationTests(unittest.TestCase):
 
     def test_malformed_or_unexpected_xml_fails(self):
         for value in ("<nmaprun>", "<not-nmap/>"):
-            with self.subTest(value=value), self.assertRaises(ValidationError):
+            with self.subTest(value=value), self.assertRaises(ValidationError) as raised:
                 parse_nmap_xml(value)
+            self.assertEqual((raised.exception.code, raised.exception.status), ("collection_failed", 500))
+
+    def test_invalid_nmap_ipv4_or_mac_fails(self):
+        values = (
+            "<nmaprun><host><status state='up'/><address addr='999.1.1.1' addrtype='ipv4'/></host></nmaprun>",
+            "<nmaprun><host><status state='up'/><address addr='192.168.1.20' addrtype='ipv4'/><address addr='not-a-mac' addrtype='mac'/></host></nmaprun>",
+        )
+        for value in values:
+            with self.subTest(value=value), self.assertRaises(ValidationError) as raised:
+                parse_nmap_xml(value)
+            self.assertEqual((raised.exception.code, raised.exception.status), ("collection_failed", 500))
+
+    def test_active_hosts_must_belong_to_effective_targets(self):
+        effective = (ipaddress.IPv4Network("192.168.1.0/25"),)
+        hosts = (
+            ActiveHost("192.168.1.20", "02:00:00:00:00:20"),
+            ActiveHost("192.168.1.20", "02:00:00:00:00:20"),
+        )
+        self.assertEqual(validate_active_hosts(hosts, effective), (hosts[0],))
+        with self.assertRaises(ValidationError) as raised:
+            validate_active_hosts((ActiveHost("192.168.1.200"),), effective)
+        self.assertEqual((raised.exception.code, raised.exception.status), ("collection_failed", 500))
 
 
 if __name__ == "__main__":
