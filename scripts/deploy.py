@@ -163,10 +163,14 @@ def run_launchctl(*arguments: str, check: bool = True) -> subprocess.CompletedPr
     return completed
 
 
-def bootout_if_loaded() -> None:
-    """Remove the current user service when present; absence is not an error."""
+def bootout_if_loaded(*, check: bool = True) -> bool:
+    """Stop the loaded user service; absence is safe, shutdown failure is not."""
 
-    run_launchctl("bootout", service_domain(), str(PLIST_PATH), check=False)
+    loaded = run_launchctl("print", service_target(), check=False)
+    if loaded.returncode != 0:
+        return False
+    stopped = run_launchctl("bootout", service_target(), check=check)
+    return stopped.returncode == 0
 
 
 def stage_runtime(root: Path = SOURCE_ROOT) -> Path:
@@ -296,8 +300,10 @@ def install(port: int, nmap_path: str | None) -> None:
     runtime_replaced = False
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    bootout_if_loaded()
     try:
+        # A loaded old process must stop before files or the plist are changed;
+        # otherwise its health endpoint could be mistaken for the new version.
+        bootout_if_loaded()
         backup = replace_runtime(staging)
         runtime_replaced = True
         write_plist(payload)
@@ -305,9 +311,7 @@ def install(port: int, nmap_path: str | None) -> None:
         run_launchctl("kickstart", "-k", service_target())
         health = wait_for_health(port)
     except Exception:
-        bootout_if_loaded()
-        # If replace_runtime itself failed, it already restored the previous
-        # tree. Removing INSTALL_DIR again would destroy that recovery.
+        bootout_if_loaded(check=False)
         if runtime_replaced:
             restore_runtime(backup)
         restore_plist(previous_plist)
