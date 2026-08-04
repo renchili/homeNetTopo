@@ -1,4 +1,8 @@
-"""Parser for macOS ifconfig output."""
+"""Parse the IPv4 facts used from macOS ``ifconfig -a`` output.
+
+The parser intentionally ignores unrelated protocol families and preserves only
+facts needed for topology construction and active-target containment.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class InterfaceAddress:
+    """One canonical IPv4 address assignment observed on an interface."""
+
     address: str
     prefix_length: int
     network: str
@@ -17,6 +23,8 @@ class InterfaceAddress:
 
 @dataclass(frozen=True)
 class InterfaceFact:
+    """Normalized interface flags, classification, and IPv4 assignments."""
+
     name: str
     flags: tuple[str, ...]
     kind: str
@@ -24,11 +32,15 @@ class InterfaceFact:
 
 
 def _prefix_from_mask(mask: str) -> int:
+    """Convert macOS hexadecimal or dotted netmasks to a prefix length."""
+
     value = int(mask, 16) if mask.lower().startswith("0x") else int(ipaddress.IPv4Address(mask))
     return bin(value).count("1")
 
 
 def _kind(name: str, flags: tuple[str, ...]) -> str:
+    """Classify tunnel and virtual interfaces conservatively by name and flags."""
+
     if name.startswith(("utun", "tun", "tap")) or "POINTOPOINT" in flags:
         return "tunnel"
     if name.startswith(("bridge", "awdl", "llw", "vmnet", "vnic", "gif", "stf")):
@@ -37,10 +49,18 @@ def _kind(name: str, flags: tuple[str, ...]) -> str:
 
 
 def parse_ifconfig(text: str) -> tuple[InterfaceFact, ...]:
+    """Return deterministic IPv4 interface facts from macOS ``ifconfig`` text.
+
+    Individual malformed ``inet`` rows are ignored because other addresses on
+    the same interface may still be coherent.  Nonempty text with no interface
+    blocks is rejected so command-format drift cannot look like an empty host.
+    """
+
     blocks: list[tuple[str, list[str]]] = []
     current_name: str | None = None
     current_lines: list[str] = []
     for raw_line in text.splitlines():
+        # A non-indented ``name: flags=`` line starts a new macOS interface block.
         if raw_line and not raw_line[0].isspace() and ": flags=" in raw_line:
             if current_name is not None:
                 blocks.append((current_name, current_lines))
