@@ -21,7 +21,14 @@ export const VERTICAL_GAP = 28;
 export const COLUMN_STRIDE = NODE_WIDTH + HORIZONTAL_GAP;
 
 export function initialState() {
-  return { phase: UI_STATES.BOOT, snapshot: null, capabilities: null, selectedId: null, error: null };
+  return {
+    phase: UI_STATES.BOOT,
+    snapshot: null,
+    capabilities: null,
+    selectedId: null,
+    error: null,
+    collectionInFlight: null,
+  };
 }
 
 function readyPhase(snapshot) {
@@ -33,16 +40,49 @@ function readyPhase(snapshot) {
 
 export function reduceState(state, action) {
   switch (action.type) {
-    case "PASSIVE_START": return { ...state, phase: UI_STATES.LOADING_PASSIVE, error: null };
-    case "PASSIVE_SUCCESS": return { ...state, phase: readyPhase(action.snapshot), snapshot: action.snapshot, error: null, selectedId: null };
-    case "ACTIVE_CONFIRM": return { ...state, phase: UI_STATES.ACTIVE_CONFIRM, error: null };
+    case "PASSIVE_START":
+      if (state.collectionInFlight) return state;
+      return { ...state, phase: UI_STATES.LOADING_PASSIVE, error: null, collectionInFlight: "passive" };
+    case "PASSIVE_SUCCESS":
+      if (state.collectionInFlight !== "passive") return state;
+      return {
+        ...state,
+        phase: readyPhase(action.snapshot),
+        snapshot: action.snapshot,
+        error: null,
+        selectedId: null,
+        collectionInFlight: null,
+      };
+    case "ACTIVE_CONFIRM":
+      if (state.collectionInFlight) return state;
+      return { ...state, phase: UI_STATES.ACTIVE_CONFIRM, error: null };
     case "ACTIVE_CANCEL": return { ...state, phase: readyPhase(state.snapshot), error: null };
-    case "ACTIVE_START": return { ...state, phase: UI_STATES.ACTIVE_RUNNING, error: null };
-    case "ACTIVE_SUCCESS": return { ...state, phase: UI_STATES.ACTIVE_READY, snapshot: action.snapshot, error: null, selectedId: null };
-    case "CAPABILITIES": return { ...state, capabilities: action.capabilities };
+    case "ACTIVE_START":
+      if (state.collectionInFlight) return state;
+      return { ...state, phase: UI_STATES.ACTIVE_RUNNING, error: null, collectionInFlight: "active" };
+    case "ACTIVE_SUCCESS":
+      if (state.collectionInFlight !== "active") return state;
+      return {
+        ...state,
+        phase: UI_STATES.ACTIVE_READY,
+        snapshot: action.snapshot,
+        error: null,
+        selectedId: null,
+        collectionInFlight: null,
+      };
+    case "CAPABILITIES": {
+      const recovered = state.phase === UI_STATES.DEPENDENCY_UNAVAILABLE && action.capabilities?.active_discovery?.available;
+      return {
+        ...state,
+        capabilities: action.capabilities,
+        phase: recovered ? readyPhase(state.snapshot) : state.phase,
+        error: recovered ? null : state.error,
+      };
+    }
     case "SELECT": return { ...state, selectedId: action.id };
     case "CLEAR_SELECTION": return { ...state, selectedId: null };
     case "ERROR": {
+      if (action.collection && state.collectionInFlight !== action.collection) return state;
       let capabilities = state.capabilities;
       if (action.phase === UI_STATES.DEPENDENCY_UNAVAILABLE && capabilities?.active_discovery) {
         capabilities = {
@@ -55,7 +95,13 @@ export function reduceState(state, action) {
           },
         };
       }
-      return { ...state, phase: action.phase, error: action.error, capabilities };
+      return {
+        ...state,
+        phase: action.phase,
+        error: action.error,
+        capabilities,
+        collectionInFlight: action.collection ? null : state.collectionInFlight,
+      };
     }
     default: return state;
   }
