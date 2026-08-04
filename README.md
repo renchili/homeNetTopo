@@ -42,15 +42,27 @@ The first release rejects any bind other than `127.0.0.1`.
 
 ## Deploy as a macOS user service
 
-`scripts/deploy.py` installs HomeNetTopo as a LaunchAgent for the current macOS user. It never uses `sudo`, never changes the loopback bind, and copies only this runtime allowlist:
+`scripts/deploy.py` installs HomeNetTopo as a LaunchAgent for the current macOS user. It never uses `sudo`, never changes the loopback bind, and copies only these versioned runtime files:
 
 ```text
 server.py
 metadata.json
 scripts/deploy.py
-homenettopo/
-web/
+homenettopo/__init__.py
+homenettopo/commands.py
+homenettopo/discovery.py
+homenettopo/interfaces.py
+homenettopo/models.py
+homenettopo/neighbors.py
+homenettopo/routes.py
+homenettopo/topology.py
+web/index.html
+web/app.js
+web/core.mjs
+web/styles.css
 ```
+
+Local caches, tests, documentation, Git metadata, reports, and unlisted files are not installed.
 
 Install or update:
 
@@ -82,7 +94,7 @@ The deployment locations are fixed to the current user:
 ~/Library/Logs/HomeNetTopo
 ```
 
-Installation stages the runtime before replacing the active copy. If LaunchAgent activation or the loopback health check fails, the script restores the previous runtime and property list. Uninstall retains logs unless `--purge-logs` is supplied.
+Installation validates source files, rejects symbolic links, stages the exact runtime before replacing the active copy, disables environment proxies for the loopback health check, and retains the previous runtime until the new LaunchAgent is healthy. If replacement, activation, or health verification fails, the previous runtime and property list are restored. Uninstall retains logs unless `--purge-logs` is supplied.
 
 ## Discovery behavior
 
@@ -157,7 +169,7 @@ Specific IPv4 routes are represented as inferred `routes_to` relationships from 
 
 ## Code documentation policy
 
-Comments and docstrings explain contracts that are not obvious from syntax: security boundaries, parser failure rules, state ownership, atomic publication, rollback behavior, and deterministic algorithms. They should explain *why* a rule exists rather than repeat assignments or control flow. `python3 scripts/check.py` verifies documentation on these critical owners.
+Comments and docstrings explain contracts that are not obvious from syntax: security boundaries, parser failure rules, state ownership, atomic publication, rollback behavior, and deterministic algorithms. They explain *why* a rule exists rather than repeat assignments or control flow. `python3 scripts/check.py` verifies documentation on these critical owners.
 
 ## Privacy and exclusions
 
