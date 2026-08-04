@@ -3,7 +3,7 @@
 
 The deployment intentionally stays inside the current user's Library directory,
 never requests administrator privileges, and keeps the service bound to
-127.0.0.1.  It copies only the explicit runtime allowlist below, so tests,
+127.0.0.1. It copies only the explicit runtime allowlist below, so tests,
 repository metadata, and local development artifacts are not deployed.
 """
 
@@ -33,6 +33,7 @@ RUNTIME_FILES = ("server.py", "metadata.json", "scripts/deploy.py")
 RUNTIME_DIRS = ("homenettopo", "web")
 DEFAULT_PORT = 8765
 HEALTH_TIMEOUT_SECONDS = 10
+MAX_HEALTH_BYTES = 4096
 
 
 class DeploymentError(RuntimeError):
@@ -72,9 +73,23 @@ def canonical_executable(value: str | None) -> str | None:
 
 
 def validate_source_root(root: Path = SOURCE_ROOT) -> None:
-    """Verify that every explicitly deployable runtime path exists."""
+    """Verify that deployable paths exist and contain no symbolic links."""
 
-    missing = [relative for relative in (*RUNTIME_FILES, *RUNTIME_DIRS) if not (root / relative).exists()]
+    root = root.resolve()
+    missing: list[str] = []
+    for relative in (*RUNTIME_FILES, *RUNTIME_DIRS):
+        source = root / relative
+        if not source.exists():
+            missing.append(relative)
+            continue
+        candidates = (source,) if source.is_file() else (source, *source.rglob("*"))
+        for candidate in candidates:
+            if candidate.is_symlink():
+                raise DeploymentError(f"Runtime source contains a symbolic link: {candidate.relative_to(root)}")
+            try:
+                candidate.resolve().relative_to(root)
+            except ValueError as exc:
+                raise DeploymentError(f"Runtime source escapes the repository: {candidate}") from exc
     if missing:
         raise DeploymentError(f"Runtime source paths are missing: {', '.join(missing)}")
 
@@ -107,7 +122,7 @@ def build_launch_agent(python_path: str, port: int, nmap_path: str | None) -> di
 
 
 def service_domain() -> str:
-    """Return the current GUI launchd domain without using elevated privileges."""
+    """Return the current GUI launchd domain without elevated privileges."""
 
     return f"gui/{os.getuid()}"
 
@@ -140,8 +155,9 @@ def bootout_if_loaded() -> None:
 
 
 def stage_runtime(root: Path = SOURCE_ROOT) -> Path:
-    """Copy the runtime allowlist into a temporary sibling directory."""
+    """Copy the validated runtime allowlist into a temporary sibling directory."""
 
+    validate_source_root(root)
     INSTALL_DIR.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".HomeNetTopo-stage-", dir=INSTALL_DIR.parent))
     try:
@@ -149,9 +165,9 @@ def stage_runtime(root: Path = SOURCE_ROOT) -> Path:
             source = root / relative
             destination = staging / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination, follow_symlinks=True)
+            shutil.copy2(source, destination)
         for relative in RUNTIME_DIRS:
-            shutil.copytree(root / relative, staging / relative, symlinks=False)
+            shutil.copytree(root / relative, staging / relative, symlinks=True)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -170,6 +186,9 @@ def replace_runtime(staging: Path) -> Path | None:
     try:
         staging.rename(INSTALL_DIR)
     except Exception:
+        # Restore here because the caller cannot receive ``previous`` when this
+        # function raises. The outer rollback must therefore run only after a
+        # successful return from this function.
         if previous and previous.exists():
             previous.rename(INSTALL_DIR)
         raise
@@ -177,7 +196,7 @@ def replace_runtime(staging: Path) -> Path | None:
 
 
 def restore_runtime(backup: Path | None) -> None:
-    """Restore the previous runtime after a failed launchd activation."""
+    """Restore the previous runtime after a later launchd activation failure."""
 
     shutil.rmtree(INSTALL_DIR, ignore_errors=True)
     if backup and backup.exists():
@@ -223,16 +242,20 @@ def plist_port() -> int:
 
 
 def wait_for_health(port: int, timeout_seconds: int = HEALTH_TIMEOUT_SECONDS) -> dict[str, Any]:
-    """Wait for the loopback health endpoint after launchd starts the service."""
+    """Wait for the loopback health endpoint without using environment proxies."""
 
     deadline = time.monotonic() + timeout_seconds
     url = f"http://127.0.0.1:{port}/api/v1/health"
     last_error: Exception | None = None
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     while time.monotonic() < deadline:
         try:
             request = urllib.request.Request(url, headers={"Host": f"127.0.0.1:{port}"})
-            with urllib.request.urlopen(request, timeout=1) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            with opener.open(request, timeout=1) as response:
+                body = response.read(MAX_HEALTH_BYTES + 1)
+            if len(body) > MAX_HEALTH_BYTES:
+                raise ValueError("health response exceeded the configured limit")
+            payload = json.loads(body.decode("utf-8"))
             if payload.get("status") == "ok" and payload.get("service") == "homeNetTopo":
                 return payload
         except (OSError, ValueError, urllib.error.URLError) as exc:
@@ -247,7 +270,6 @@ def install(port: int, nmap_path: str | None) -> None:
     """Install runtime files, activate launchd, and verify loopback health."""
 
     require_supported_host()
-    validate_source_root()
     python_path = canonical_executable(sys.executable)
     assert python_path is not None
     resolved_nmap = canonical_executable(nmap_path)
@@ -255,18 +277,23 @@ def install(port: int, nmap_path: str | None) -> None:
     staging = stage_runtime()
     previous_plist = PLIST_PATH.read_bytes() if PLIST_PATH.exists() else None
     backup: Path | None = None
+    runtime_replaced = False
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     bootout_if_loaded()
     try:
         backup = replace_runtime(staging)
+        runtime_replaced = True
         write_plist(payload)
         run_launchctl("bootstrap", service_domain(), str(PLIST_PATH))
         run_launchctl("kickstart", "-k", service_target())
         health = wait_for_health(port)
     except Exception:
         bootout_if_loaded()
-        restore_runtime(backup)
+        # If replace_runtime itself failed, it already restored the previous
+        # tree. Removing INSTALL_DIR again would destroy that recovery.
+        if runtime_replaced:
+            restore_runtime(backup)
         restore_plist(previous_plist)
         if previous_plist is not None and INSTALL_DIR.exists():
             run_launchctl("bootstrap", service_domain(), str(PLIST_PATH), check=False)
@@ -308,7 +335,7 @@ def status() -> None:
 
 
 def uninstall(purge_logs: bool) -> None:
-    """Remove the user LaunchAgent and deployed runtime without using sudo."""
+    """Remove the user LaunchAgent and deployed runtime without elevation."""
 
     require_supported_host()
     bootout_if_loaded()
