@@ -2,7 +2,7 @@
 
 ## Status
 
-This contract defines the intended first implementation. It is not evidence that the endpoints already exist or run.
+This contract defines API and topology schema version `1`. It is not execution evidence that the endpoints start or behave correctly on a supported Mac.
 
 ## General rules
 
@@ -305,9 +305,10 @@ X-HomeNetTopo-Request: 1
 3. require a JSON object;
 4. require `networks` with 1–32 string entries;
 5. parse each item as a canonical IPv4 network;
-6. reject loopback, link-local, multicast, unspecified, public, and reserved-only documentation ranges;
-7. reject an absolute unique-address union above 1024;
-8. validate `operation_timeout_seconds` as an integer from 5 through 120.
+6. require each target to be within RFC 1918 space: `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`;
+7. reject loopback, link-local, multicast, unspecified, public, documentation, reserved, and every other non-RFC1918 range;
+8. reject an absolute unique-address union above 1024;
+9. validate `operation_timeout_seconds` as an integer from 5 through 120.
 
 Phase A failure must not acquire the collection lock and must not execute any command.
 
@@ -316,11 +317,13 @@ Phase A failure must not acquire the collection lock and must not execute any co
 Under the collection lock:
 
 1. run approved passive commands;
-2. derive eligible private IPv4 networks assigned to non-tunnel local interfaces;
+2. derive eligible RFC 1918 networks assigned to non-tunnel local interfaces;
 3. require each requested target to be equal to or a subnet of one eligible local network;
-4. reject supernets, partial overlaps, adjacent networks, tunnel-only networks, and unrelated private ranges;
-5. collapse duplicate or contained targets;
-6. recalculate the final unique-address union and require at most 1024 addresses.
+4. assign each target to its most-specific containing local network;
+5. reject supernets, partial overlaps, adjacent networks outside the owner, tunnel-only networks, unrelated RFC 1918 ranges, and non-RFC1918 ranges;
+6. remove exact duplicates and contained targets only within the same owner group;
+7. keep adjacent sibling targets and targets owned by different overlapping local networks separate;
+8. recalculate the final unique-address union and require at most 1024 addresses.
 
 Passive commands are permitted between Phase A and Phase B because they establish current local eligibility. **Nmap must not be resolved or invoked until both phases pass.**
 
@@ -329,6 +332,8 @@ Passive commands are permitted between Phase A and Phase B because they establis
 ```text
 <canonical-nmap-path> -sn -n --max-retries 1 --host-timeout 5s -oX - <validated-targets...>
 ```
+
+The command adapter rechecks canonical IPv4 syntax, RFC 1918 membership, target count, deterministic ordering, exact duplicate removal, and the unique-address union. It must preserve contained targets that Phase B retained under different owner groups and must not merge adjacent sibling targets into a broader network.
 
 The subprocess runner enforces `operation_timeout_seconds` as the total process deadline. XML stdout is parsed with `xml.etree.ElementTree`. Only host-up address and status evidence is accepted; port, service, OS, script, and name-resolution data are ignored or rejected.
 
@@ -359,6 +364,8 @@ The subprocess runner enforces `operation_timeout_seconds` as the total process 
   }
 }
 ```
+
+`effective_networks` is the ordered Phase B result after owner-scoped duplicate and containment reduction. It does not collapse across owner groups or widen adjacent targets.
 
 The successful merged snapshot replaces the latest snapshot atomically.
 
