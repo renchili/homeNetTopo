@@ -73,12 +73,14 @@ def canonical_executable(value: str | None) -> str | None:
 
 
 def validate_source_root(root: Path = SOURCE_ROOT) -> None:
-    """Verify that deployable paths exist and contain no symbolic links."""
+    """Verify that deployable paths contain only regular files and directories."""
 
     root = root.resolve()
     missing: list[str] = []
     for relative in (*RUNTIME_FILES, *RUNTIME_DIRS):
         source = root / relative
+        if source.is_symlink():
+            raise DeploymentError(f"Runtime source contains a symbolic link: {relative}")
         if not source.exists():
             missing.append(relative)
             continue
@@ -86,6 +88,8 @@ def validate_source_root(root: Path = SOURCE_ROOT) -> None:
         for candidate in candidates:
             if candidate.is_symlink():
                 raise DeploymentError(f"Runtime source contains a symbolic link: {candidate.relative_to(root)}")
+            if not candidate.is_file() and not candidate.is_dir():
+                raise DeploymentError(f"Runtime source contains a special file: {candidate.relative_to(root)}")
             try:
                 candidate.resolve().relative_to(root)
             except ValueError as exc:
@@ -155,7 +159,7 @@ def bootout_if_loaded() -> None:
 
 
 def stage_runtime(root: Path = SOURCE_ROOT) -> Path:
-    """Copy the validated runtime allowlist into a temporary sibling directory."""
+    """Copy and revalidate the runtime allowlist in a temporary sibling tree."""
 
     validate_source_root(root)
     INSTALL_DIR.parent.mkdir(parents=True, exist_ok=True)
@@ -168,6 +172,9 @@ def stage_runtime(root: Path = SOURCE_ROOT) -> Path:
             shutil.copy2(source, destination)
         for relative in RUNTIME_DIRS:
             shutil.copytree(root / relative, staging / relative, symlinks=True)
+        # Validate the copied tree as well, so a link introduced between the
+        # first validation and copy cannot enter the installed runtime.
+        validate_source_root(staging)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
