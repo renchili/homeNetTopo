@@ -9,85 +9,76 @@
 - Public API authority: `docs/api-spec.md`
 - Metadata authority: `metadata.json`
 
-This document records implementation ownership. It is not runtime evidence, an acceptance report, an implementation requirement ledger, or automatic authorization for additional files.
+This document records implementation ownership. It is not runtime evidence, an acceptance report, or automatic authorization for additional files.
 
 ## User-intent boundary
 
-The first release is a local macOS topology viewer with:
+The first release is a local macOS topology viewer with a Python 3.10+ loopback service, approved passive evidence, optional bounded Nmap host discovery, a local browser interface, JSON export, in-memory snapshots, and a current-user LaunchAgent deployment path.
 
-- a Python 3.10+ standard-library service bound to `127.0.0.1`;
-- passive evidence from approved `ifconfig`, `netstat`, and `arp` commands;
-- optional bounded Nmap host discovery after explicit confirmation;
-- a local browser interface and JSON export;
-- in-memory snapshots only;
-- no reverse DNS, online enrichment, annotations, persistence, LAN bind, active IPv6, or port/service/OS scanning.
-
-Implementation choices that are not required by these outcomes remain optional and require a separate necessity and authorization decision.
+It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, active IPv6, port/service/OS scanning, containers, cloud deployment, and system-wide installation.
 
 ## Artifact policy
 
-A path listed in this document is an ownership record, not permission to create additional parallel artifacts.
-
-Current test-data policy:
-
-- short single-use parser inputs are inline constants in their owning test modules;
-- there is no `fixtures/`, `samples/`, `examples/`, `demos/`, `reports/`, or generated-artifact directory requirement;
-- a separate data file is allowed only when native format, size, reuse, readability, or tooling makes inline data materially worse and the exact path is separately authorized;
-- real network identities, command logs, packet captures, scan exports, and user runtime data must not enter source control.
+- Short single-use test inputs remain inline in their owning tests.
+- No fixtures, samples, demos, reports, or generated-data directory is required.
+- Local runtime data, deployment logs, topology exports, packet captures, and scan output do not enter source control.
+- `scripts/deploy.py` is the only deployment script. It does not authorize a package manager, container manifest, system installer, or parallel deployment directory.
 
 ## Current owners
 
 | Concern | Production owner | Test owner | Documentation owner |
 |---|---|---|---|
 | Service, request security, collection lock, active orchestration, snapshot publication | `server.py` | `tests/test_server.py`, `tests/test_static_security.py` | `docs/api-spec.md`, `README.md` |
-| Typed command construction, Nmap resolution, and bounded execution | `homenettopo/commands.py` | `tests/test_commands.py` | `docs/design.md` |
+| Approved commands, Nmap resolution, bounded execution | `homenettopo/commands.py` | `tests/test_commands.py` | `docs/design.md` |
 | Interface parsing | `homenettopo/interfaces.py` | `tests/test_interfaces.py` | `docs/design.md` |
 | Route parsing | `homenettopo/routes.py` | `tests/test_routes.py` | `docs/design.md` |
 | Neighbor parsing | `homenettopo/neighbors.py` | `tests/test_neighbors.py` | `docs/design.md` |
-| Active target validation, Nmap XML parsing, and returned-host trust boundary | `homenettopo/discovery.py` | `tests/test_discovery.py` | `docs/api-spec.md`, `docs/design.md` |
+| Active validation and Nmap evidence boundary | `homenettopo/discovery.py` | `tests/test_discovery.py` | `docs/api-spec.md`, `docs/design.md` |
 | Models and deterministic serialization | `homenettopo/models.py` | `tests/test_models.py` | `docs/api-spec.md` |
 | Topology construction | `homenettopo/topology.py` | `tests/test_topology.py` | `docs/design.md` |
-| Browser state, collection coordination, capability recovery, and layout | `web/core.mjs` | `tests/frontend/core.test.mjs` | `docs/design.md` |
-| Browser fetch, DOM, SVG, interaction, focus, and capability recheck | `web/app.js`, `web/index.html`, `web/styles.css` | `tests/test_web_contract.py` | `docs/design.md` |
-| Repository-relative regression entrypoint | `scripts/check.py` | self-checking stages | `README.md` |
+| Browser state, coordination, recovery, and layout | `web/core.mjs` | `tests/frontend/core.test.mjs` | `docs/design.md` |
+| Browser fetch, DOM/SVG, interaction, focus, and export | `web/app.js`, `web/index.html`, `web/styles.css` | `tests/test_web_contract.py` | `docs/design.md` |
+| Current-user LaunchAgent deployment and rollback | `scripts/deploy.py` | `tests/test_static_security.py` | `README.md`, `AGENT.md`, `docs/design.md` |
+| Full regression and documentation enforcement | `scripts/check.py` | self-checking stages | `README.md`, `AGENT.md`, `docs/design.md` |
 
 ## Required contracts
 
-### Collection and state
+### Collection and active discovery
 
-- GET routes are read-only and do not start collection commands.
-- Passive refresh uses only approved passive commands.
-- A nonempty command output that contains no recognizable facts is a parse failure, not a successful empty source.
-- macOS route rows require the IPv4 table header and recognizable destination, gateway, flags, and interface columns; abbreviated network destinations, IPv4 gateways, `link#N`, and MAC gateways are supported.
-- Active discovery validates the request before lock and commands, then checks containment against fresh eligible local networks before resolving or invoking Nmap.
-- One server-side collection runs at a time; a concurrent request from another client returns `409 collection_in_progress`.
-- The browser uses one shared collection-in-flight state, refuses a second passive or active start, and ignores stale completion actions that do not match the current operation.
-- Successful snapshots replace the in-memory snapshot atomically; failure preserves the previous snapshot.
-
-### Active discovery
-
-- Target count: 1–32 networks.
-- Target union: at most 1024 unique IPv4 addresses.
-- Total operation timeout: default 30 seconds, accepted range 5–120.
-- Nmap per-host timeout: fixed 5 seconds.
-- Targets must be RFC 1918 networks within `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16` and must equal or be contained by an eligible non-tunnel local network.
+- Read-only GET routes never start commands.
+- Passive refresh uses only approved commands and may publish a coherent partial snapshot.
+- Active discovery validates request safety before commands, then validates fresh local containment before Nmap.
 - Every target is assigned to its most-specific containing local network.
-- Exact duplicates and contained targets may be removed only within the same owner group. Adjacent sibling targets remain separate, and the command layer preserves the Phase B effective target set except for exact duplicate removal and deterministic ordering.
-- Supernets, partial overlap, adjacent, unrelated, tunnel-only, non-RFC1918, public, documentation, loopback, link-local, multicast, unspecified, and reserved ranges are rejected.
-- Interface command timeout is `504 command_timeout`; unavailable or unparseable interface evidence is `500 collection_failed`; a successful interface collection with no eligible network is `400 invalid_target`.
-- Nmap is limited to host discovery XML output.
-- Nmap IPv4 and optional MAC values are validated before topology construction.
-- Every accepted up-host address must belong to at least one Phase B effective target network.
-- Malformed or out-of-range Nmap evidence is `500 collection_failed` and cannot publish a new snapshot.
+- Exact duplicates and contained targets may be removed only inside the same owner group; adjacent sibling targets remain separate.
+- Nmap may run only after both validation phases pass.
+- Parsed Nmap IPv4 and optional MAC evidence is validated before topology construction.
+- Every accepted up-host remains inside at least one effective target network.
+- Failed operations preserve the previous snapshot.
 
 ### Browser and static delivery
 
-- Static files are served from a fixed allowlist with traversal and symlink protection.
-- The graph uses deterministic top-left coordinates and dynamic upstream placement after the rightmost device or gateway column.
-- Loading, empty, partial, dependency, validation, conflict, request-error, unsupported-platform, confirmation, cancellation, and active-running states have explicit owners.
-- A runtime Nmap dependency failure disables active discovery while preserving passive use.
-- Every successful passive refresh re-reads capabilities so restored Nmap availability can re-enable active discovery without a page reload.
-- Keyboard operation, focus return, reduced motion, narrow layouts, pan, zoom, fit, reset, selection, details, and export remain part of the interface contract.
+- Static files come from a fixed allowlist with traversal and symlink protection.
+- The browser uses one shared collection-in-flight owner and ignores stale completion actions.
+- A successful passive refresh rechecks capabilities so restored Nmap availability can recover without a page reload.
+- Keyboard operation, focus return, reduced motion, pan, zoom, fit, reset, selection, details, and export remain part of the interface contract.
+
+### Local deployment
+
+- `scripts/deploy.py` installs only into the current user's Library and never uses `sudo`.
+- The LaunchAgent label is `com.homenettopo.local` in `gui/<uid>`.
+- The service always receives `--bind 127.0.0.1`.
+- The runtime copy is limited to `server.py`, `metadata.json`, `scripts/deploy.py`, `homenettopo/`, and `web/`.
+- Fixed paths are `~/Library/Application Support/HomeNetTopo`, `~/Library/LaunchAgents/com.homenettopo.local.plist`, and `~/Library/Logs/HomeNetTopo`.
+- Updates stage a complete runtime and keep the previous runtime and plist until LaunchAgent startup and loopback health succeed.
+- Health verification contacts only `127.0.0.1`.
+- Uninstall retains logs unless `--purge-logs` is explicitly requested.
+
+### Code documentation
+
+- Comments explain non-obvious contracts and rationale, not obvious syntax.
+- Critical Python models, parsers, security boundaries, orchestration functions, deployment actions, and regression stages have concise docstrings.
+- Frontend comments cover reducer ownership, stale responses, focus recovery, safe DOM/SVG construction, address-union arithmetic, and deterministic layout.
+- `scripts/check.py` enforces documentation for critical symbols without requiring comments on trivial assignments.
 
 ## Verification definitions
 
@@ -97,10 +88,12 @@ node --test tests/frontend/core.test.mjs
 python3 scripts/check.py
 ```
 
-These commands define the verification entrypoints. A passing or failing status requires executed evidence tied to the exact revision; source definitions alone are not execution evidence.
+Full regression includes compile, metadata, Python tests, documentation guards, cross-owner contracts, deployment guards, asset/CSP checks, Node tests, and tracked-path hygiene.
+
+A passing or failing status requires executed evidence tied to the exact revision. Source definitions alone are not execution evidence.
 
 ## Acceptance boundary
 
-Formal implementation acceptance must independently recheck the exact revision, repository delta, artifact necessity, source and documentation consistency, test execution, browser interaction, supported-macOS startup, and real command boundaries.
+Formal implementation acceptance must independently recheck the exact revision, repository delta, artifact necessity, source and documentation consistency, test execution, current-user LaunchAgent install/update/status/restart/uninstall and rollback, browser interaction, supported-macOS startup, and real command boundaries.
 
-The implementation remains unverified until the independent acceptance workflow produces a verdict from current evidence.
+The implementation and deployment remain unverified until the independent acceptance workflow produces a verdict from current evidence.
