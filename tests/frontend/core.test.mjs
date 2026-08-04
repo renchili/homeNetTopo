@@ -85,6 +85,11 @@ test("collection state prevents interleaving and ignores stale completions", () 
   assert.strictEqual(reduceState(active, { type: "PASSIVE_START" }), active);
   assert.strictEqual(reduceState(active, {
     type: "ERROR",
+    phase: UI_STATES.REQUEST_ERROR,
+    error: { error: { code: "request_error" } },
+  }), active);
+  assert.strictEqual(reduceState(active, {
+    type: "ERROR",
     collection: "passive",
     phase: UI_STATES.COLLECTION_CONFLICT,
     error: { error: { code: "collection_in_progress" } },
