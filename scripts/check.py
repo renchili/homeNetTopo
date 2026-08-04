@@ -290,6 +290,10 @@ def asset_guards() -> None:
     ):
         if marker not in app:
             raise RuntimeError(f"frontend focus/recovery contract missing: {marker}")
+    recheck = app.index("loadCapabilities({ reportError: false })")
+    completion = app.index('dispatch({ type: "PASSIVE_SUCCESS", snapshot })')
+    if recheck > completion:
+        raise RuntimeError("capability recheck must finish before passive collection state is released")
     if "passiveInFlight" in app:
         raise RuntimeError("passive-only concurrency state must not replace shared collection coordination")
     if 'elements["refresh-button"].disabled = true' in app:
@@ -298,6 +302,7 @@ def asset_guards() -> None:
         "collectionInFlight: null",
         'collectionInFlight: "passive"',
         'collectionInFlight: "active"',
+        "if (state.collectionInFlight && !action.collection) return state",
         "if (action.collection && state.collectionInFlight !== action.collection) return state",
         'unavailable_reason: "dependency_unavailable"',
         "available: false",
