@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines the intended first runnable implementation. It is a design contract, not evidence that the application already runs.
+This document defines the intended first runnable implementation. It is a design contract, not evidence that the application already runs or deploys successfully.
 
 ## Goals
 
@@ -12,7 +12,8 @@ This document defines the intended first runnable implementation. It is a design
 - Keep topology data on the Mac and in process memory.
 - Avoid mandatory third-party production dependencies and external frontend assets.
 - Keep passive collection separate from optional bounded active discovery.
-- Define deterministic implementation, UI, and test ownership.
+- Provide a repeatable current-user macOS deployment and removal path.
+- Define deterministic implementation, UI, deployment, documentation, and test ownership.
 
 ## Non-goals
 
@@ -22,6 +23,7 @@ This document defines the intended first runnable implementation. It is a design
 - Reverse-DNS, online hostname, or MAC-vendor enrichment.
 - User annotations or persistent device naming.
 - Persistent snapshots, active IPv6 discovery, LAN bind, or multi-user hosting.
+- System-wide daemons, administrator-level installation, containers, cloud deployment, or remote-host deployment.
 
 ## Runtime and development environment
 
@@ -33,7 +35,7 @@ Production:
 - repository-owned HTML, CSS, JavaScript, ES modules, and SVG;
 - optional Nmap executable for active discovery.
 
-Development-only frontend tests use Node.js 20+ and the built-in test runner without npm packages. Production startup does not require Node.
+Development-only frontend tests use Node.js 20+ and the built-in test runner without npm packages. Production startup and deployment do not require Node.
 
 ## Module ownership
 
@@ -82,8 +84,13 @@ web/app.js
 web/styles.css
   Visual tokens, responsive layout, graph states, focus, and reduced motion.
 
+scripts/deploy.py
+  Current-user macOS LaunchAgent installation, runtime allowlist copy,
+  rollback, loopback health verification, status, restart, and uninstall.
+
 scripts/check.py
-  Repository-relative full static regression entrypoint.
+  Repository-relative full regression entrypoint, including documentation,
+  deployment, contract, asset, test, and hygiene guards.
 ```
 
 ## Approved command model
@@ -277,6 +284,59 @@ This design prevents simple cross-origin GET requests from launching commands be
 - A runtime `424 dependency_unavailable` sets the browser's active capability to unavailable while passive topology remains usable.
 - The next successful passive refresh re-reads `/api/v1/capabilities`; if Nmap is restored, active capability and the ready UI state recover without a page reload.
 
+## Current-user macOS deployment
+
+`scripts/deploy.py` installs or updates one current-user LaunchAgent. It is not a system package installer and never requests administrator privileges.
+
+Fixed deployment locations:
+
+```text
+runtime  ~/Library/Application Support/HomeNetTopo
+plist    ~/Library/LaunchAgents/com.homenettopo.local.plist
+logs     ~/Library/Logs/HomeNetTopo
+```
+
+The copied runtime is an explicit allowlist:
+
+```text
+server.py
+metadata.json
+scripts/deploy.py
+homenettopo/
+web/
+```
+
+Tests, documentation, Git metadata, caches, reports, topology exports, command logs, and machine-specific network data are not deployed.
+
+### Install and update flow
+
+1. require macOS and Python 3.10+;
+2. validate the requested port and optional executable Nmap path;
+3. verify every runtime allowlist path exists;
+4. copy the allowlist to a temporary sibling staging directory;
+5. boot out an existing user LaunchAgent when present;
+6. move the existing runtime to a temporary rollback directory;
+7. atomically move the staged runtime into the fixed install path;
+8. atomically write a mode-`0600` LaunchAgent plist;
+9. bootstrap and kickstart `com.homenettopo.local` in `gui/<uid>`;
+10. poll only `http://127.0.0.1:<port>/api/v1/health`;
+11. delete the rollback directory only after the health response identifies HomeNetTopo as healthy.
+
+If activation or health verification fails, deployment boots out the failed service, restores the prior runtime and plist, and re-bootstrap attempts the prior user service when one existed.
+
+The generated LaunchAgent always passes `--bind 127.0.0.1`. It may pass a validated port and optional canonical Nmap path. It uses `RunAtLoad`, restarts after unexpected failure, writes stdout/stderr to the user log directory, and does not use a shell.
+
+Supported management actions:
+
+```text
+python3 scripts/deploy.py install [--port PORT] [--nmap-path PATH]
+python3 scripts/deploy.py status
+python3 scripts/deploy.py restart
+python3 scripts/deploy.py uninstall [--purge-logs]
+```
+
+Uninstall removes the current-user LaunchAgent and runtime. Logs remain unless `--purge-logs` is explicitly supplied. The script does not contact remote hosts or change system-wide configuration.
+
 ## Topology model
 
 ### Snapshot fields
@@ -466,6 +526,21 @@ Node tests must compare rectangle bounds and prove:
 
 Pointer pan, bounded pointer-centered zoom, keyboard-selectable nodes/edges, Escape behavior, zoom/fit/reset buttons, reduced motion, 200% zoom usability, and no page-level horizontal overflow are required.
 
+## Code documentation policy
+
+Comments and docstrings explain non-obvious contracts rather than restating syntax. Critical documented boundaries are:
+
+- approved command shape, environment, deadlines, output limits, and process cleanup;
+- parser input assumptions, partial-row handling, and whole-source failure conditions;
+- Phase A/Phase B ownership and cross-owner target preservation;
+- post-parser Nmap evidence validation;
+- observed versus inferred topology and deterministic snapshot identifiers;
+- HTTP Host/origin protection, collection-lock release, static allowlist, and atomic publication;
+- reducer operation ownership, stale response rejection, focus recovery, safe DOM/SVG creation, address-union arithmetic, and lane layout;
+- deployment allowlist, current-user limits, atomic replacement, rollback, health checks, and log retention.
+
+Public models, parsers, orchestration functions, deployment actions, and regression stages have concise Python docstrings. Frontend pure-state and DOM owners use JSDoc or section comments at the same material boundaries. `scripts/check.py` statically enforces documentation for the critical owners without requiring comments on obvious assignments.
+
 ## Testing design
 
 ### Python
@@ -474,7 +549,7 @@ Pointer pan, bounded pointer-centered zoom, keyboard-selectable nodes/edges, Esc
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Coverage includes typed commands, Nmap resolution, XML parsing, IPv4/MAC and effective-target evidence validation, Phase A/B validation, interface-evidence failure classification, exact containment boundaries, overlapping local-owner preservation, strict macOS route parsing, malformed four-column route rejection, topology invariants, protected POST routes, read-only GETs, Host/origin checks, concurrency, snapshot preservation, export, static containment, headers, and repository hygiene.
+Coverage includes typed commands, Nmap resolution, XML parsing, IPv4/MAC and effective-target evidence validation, Phase A/B validation, interface-evidence failure classification, exact containment boundaries, overlapping local-owner preservation, strict macOS route parsing, malformed four-column route rejection, topology invariants, protected POST routes, read-only GETs, Host/origin checks, concurrency, snapshot preservation, export, static containment, headers, per-user deployment configuration, deployment runtime allowlisting, and repository hygiene.
 
 ### Frontend logic
 
@@ -490,14 +565,16 @@ Coverage includes UI transitions, passive/active interleaving denial, stale comp
 python3 scripts/check.py
 ```
 
-Full mode requires compile checks, metadata parsing, Python tests, contract consistency guards, asset/CSP scans, Node tests, and tracked-path hygiene. Missing Node fails full mode. A Python-only developer mode is not full evidence.
+Full mode requires compile checks, metadata parsing, Python tests, code-documentation guards, contract consistency guards, deployment guards, asset/CSP scans, Node tests, and tracked-path hygiene. Missing Node fails full mode. A Python-only developer mode is not full evidence.
 
 ## Separate runtime acceptance
 
-Formal project acceptance later requires exact-revision evidence from supported macOS for startup, health/capabilities, protected passive refresh, read-only topology/export, invalid Host/origin rejection, Nmap-unavailable and restored-Nmap recovery, one authorized bounded active discovery, timeout behavior, cross-client collection conflict, browser interactions, keyboard/focus, reduced motion, 200% zoom, and representative tunnel/partial/empty cases.
+Formal project acceptance later requires exact-revision evidence from supported macOS for startup, current-user LaunchAgent install/update/status/restart/uninstall and rollback, health/capabilities, protected passive refresh, read-only topology/export, invalid Host/origin rejection, Nmap-unavailable and restored-Nmap recovery, one authorized bounded active discovery, timeout behavior, cross-client collection conflict, browser interactions, keyboard/focus, reduced motion, 200% zoom, and representative tunnel/partial/empty cases.
 
 ## Privacy and operational limits
 
 Topology remains in process memory unless downloaded. No upload, automatic persistence, annotation storage, DNS enrichment, or vendor lookup occurs.
+
+LaunchAgent logs remain in the current user's Library unless explicitly purged during uninstall. They are runtime artifacts and must not be committed.
 
 Results depend on current routing, ARP state, response behavior, Wi-Fi isolation, VPNs, sleeping devices, filters, and permissions. The UI and README must keep these limitations visible.
