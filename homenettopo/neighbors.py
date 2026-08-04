@@ -1,4 +1,4 @@
-"""Parser for macOS ARP output."""
+"""Parse IPv4 neighbor facts from macOS ``arp -an`` output."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class NeighborFact:
+    """One complete or incomplete ARP-cache observation."""
+
     address: str
     mac_address: str | None
     interface: str | None
@@ -17,10 +19,19 @@ class NeighborFact:
 
 
 def _normalize_mac(value: str) -> str:
+    """Normalize one- or two-digit ARP octets to canonical lowercase form."""
+
     return ":".join(part.zfill(2).lower() for part in value.split(":"))
 
 
 def parse_neighbors(text: str) -> tuple[NeighborFact, ...]:
+    """Return deterministic IPv4 ARP facts while preserving incomplete rows.
+
+    The address/interface pair is the cache-entry identity.  Later duplicate
+    rows replace earlier ones, matching the command's latest visible state.
+    Nonempty output with no recognizable IPv4 entry is a parser failure.
+    """
+
     items: dict[tuple[str, str | None], NeighborFact] = {}
     candidate_lines = 0
     for raw_line in text.splitlines():
