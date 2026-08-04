@@ -1,3 +1,11 @@
+/*
+ * Pure frontend state and deterministic graph helpers.
+ *
+ * This module has no DOM or network side effects.  Keeping reducer ownership,
+ * address arithmetic, and layout here makes those rules directly testable with
+ * the Node.js built-in test runner.
+ */
+
 export const UI_STATES = Object.freeze({
   BOOT: "BOOT",
   LOADING_PASSIVE: "LOADING_PASSIVE",
@@ -20,6 +28,7 @@ export const HORIZONTAL_GAP = 48;
 export const VERTICAL_GAP = 28;
 export const COLUMN_STRIDE = NODE_WIDTH + HORIZONTAL_GAP;
 
+/** Return the complete reducer-owned application state. */
 export function initialState() {
   return {
     phase: UI_STATES.BOOT,
@@ -27,10 +36,13 @@ export function initialState() {
     capabilities: null,
     selectedId: null,
     error: null,
+    // One field owns both passive and active work so their async responses
+    // cannot overwrite each other's phase or snapshot.
     collectionInFlight: null,
   };
 }
 
+/** Derive the stable ready state represented by the current snapshot. */
 function readyPhase(snapshot) {
   if (!snapshot) return UI_STATES.BOOT;
   if (snapshot.mode === "active") return UI_STATES.ACTIVE_READY;
@@ -38,6 +50,13 @@ function readyPhase(snapshot) {
   return snapshot.nodes.some((node) => node.kind === "device") ? UI_STATES.PASSIVE_READY : UI_STATES.EMPTY_READY;
 }
 
+/**
+ * Apply one state action.
+ *
+ * Collection completions and errors must identify their owner.  Actions for a
+ * stale or different operation return the same state object, preventing late
+ * responses from replacing the UI for the operation that is still running.
+ */
 export function reduceState(state, action) {
   switch (action.type) {
     case "PASSIVE_START":
@@ -108,6 +127,7 @@ export function reduceState(state, action) {
   }
 }
 
+/** Map the public API error code to the owning UI recovery state. */
 export function mapApiError(payload) {
   const code = payload?.error?.code ?? "request_error";
   if (code === "collection_in_progress") return UI_STATES.COLLECTION_CONFLICT;
@@ -117,12 +137,14 @@ export function mapApiError(payload) {
   return UI_STATES.REQUEST_ERROR;
 }
 
+/** Convert dotted IPv4 notation to an unsigned numeric sort key. */
 function ipv4Number(value) {
   const parts = value.split(".").map(Number);
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
   return parts.reduce((total, part) => total * 256 + part, 0);
 }
 
+/** Convert canonical CIDR to a closed numeric range for union arithmetic. */
 function cidrRange(cidr) {
   const [address, prefixText] = cidr.split("/");
   const addressNumber = ipv4Number(address);
@@ -133,22 +155,26 @@ function cidrRange(cidr) {
   return { start, end: start + size - 1 };
 }
 
+/** Return the first IPv4 host address as a deterministic layout sort key. */
 function nodeAddressKey(node) {
   const address = node.addresses?.find((item) => /^\d+\.\d+\.\d+\.\d+$/.test(item));
   return address ? ipv4Number(address) ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
 }
 
+/** Return active-eligible networks in stable CIDR/interface order. */
 export function eligibleNetworks(snapshot) {
   return [...(snapshot?.networks ?? [])]
     .filter((network) => network.eligible_for_active_discovery)
     .sort((a, b) => a.cidr.localeCompare(b.cidr) || a.interface.localeCompare(b.interface));
 }
 
+/** Count the unique address union for selected networks. */
 export function selectedAddressCount(networks) {
   const ranges = networks.map((network) => cidrRange(network.cidr)).filter(Boolean).sort((a, b) => a.start - b.start || a.end - b.end);
   let total = 0;
   let current = null;
   for (const range of ranges) {
+    // Merge overlap, containment, and adjacency before adding a completed span.
     if (!current) current = { ...range };
     else if (range.start <= current.end + 1) current.end = Math.max(current.end, range.end);
     else { total += current.end - current.start + 1; current = { ...range }; }
@@ -156,6 +182,12 @@ export function selectedAddressCount(networks) {
   return total + (current ? current.end - current.start + 1 : 0);
 }
 
+/**
+ * Place nodes in deterministic subnet-owned lanes.
+ *
+ * Coordinates are top-left world coordinates.  The upstream column is derived
+ * from the widest device or gateway grid so dense lanes never overlap it.
+ */
 export function layoutTopology(snapshot) {
   const nodes = [...(snapshot?.nodes ?? [])];
   const edges = [...(snapshot?.edges ?? [])];
@@ -232,6 +264,7 @@ export function layoutTopology(snapshot) {
   };
 }
 
+/** Return the deterministic download name for a snapshot. */
 export function exportFilename(snapshot) {
   const timestamp = (snapshot?.collected_at ?? new Date().toISOString()).replace(/[:.]/g, "-");
   return `home-network-topology-${timestamp}.json`;
