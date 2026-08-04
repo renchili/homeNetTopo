@@ -11,7 +11,16 @@ class WebContractTests(unittest.TestCase):
         for name in ("index.html", "core.mjs", "app.js", "styles.css"):
             self.assertTrue((WEB / name).is_file(), name)
         html = (WEB / "index.html").read_text()
-        for hook in ("refresh-button", "discover-button", "export-button", "topology-svg", "discover-dialog", "status-region"):
+        for hook in (
+            "refresh-button",
+            "discover-button",
+            "export-button",
+            "topology-svg",
+            "discover-dialog",
+            "status-region",
+            "status-heading",
+            "dialog-error",
+        ):
             self.assertIn(f'id="{hook}"', html)
 
     def test_active_post_has_custom_header_and_passive_post(self):
@@ -19,7 +28,7 @@ class WebContractTests(unittest.TestCase):
         self.assertIn('"X-HomeNetTopo-Request": "1"', script)
         self.assertIn('/api/v1/topology/refresh', script)
         self.assertIn('/api/v1/discover', script)
-        self.assertIn("new Set(selectedNetworks()", script)
+        self.assertIn("new Set(selected.map", script)
 
     def test_assets_have_no_external_fetch_or_asset_urls(self):
         combined = "\n".join(path.read_text() for path in WEB.iterdir() if path.is_file())
@@ -42,6 +51,22 @@ class WebContractTests(unittest.TestCase):
         self.assertIn("<dialog", html)
         self.assertIn("prefers-reduced-motion", css)
         self.assertIn(":focus-visible", css)
+
+    def test_status_and_validation_states_have_focus_owners_and_recovery_logic(self):
+        html = (WEB / "index.html").read_text()
+        script = (WEB / "app.js").read_text()
+        self.assertRegex(html, r'id="status-heading"[^>]*tabindex="-1"')
+        self.assertRegex(html, r'id="dialog-error"[^>]*role="alert"[^>]*tabindex="-1"')
+        for marker in (
+            "focusStatusHeading",
+            "focusDialogValidation",
+            "requestAnimationFrame",
+            'setAttribute("aria-invalid", "true")',
+            "restoreFocus: false",
+            "No neighbor devices observed",
+            "Unsupported platform",
+        ):
+            self.assertIn(marker, script)
 
 
 if __name__ == "__main__":
