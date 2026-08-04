@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import importlib.util
 import tempfile
 import threading
 import unittest
@@ -9,8 +10,24 @@ from unittest import mock
 
 from server import AppState, HomeNetTopoServer
 
+ROOT = Path(__file__).resolve().parents[1]
+DEPLOY_PATH = ROOT / "scripts" / "deploy.py"
+
+
+def load_deploy_module():
+    """Load the deployment script without requiring scripts to be a package."""
+
+    spec = importlib.util.spec_from_file_location("homenettopo_deploy", DEPLOY_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("deployment module could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 class StaticSecurityTests(unittest.TestCase):
+    """Exercise the fixed static-file allowlist and browser security headers."""
+
     def setUp(self):
         self.state = AppState(port=0, nmap_path=None)
         self.server = HomeNetTopoServer(("127.0.0.1", 0), self.state)
@@ -59,6 +76,43 @@ class StaticSecurityTests(unittest.TestCase):
                 status, _, body = self.request("/app.js")
             self.assertEqual(status, 404)
             self.assertNotIn(b"secret", body)
+
+
+class DeploymentScriptTests(unittest.TestCase):
+    """Keep local deployment user-scoped, loopback-only, and allowlisted."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.deploy = load_deploy_module()
+
+    def test_launch_agent_is_user_scoped_and_loopback_only(self):
+        payload = self.deploy.build_launch_agent("/usr/local/bin/python3", 8765, None)
+        arguments = payload["ProgramArguments"]
+        self.assertEqual(payload["Label"], "com.homenettopo.local")
+        self.assertEqual(arguments[:2], ["/usr/local/bin/python3", str(self.deploy.INSTALL_DIR / "server.py")])
+        self.assertEqual(arguments[arguments.index("--bind") + 1], "127.0.0.1")
+        self.assertEqual(arguments[arguments.index("--port") + 1], "8765")
+        self.assertTrue(str(self.deploy.INSTALL_DIR).startswith(str(Path.home() / "Library")))
+        self.assertTrue(str(self.deploy.PLIST_PATH).startswith(str(Path.home() / "Library" / "LaunchAgents")))
+        self.assertEqual(payload["KeepAlive"], {"SuccessfulExit": False})
+
+    def test_runtime_copy_is_an_explicit_minimal_allowlist(self):
+        self.assertEqual(
+            self.deploy.RUNTIME_FILES,
+            ("server.py", "metadata.json", "scripts/deploy.py"),
+        )
+        self.assertEqual(self.deploy.RUNTIME_DIRS, ("homenettopo", "web"))
+        source = DEPLOY_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("sudo", source)
+        self.assertNotIn("shell=True", source)
+        self.assertNotIn("0.0.0.0", source)
+        self.assertNotIn("https://", source)
+
+    def test_port_validation_rejects_invalid_values(self):
+        self.assertEqual(self.deploy.validate_port("8765"), 8765)
+        for value in (0, 65536, "not-a-port"):
+            with self.subTest(value=value), self.assertRaises(Exception):
+                self.deploy.validate_port(value)
 
 
 if __name__ == "__main__":
