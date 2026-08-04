@@ -1,1 +1,0 @@
-"""HomeNetTopo deterministic tests."""
