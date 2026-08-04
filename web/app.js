@@ -1,3 +1,12 @@
+/*
+ * Browser adapter for HomeNetTopo.
+ *
+ * Pure state and layout decisions live in core.mjs.  This file owns fetch,
+ * focus recovery, safe DOM/SVG construction, pointer input, and downloads.
+ * User-controlled values are assigned through textContent or attributes; HTML
+ * strings are never injected into the document.
+ */
+
 import {
   UI_STATES,
   eligibleNetworks,
@@ -9,6 +18,8 @@ import {
   selectedAddressCount,
 } from "/core.mjs";
 
+// Resolve the fixed document contract once. Missing hooks should fail loudly
+// during development instead of producing alternate hidden UI ownership.
 const elements = Object.fromEntries([
   "snapshot-meta", "refresh-button", "discover-button", "export-button", "status-heading", "status-text", "discover-reason",
   "warning-list", "graph-viewport", "topology-svg", "graph-scene", "details-content", "zoom-out", "zoom-in",
@@ -21,11 +32,13 @@ let view = { x: 24, y: 24, scale: 1 };
 let drag = null;
 let dialogReturnFocus = null;
 
+/** Apply one reducer action, then render the resulting single source of truth. */
 function dispatch(action) {
   state = reduceState(state, action);
   render();
 }
 
+/** Move focus after the current DOM update without scrolling the canvas. */
 function focusElement(element) {
   if (!element || element.disabled || typeof element.focus !== "function") return;
   requestAnimationFrame(() => element.focus({ preventScroll: true }));
@@ -42,15 +55,18 @@ function clearDialogValidation() {
   }
 }
 
+/** Announce the summary before moving focus to the invalid field. */
 function focusDialogValidation(message, field) {
   elements["dialog-error"].textContent = message;
   if (field) field.setAttribute("aria-invalid", "true");
   focusElement(elements["dialog-error"]);
   if (field) {
+    // Two frames let assistive technology announce the alert before editing.
     requestAnimationFrame(() => requestAnimationFrame(() => field.focus({ preventScroll: true })));
   }
 }
 
+/** Fetch one JSON API response and preserve the public error envelope. */
 async function api(path, options = {}) {
   const response = await fetch(path, { cache: "no-store", ...options });
   const payload = await response.json().catch(() => ({ error: { code: "request_error", message: "The server returned an unreadable response." } }));
@@ -58,6 +74,7 @@ async function api(path, options = {}) {
   return payload;
 }
 
+/** Build the protected headers shared by both command-triggering POST routes. */
 function collectionOptions(body) {
   return {
     method: "POST",
@@ -66,6 +83,7 @@ function collectionOptions(body) {
   };
 }
 
+/** Refresh optional-tool capabilities without starting collection commands. */
 async function loadCapabilities({ reportError = true } = {}) {
   try {
     dispatch({ type: "CAPABILITIES", capabilities: await api("/api/v1/capabilities") });
@@ -79,6 +97,7 @@ async function loadCapabilities({ reportError = true } = {}) {
   }
 }
 
+/** Run passive collection and restore focus to the action that started it. */
 async function refreshPassive(event = null) {
   if (state.collectionInFlight) return;
   const returnFocus = event?.currentTarget ?? null;
@@ -86,6 +105,8 @@ async function refreshPassive(event = null) {
   dispatch({ type: "PASSIVE_START" });
   try {
     const snapshot = await api("/api/v1/topology/refresh", collectionOptions({}));
+    // Capability recovery must finish before PASSIVE_SUCCESS releases the
+    // shared collection owner; otherwise active discovery could use stale data.
     await loadCapabilities({ reportError: false });
     dispatch({ type: "PASSIVE_SUCCESS", snapshot });
     focusStatus = state.phase === UI_STATES.EMPTY_READY;
@@ -108,6 +129,7 @@ function openDiscoverDialog() {
   focusElement(elements["network-options"].querySelector("input") ?? elements["operation-timeout"]);
 }
 
+/** Close the modal and optionally restore reducer state and trigger focus. */
 function closeDiscoverDialog({ restoreState = true, restoreFocus = true } = {}) {
   const returnFocus = dialogReturnFocus;
   if (elements["discover-dialog"].open) elements["discover-dialog"].close();
@@ -137,6 +159,7 @@ function updateAddressTotal() {
   elements["dialog-confirm"].disabled = selected.length === 0;
 }
 
+/** Rebuild options with DOM nodes so CIDRs and interfaces remain plain text. */
 function renderNetworkOptions(selectedKeys = new Set()) {
   elements["network-options"].replaceChildren();
   for (const network of eligibleNetworks(state.snapshot)) {
@@ -161,6 +184,7 @@ function renderNetworkOptions(selectedKeys = new Set()) {
   updateAddressTotal();
 }
 
+/** Validate confirmation input, then run the single bounded active request. */
 async function runActiveDiscovery(event) {
   event.preventDefault();
   if (state.collectionInFlight) return;
@@ -192,6 +216,7 @@ async function runActiveDiscovery(event) {
     const phase = mapApiError(error);
     dispatch({ type: "ERROR", phase, error, collection: "active" });
     if (phase === UI_STATES.VALIDATION_ERROR) {
+      // Reopen the same form values so server-side validation is recoverable.
       dialogReturnFocus = returnFocus;
       renderNetworkOptions(selectedKeys);
       elements["operation-timeout"].value = String(timeout);
@@ -244,6 +269,7 @@ function statusMessage() {
   return state.error?.error?.message ?? messages[state.phase] ?? "";
 }
 
+/** Create SVG elements without serializing user-controlled markup. */
 function svgElement(name, attributes = {}) {
   const element = document.createElementNS("http://www.w3.org/2000/svg", name);
   Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, String(value)));
@@ -255,6 +281,7 @@ function truncate(label, compact) {
   return label.length > limit ? `${label.slice(0, limit - 1)}…` : label;
 }
 
+/** Render accessible selectable SVG nodes and edges from pure layout output. */
 function renderGraph() {
   elements["graph-scene"].replaceChildren();
   if (!state.snapshot) return;
@@ -309,6 +336,7 @@ function selectableKeyHandler(event) {
   }
 }
 
+/** Rebuild the details panel from text nodes and definition-list elements. */
 function renderDetails() {
   const id = state.selectedId;
   if (!id || !state.snapshot) {
@@ -351,6 +379,7 @@ function renderWarnings() {
   }
 }
 
+/** Render all state-derived controls without introducing a second state owner. */
 function render() {
   elements["status-heading"].textContent = statusHeading();
   elements["status-text"].textContent = statusMessage();
@@ -359,6 +388,8 @@ function render() {
   elements["snapshot-meta"].textContent = snapshot ? `${snapshot.mode} · ${new Date(snapshot.collected_at).toLocaleString()}` : "No snapshot loaded.";
   elements["export-button"].disabled = !snapshot;
   if (collectionBusy) {
+    // aria-disabled keeps the refresh trigger focusable while the reducer guard
+    // prevents a duplicate request.
     elements["refresh-button"].setAttribute("aria-disabled", "true");
     elements["refresh-button"].setAttribute("aria-busy", "true");
   } else {
@@ -383,6 +414,7 @@ function applyView() {
   elements["graph-scene"].setAttribute("transform", `translate(${view.x} ${view.y}) scale(${view.scale})`);
 }
 
+/** Apply bounded pointer-centered zoom in SVG world coordinates. */
 function changeZoom(factor, origin = null) {
   const oldScale = view.scale;
   const newScale = Math.min(4, Math.max(0.2, oldScale * factor));
@@ -399,6 +431,7 @@ function fitView() {
   applyView();
 }
 
+/** Download the server-owned snapshot without re-running collection. */
 async function exportSnapshot() {
   if (!state.snapshot) return;
   try {
@@ -420,6 +453,8 @@ async function exportSnapshot() {
   }
 }
 
+// Event wiring remains at the module edge; all resulting state changes still
+// pass through dispatch/reduceState.
 elements["refresh-button"].addEventListener("click", refreshPassive);
 elements["discover-button"].addEventListener("click", openDiscoverDialog);
 elements["export-button"].addEventListener("click", exportSnapshot);
@@ -460,5 +495,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+// Startup performs passive collection only. Nmap still requires a later,
+// explicit dialog confirmation.
 await loadCapabilities();
 await refreshPassive();
