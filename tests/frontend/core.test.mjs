@@ -66,6 +66,25 @@ test("API errors map to recovery states", () => {
   assert.equal(mapApiError({ error: { code: "unsupported_platform" } }), UI_STATES.UNSUPPORTED_PLATFORM);
 });
 
+test("runtime dependency failure disables active capability", () => {
+  const state = {
+    ...initialState(),
+    capabilities: {
+      passive_collection: true,
+      active_discovery: { available: true, unavailable_reason: null, resolution_source: "homebrew_arm64" },
+    },
+  };
+  const next = reduceState(state, {
+    type: "ERROR",
+    phase: UI_STATES.DEPENDENCY_UNAVAILABLE,
+    error: { error: { code: "dependency_unavailable", details: { resolution_source: "unavailable" } } },
+  });
+  assert.equal(next.phase, UI_STATES.DEPENDENCY_UNAVAILABLE);
+  assert.equal(next.capabilities.active_discovery.available, false);
+  assert.equal(next.capabilities.active_discovery.unavailable_reason, "dependency_unavailable");
+  assert.equal(next.capabilities.active_discovery.resolution_source, "unavailable");
+});
+
 test("layout is pure, deterministic and rectangles do not overlap", () => {
   const input = snapshot(12);
   const before = JSON.stringify(input);
