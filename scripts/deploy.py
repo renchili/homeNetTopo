@@ -180,9 +180,9 @@ def stage_runtime(root: Path = SOURCE_ROOT) -> Path:
             source = root / relative
             destination = staging / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-        # Validate the copied tree as well, so a link introduced between the
-        # first validation and copy cannot enter the installed runtime.
+            # Do not follow a link introduced after the first validation. A
+            # copied link remains visible and is rejected by the staged check.
+            shutil.copy2(source, destination, follow_symlinks=False)
         validate_source_root(staging)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
