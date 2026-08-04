@@ -86,8 +86,8 @@ async function refreshPassive(event = null) {
   dispatch({ type: "PASSIVE_START" });
   try {
     const snapshot = await api("/api/v1/topology/refresh", collectionOptions({}));
-    dispatch({ type: "PASSIVE_SUCCESS", snapshot });
     await loadCapabilities({ reportError: false });
+    dispatch({ type: "PASSIVE_SUCCESS", snapshot });
     focusStatus = state.phase === UI_STATES.EMPTY_READY;
   } catch (error) {
     dispatch({ type: "ERROR", phase: mapApiError(error), error, collection: "passive" });
