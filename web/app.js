@@ -20,6 +20,7 @@ let state = initialState();
 let view = { x: 24, y: 24, scale: 1 };
 let drag = null;
 let dialogReturnFocus = null;
+let passiveInFlight = false;
 
 function dispatch(action) {
   state = reduceState(state, action);
@@ -76,10 +77,13 @@ async function loadCapabilities() {
 }
 
 async function refreshPassive(event = null) {
+  if (passiveInFlight) return;
+  passiveInFlight = true;
   const returnFocus = event?.currentTarget ?? null;
   let focusStatus = false;
+  elements["refresh-button"].setAttribute("aria-disabled", "true");
+  elements["refresh-button"].setAttribute("aria-busy", "true");
   dispatch({ type: "PASSIVE_START" });
-  elements["refresh-button"].disabled = true;
   try {
     const snapshot = await api("/api/v1/topology/refresh", collectionOptions({}));
     dispatch({ type: "PASSIVE_SUCCESS", snapshot });
@@ -88,7 +92,9 @@ async function refreshPassive(event = null) {
     dispatch({ type: "ERROR", phase: mapApiError(error), error });
     focusStatus = true;
   } finally {
-    elements["refresh-button"].disabled = false;
+    passiveInFlight = false;
+    elements["refresh-button"].removeAttribute("aria-disabled");
+    elements["refresh-button"].removeAttribute("aria-busy");
     if (focusStatus) focusStatusHeading();
     else focusElement(returnFocus);
   }
@@ -354,10 +360,13 @@ function render() {
   elements["export-button"].disabled = !snapshot;
   const active = state.capabilities?.active_discovery;
   const eligible = eligibleNetworks(snapshot);
-  elements["discover-button"].disabled = !snapshot || !active?.available || !eligible.length || state.phase === UI_STATES.ACTIVE_RUNNING;
-  elements["discover-reason"].textContent = !active?.available
-    ? active?.unavailable_reason === "unsupported_platform" ? "Active discovery is unavailable on this platform." : "Install Nmap to enable bounded active discovery."
-    : !eligible.length && snapshot ? "No eligible non-tunnel RFC 1918 network is available." : "";
+  const dependencyUnavailable = state.phase === UI_STATES.DEPENDENCY_UNAVAILABLE || active?.unavailable_reason === "dependency_unavailable";
+  elements["discover-button"].disabled = !snapshot || !active?.available || !eligible.length || state.phase === UI_STATES.ACTIVE_RUNNING || dependencyUnavailable;
+  elements["discover-reason"].textContent = dependencyUnavailable
+    ? "Install or restore Nmap to enable bounded active discovery."
+    : !active?.available
+      ? active?.unavailable_reason === "unsupported_platform" ? "Active discovery is unavailable on this platform." : "Install Nmap to enable bounded active discovery."
+      : !eligible.length && snapshot ? "No eligible non-tunnel RFC 1918 network is available." : "";
   renderWarnings();
   renderGraph();
   renderDetails();
