@@ -1,4 +1,9 @@
-"""Two-phase active-target validation and Nmap XML parsing."""
+"""Validate active targets in two phases and parse bounded Nmap evidence.
+
+Phase A owns request syntax and absolute RFC 1918 limits.  Phase B owns current
+local-interface containment.  Parsed Nmap results cross a final trust boundary
+before they may affect topology or snapshot metadata.
+"""
 
 from __future__ import annotations
 
@@ -28,6 +33,8 @@ _MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 
 
 class ValidationError(ValueError):
+    """Normalized validation failure with HTTP-facing status and details."""
+
     def __init__(self, code: str, message: str, *, status: int = 400, details: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.code = code
@@ -37,21 +44,29 @@ class ValidationError(ValueError):
 
 @dataclass(frozen=True)
 class DiscoveryRequest:
+    """Canonical Phase A result passed to fresh local containment checks."""
+
     networks: tuple[ipaddress.IPv4Network, ...]
     operation_timeout_seconds: int
 
 
 @dataclass(frozen=True)
 class ActiveHost:
+    """Validated host-up evidence accepted from Nmap XML."""
+
     address: str
     mac_address: str | None = None
 
 
 def address_union_size(networks: Iterable[ipaddress.IPv4Network]) -> int:
+    """Count unique addresses without double-counting overlap or containment."""
+
     return sum(network.num_addresses for network in ipaddress.collapse_addresses(networks))
 
 
 def _remove_duplicate_and_contained(networks: Iterable[ipaddress.IPv4Network]) -> tuple[ipaddress.IPv4Network, ...]:
+    """Reduce targets only inside one already-authorized Phase B owner group."""
+
     kept: list[ipaddress.IPv4Network] = []
     for network in sorted(set(networks), key=lambda item: (item.prefixlen, int(item.network_address))):
         if any(network == existing or network.subnet_of(existing) for existing in kept):
@@ -61,6 +76,8 @@ def _remove_duplicate_and_contained(networks: Iterable[ipaddress.IPv4Network]) -
 
 
 def network_is_active_eligible(network: ipaddress.IPv4Network) -> bool:
+    """Return whether a network belongs to the fixed active RFC 1918 scope."""
+
     within_rfc1918 = any(network == private or network.subnet_of(private) for private in RFC1918_RANGES)
     return within_rfc1918 and not (
         network.is_loopback
@@ -73,11 +90,20 @@ def network_is_active_eligible(network: ipaddress.IPv4Network) -> bool:
 
 
 def _validate_network_class(network: ipaddress.IPv4Network) -> None:
+    """Raise the public target error for any network outside active scope."""
+
     if not network_is_active_eligible(network):
         raise ValidationError("invalid_target", "The requested network is not eligible for active discovery.")
 
 
 def validate_phase_a(body: Any) -> DiscoveryRequest:
+    """Validate request shape and absolute safety limits before any command.
+
+    This phase deliberately has no dependency on current interface state.  Its
+    output is safe to retain while the server later acquires the collection lock
+    and gathers fresh evidence for Phase B.
+    """
+
     if not isinstance(body, dict):
         raise ValidationError("bad_request", "The request body must be a JSON object.")
     unknown = set(body) - {"networks", "operation_timeout_seconds"}
@@ -107,6 +133,8 @@ def validate_phase_a(body: Any) -> DiscoveryRequest:
 
 
 def eligible_local_networks(interfaces: Iterable[InterfaceFact]) -> tuple[ipaddress.IPv4Network, ...]:
+    """Derive deterministic non-tunnel RFC 1918 networks from fresh interfaces."""
+
     networks: set[ipaddress.IPv4Network] = set()
     for interface in interfaces:
         if interface.kind == "tunnel":
@@ -119,6 +147,13 @@ def eligible_local_networks(interfaces: Iterable[InterfaceFact]) -> tuple[ipaddr
 
 
 def validate_phase_b(request: DiscoveryRequest, interfaces: Iterable[InterfaceFact]) -> tuple[ipaddress.IPv4Network, ...]:
+    """Authorize targets against their most-specific fresh local network owner.
+
+    Contained targets are reduced only when they share that owner.  A target
+    retained under a more-specific overlapping interface remains distinct when
+    passed to the command layer.
+    """
+
     local_networks = eligible_local_networks(interfaces)
     if not local_networks:
         raise ValidationError("invalid_target", "No eligible local network is available.")
@@ -128,6 +163,8 @@ def validate_phase_b(request: DiscoveryRequest, interfaces: Iterable[InterfaceFa
         containing = [local for local in local_networks if target == local or target.subnet_of(local)]
         if not containing:
             raise ValidationError("invalid_target", "The requested network is outside eligible local networks.")
+        # The longest prefix is the narrowest local network that can authorize
+        # this target and therefore owns its duplicate/containment reduction.
         owner = max(containing, key=lambda item: item.prefixlen)
         grouped.setdefault(owner, []).append(target)
 
@@ -145,6 +182,8 @@ def validate_phase_b(request: DiscoveryRequest, interfaces: Iterable[InterfaceFa
 
 
 def parse_nmap_xml(text: str) -> tuple[ActiveHost, ...]:
+    """Parse only host-up IPv4 and optional canonical MAC evidence from XML."""
+
     try:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
@@ -174,6 +213,8 @@ def parse_nmap_xml(text: str) -> tuple[ActiveHost, ...]:
             mac = raw_mac.lower()
             if not _MAC_RE.fullmatch(mac):
                 raise ValidationError("collection_failed", "Nmap XML contains an invalid MAC address.", status=500)
+        # IPv4 is the active-host identity; deterministic last-write behavior
+        # also removes duplicate host elements from the Nmap document.
         hosts[ipv4] = ActiveHost(ipv4, mac)
     return tuple(sorted(hosts.values(), key=lambda item: ipaddress.IPv4Address(item.address)))
 
@@ -182,6 +223,13 @@ def validate_active_hosts(
     hosts: Iterable[ActiveHost],
     effective_networks: Iterable[ipaddress.IPv4Network],
 ) -> tuple[ActiveHost, ...]:
+    """Enforce the post-parser trust boundary before snapshot publication.
+
+    Nmap is invoked with validated targets, but its output is still untrusted.
+    Every returned address is checked again so malformed or unexpected evidence
+    cannot add a host outside the authorized scan scope.
+    """
+
     allowed = tuple(effective_networks)
     validated: dict[str, ActiveHost] = {}
     for host in hosts:
