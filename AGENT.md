@@ -35,6 +35,7 @@ Names already present in approved command output may be retained with source evi
 - Browser assets: repository-owned HTML, CSS, JavaScript, ES modules, and SVG; no required CDN.
 - Optional active-discovery executable: Nmap.
 - Development-only frontend logic tests: Node.js 20 or newer using the built-in test runner; no npm packages.
+- User-service deployment: `python3 scripts/deploy.py install`, using the current user's macOS LaunchAgent domain only.
 - Bind: `127.0.0.1` only.
 - Default port: `8765`.
 
@@ -222,6 +223,26 @@ Capabilities on an unsupported platform must report:
 
 When Nmap becomes unavailable during an active request, the browser disables active discovery while preserving passive use. A later passive refresh re-reads `/api/v1/capabilities`; restored Nmap availability returns the UI to the ready state without requiring a page reload.
 
+## Local deployment boundary
+
+`scripts/deploy.py` is the only deployment owner for the first release. It installs HomeNetTopo into the current user's Library directory and manages `com.homenettopo.local` through the current GUI LaunchAgent domain.
+
+Deployment rules:
+
+- never request or invoke `sudo`;
+- never add a LAN, wildcard, IPv6, or configurable bind;
+- use the Python 3.10+ interpreter that runs the deployment script;
+- copy only `server.py`, `metadata.json`, `scripts/deploy.py`, `homenettopo/`, and `web/`;
+- do not copy tests, `.git`, documentation, caches, reports, local inventories, exports, or scan data;
+- stage the new runtime before replacing the installed tree;
+- retain a rollback copy until LaunchAgent bootstrap and loopback `/api/v1/health` succeed;
+- install under `~/Library/Application Support/HomeNetTopo`;
+- write `~/Library/LaunchAgents/com.homenettopo.local.plist`;
+- write service logs under `~/Library/Logs/HomeNetTopo`;
+- uninstall leaves logs unless the user explicitly supplies `--purge-logs`.
+
+The deployment script may contact only the local `127.0.0.1` health endpoint. Cloud deployment, remote hosts, containers, system daemons, package installers, and administrator-level installation are outside the first release.
+
 ## Topology and evidence model
 
 Required evidence categories:
@@ -260,6 +281,7 @@ web/app.js                        fetch, capability recovery, DOM/SVG, pointer/k
 web/styles.css                    visual tokens, responsive layout, focus, reduced motion
 tests/                            deterministic Python tests with short synthetic parser inputs inline
 tests/frontend/core.test.mjs      Node built-in tests for pure frontend logic
+scripts/deploy.py                 per-user macOS LaunchAgent deployment, rollback, health, status, restart, uninstall
 scripts/check.py                  repository-relative full regression entrypoint
 docs/                             design, API, ownership, and decisions
 README.md                         operator setup and usage
@@ -292,6 +314,12 @@ upstream_x = max(1160, device_grid_right + 48)
 
 Each subnet owns a separate vertical lane. Three device columns are used by default and four when a subnet has more than 30 devices. Tests must prove deterministic coordinates and no rectangle overlap, including the dynamic upstream column.
 
+## Code documentation boundary
+
+Production comments and docstrings must explain non-obvious contracts rather than restate syntax. Required topics include command and HTTP security boundaries, parser failure behavior, two-phase target ownership, post-Nmap evidence validation, snapshot publication, reducer action ownership, focus recovery, deterministic address-union arithmetic, graph layout, deployment rollback, and user-level installation limits.
+
+Public models, parsers, orchestration functions, deployment actions, and regression stages require concise function or class documentation. Frontend pure-state and DOM owners require JSDoc or section comments at the same material boundaries. `scripts/check.py` owns static enforcement for these critical symbols.
+
 ## Verification ownership
 
 Python tests:
@@ -312,9 +340,9 @@ Full regression:
 python3 scripts/check.py
 ```
 
-Full regression requires Node 20+ and fails if frontend tests cannot run. A Python-only developer mode may report Node as `NOT RUN` but cannot be presented as full-regression or release evidence.
+Full regression requires Node 20+ and fails if frontend tests cannot run. It includes compile, metadata, Python tests, code-documentation guards, cross-owner contracts, asset/CSP checks, Node tests, deployment contracts, and tracked-path hygiene. A Python-only developer mode may report Node as `NOT RUN` but cannot be presented as full-regression or release evidence.
 
-Executed tests, browser checks, CI, runtime scans, and release readiness may be claimed only with exact-revision evidence.
+Executed tests, deployment, browser checks, CI, runtime scans, and release readiness may be claimed only with exact-revision evidence.
 
 ## Repository hygiene
 
