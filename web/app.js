@@ -20,7 +20,6 @@ let state = initialState();
 let view = { x: 24, y: 24, scale: 1 };
 let drag = null;
 let dialogReturnFocus = null;
-let passiveInFlight = false;
 
 function dispatch(action) {
   state = reduceState(state, action);
@@ -67,41 +66,40 @@ function collectionOptions(body) {
   };
 }
 
-async function loadCapabilities() {
+async function loadCapabilities({ reportError = true } = {}) {
   try {
     dispatch({ type: "CAPABILITIES", capabilities: await api("/api/v1/capabilities") });
+    return true;
   } catch (error) {
-    dispatch({ type: "ERROR", phase: UI_STATES.REQUEST_ERROR, error: { error: { code: "request_error", message: "Capabilities could not be loaded." } } });
-    focusStatusHeading();
+    if (reportError) {
+      dispatch({ type: "ERROR", phase: UI_STATES.REQUEST_ERROR, error: { error: { code: "request_error", message: "Capabilities could not be loaded." } } });
+      focusStatusHeading();
+    }
+    return false;
   }
 }
 
 async function refreshPassive(event = null) {
-  if (passiveInFlight) return;
-  passiveInFlight = true;
+  if (state.collectionInFlight) return;
   const returnFocus = event?.currentTarget ?? null;
   let focusStatus = false;
-  elements["refresh-button"].setAttribute("aria-disabled", "true");
-  elements["refresh-button"].setAttribute("aria-busy", "true");
   dispatch({ type: "PASSIVE_START" });
   try {
     const snapshot = await api("/api/v1/topology/refresh", collectionOptions({}));
     dispatch({ type: "PASSIVE_SUCCESS", snapshot });
+    await loadCapabilities({ reportError: false });
     focusStatus = state.phase === UI_STATES.EMPTY_READY;
   } catch (error) {
-    dispatch({ type: "ERROR", phase: mapApiError(error), error });
+    dispatch({ type: "ERROR", phase: mapApiError(error), error, collection: "passive" });
     focusStatus = true;
   } finally {
-    passiveInFlight = false;
-    elements["refresh-button"].removeAttribute("aria-disabled");
-    elements["refresh-button"].removeAttribute("aria-busy");
     if (focusStatus) focusStatusHeading();
     else focusElement(returnFocus);
   }
 }
 
 function openDiscoverDialog() {
-  if (!state.snapshot) return;
+  if (!state.snapshot || state.collectionInFlight || !state.capabilities?.active_discovery?.available) return;
   dialogReturnFocus = document.activeElement;
   clearDialogValidation();
   dispatch({ type: "ACTIVE_CONFIRM" });
@@ -165,6 +163,7 @@ function renderNetworkOptions(selectedKeys = new Set()) {
 
 async function runActiveDiscovery(event) {
   event.preventDefault();
+  if (state.collectionInFlight) return;
   clearDialogValidation();
   const selectedKeys = selectedNetworkKeys();
   const selected = selectedNetworks();
@@ -191,7 +190,7 @@ async function runActiveDiscovery(event) {
     focusElement(returnFocus);
   } catch (error) {
     const phase = mapApiError(error);
-    dispatch({ type: "ERROR", phase, error });
+    dispatch({ type: "ERROR", phase, error, collection: "active" });
     if (phase === UI_STATES.VALIDATION_ERROR) {
       dialogReturnFocus = returnFocus;
       renderNetworkOptions(selectedKeys);
@@ -356,16 +355,24 @@ function render() {
   elements["status-heading"].textContent = statusHeading();
   elements["status-text"].textContent = statusMessage();
   const snapshot = state.snapshot;
+  const collectionBusy = Boolean(state.collectionInFlight);
   elements["snapshot-meta"].textContent = snapshot ? `${snapshot.mode} · ${new Date(snapshot.collected_at).toLocaleString()}` : "No snapshot loaded.";
   elements["export-button"].disabled = !snapshot;
+  if (collectionBusy) {
+    elements["refresh-button"].setAttribute("aria-disabled", "true");
+    elements["refresh-button"].setAttribute("aria-busy", "true");
+  } else {
+    elements["refresh-button"].removeAttribute("aria-disabled");
+    elements["refresh-button"].removeAttribute("aria-busy");
+  }
   const active = state.capabilities?.active_discovery;
   const eligible = eligibleNetworks(snapshot);
   const dependencyUnavailable = state.phase === UI_STATES.DEPENDENCY_UNAVAILABLE || active?.unavailable_reason === "dependency_unavailable";
-  elements["discover-button"].disabled = !snapshot || !active?.available || !eligible.length || state.phase === UI_STATES.ACTIVE_RUNNING || dependencyUnavailable;
+  elements["discover-button"].disabled = !snapshot || !active?.available || !eligible.length || collectionBusy || dependencyUnavailable;
   elements["discover-reason"].textContent = dependencyUnavailable
-    ? "Install or restore Nmap to enable bounded active discovery."
+    ? "Restore Nmap, then refresh passive to check again."
     : !active?.available
-      ? active?.unavailable_reason === "unsupported_platform" ? "Active discovery is unavailable on this platform." : "Install Nmap to enable bounded active discovery."
+      ? active?.unavailable_reason === "unsupported_platform" ? "Active discovery is unavailable on this platform." : "Install Nmap, then refresh passive to check again."
       : !eligible.length && snapshot ? "No eligible non-tunnel RFC 1918 network is available." : "";
   renderWarnings();
   renderGraph();
