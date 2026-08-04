@@ -40,10 +40,10 @@ Development-only frontend tests use Node.js 20+ and the built-in test runner wit
 ```text
 server.py
   Loopback HTTP server, Host/origin checks, routes, response serialization,
-  static-file containment, collection lock, and latest-snapshot state.
+  static-file containment, collection lock, active orchestration, and latest-snapshot state.
 
 homenettopo/commands.py
-  Typed approved commands, executable resolution, shell-free subprocesses,
+  Typed approved commands, Nmap executable resolution, shell-free subprocesses,
   total deadlines, output limits, terminate/kill cleanup, normalized results.
 
 homenettopo/interfaces.py
@@ -57,8 +57,8 @@ homenettopo/neighbors.py
   Parser for `/usr/sbin/arp -an`, including incomplete records.
 
 homenettopo/discovery.py
-  Phase A and Phase B target validation, Nmap resolution and fixed XML command,
-  XML host-up parser, active metadata.
+  Phase A and Phase B target validation, Nmap XML host-up parsing,
+  IPv4/MAC normalization, and effective-target evidence validation.
 
 homenettopo/models.py
   Validated JSON-serializable evidence, source, network, node, edge, warning,
@@ -72,11 +72,12 @@ web/index.html
   Accessible document, controls, status regions, graph, details, and dialog.
 
 web/core.mjs
-  Pure UI state, API/error mapping, target presentation, layout, selection,
-  label truncation, compact mode, and export filename logic.
+  Pure UI state, shared collection-in-flight coordination, API/error mapping,
+  capability recovery, target presentation, layout, selection, and export naming.
 
 web/app.js
-  Fetch, DOM/SVG, pointer and keyboard input, focus, dialog, and download adapter.
+  Fetch, capability recheck, DOM/SVG, pointer and keyboard input, focus,
+  dialog, collection guards, and download adapter.
 
 web/styles.css
   Visual tokens, responsive layout, graph states, focus, and reduced motion.
@@ -132,7 +133,8 @@ On timeout, terminate the process, wait up to two seconds, then kill if needed. 
 6. parse each source independently and treat nonempty unrecognized output as a source failure;
 7. construct a complete or coherent partial passive snapshot;
 8. atomically replace the latest snapshot;
-9. release the lock.
+9. release the lock;
+10. in the browser, re-read capabilities after success so restored Nmap availability can be detected.
 
 One source may fail while the other evidence remains coherent. Failure of all material passive sources returns `collection_failed` and preserves the prior snapshot.
 
@@ -162,24 +164,34 @@ After Phase A succeeds:
 
 1. acquire the collection lock or return `409`;
 2. run fresh passive collection;
-3. derive eligible RFC 1918 networks assigned to non-tunnel interfaces;
-4. require every requested target to be equal to or a subnet of one eligible local network;
-5. assign every target to its most-specific containing local network;
-6. reject supernets, partial overlaps, adjacent networks, unrelated RFC 1918 networks, non-RFC1918 networks, and tunnel-only networks;
-7. remove exact duplicates and contained targets only within the same owner group; adjacent sibling targets remain separate and are never widened;
-8. recalculate the final unique-address union and require at most 1024.
+3. require usable interface evidence before active containment evaluation;
+4. derive eligible RFC 1918 networks assigned to non-tunnel interfaces;
+5. require every requested target to be equal to or a subnet of one eligible local network;
+6. assign every target to its most-specific containing local network;
+7. reject supernets, partial overlaps, adjacent networks, unrelated RFC 1918 networks, non-RFC1918 networks, and tunnel-only networks;
+8. remove exact duplicates and contained targets only within the same owner group; adjacent sibling targets remain separate and are never widened;
+9. recalculate the final unique-address union and require at most 1024.
+
+Interface evidence failure is not a target validation error:
+
+- interface command timeout returns `504 command_timeout`;
+- unavailable or unparseable interface evidence returns `500 collection_failed`;
+- successful interface collection with no eligible local RFC 1918 network returns `400 invalid_target`.
 
 Only after both phases pass:
 
 1. resolve Nmap;
 2. pass the Phase B effective target set to the fixed command adapter without cross-owner containment reduction;
 3. run the fixed XML-output command with the requested total operation deadline;
-4. parse host status and addresses using `xml.etree.ElementTree`;
-5. merge active evidence into the fresh passive snapshot;
-6. atomically replace the latest snapshot;
-7. release the lock.
+4. require an `nmaprun` XML root and consider only hosts whose status is `up`;
+5. validate each reported IPv4 address and normalize each optional MAC to six lowercase hexadecimal octets;
+6. require every accepted IPv4 address to belong to at least one Phase B effective target network;
+7. reject malformed or out-of-range Nmap evidence as `500 collection_failed`;
+8. merge only validated active evidence into the fresh passive snapshot;
+9. atomically replace the latest snapshot;
+10. release the lock.
 
-A failed active operation preserves the previous snapshot. Intermediate passive data is not published.
+Duplicate reported IPv4 hosts are reduced deterministically. A failed active operation preserves the previous snapshot. Intermediate passive data is not published.
 
 ## Target-containment rules
 
@@ -228,7 +240,9 @@ Rules:
 - GET topology returns the latest snapshot or `404`.
 - Export downloads the latest snapshot or returns `404`.
 - One passive or active collection may run at a time.
-- Second collection returns `409` immediately.
+- The browser uses a single collection-in-flight field and refuses a second passive or active start until the current operation resolves.
+- Stale success or error actions whose operation kind does not match the active collection are ignored.
+- A second collection from another client returns `409` immediately.
 - Successful and coherent partial passive refreshes replace the snapshot atomically.
 - Successful active discovery replaces the snapshot atomically.
 - Failed operations preserve the previous snapshot.
@@ -254,12 +268,14 @@ When present, Origin must match an accepted loopback origin, and `Sec-Fetch-Site
 
 This design prevents simple cross-origin GET requests from launching commands because every command-triggering route is a protected POST.
 
-## Unsupported-platform behavior
+## Unsupported-platform and optional-tool recovery
 
 - Health may return `200` and report the actual normalized platform.
-- Capabilities report `passive_collection: false`.
-- Active discovery reports `available: false` and `unavailable_reason: "unsupported_platform"`.
+- Capabilities report `passive_collection: false` on unsupported platforms.
+- Active discovery reports `available: false` and `unavailable_reason: "unsupported_platform"` when collection is unsupported.
 - Collection endpoints return `501 unsupported_platform` without running commands.
+- A runtime `424 dependency_unavailable` sets the browser's active capability to unavailable while passive topology remains usable.
+- The next successful passive refresh re-reads `/api/v1/capabilities`; if Nmap is restored, active capability and the ready UI state recover without a page reload.
 
 ## Topology model
 
@@ -321,7 +337,7 @@ Confidence:
 - One local-host node represents the Mac.
 - Interfaces attach the host to subnet nodes.
 - Gateways require route and address evidence.
-- Neighbor and active hosts attach to subnets through explicit address-membership inference.
+- Neighbor and validated active hosts attach to subnets through explicit address-membership inference.
 - Upstream boundaries represent networks beyond local observation.
 - Compatible device evidence merges conservatively.
 - Conflicting names or MACs remain visible as warnings.
@@ -362,7 +378,7 @@ active discovery dialog
   confirm/cancel
 ```
 
-Initial page load calls `POST /api/v1/topology/refresh` with the protected request headers. It does not invoke Nmap.
+Initial page load calls `POST /api/v1/topology/refresh` with the protected request headers. It does not invoke Nmap. A successful passive refresh also rechecks capabilities.
 
 ## Visual system
 
@@ -435,16 +451,16 @@ Node tests must compare rectangle bounds and prove:
 | State | Entry | Visible result | Actions | Focus/recovery |
 |---|---|---|---|---|
 | `BOOT` | script starts | application shell | none | status announced |
-| `LOADING_PASSIVE` | protected passive POST starts | loading or stale graph | no duplicate refresh | focus remains on trigger |
-| `PASSIVE_READY` | passive success | graph and timestamp | refresh, discover, export, select | trigger regains focus |
+| `LOADING_PASSIVE` | protected passive POST starts | loading or stale graph | no passive or active duplicate start | focus remains on trigger |
+| `PASSIVE_READY` | passive success | graph, timestamp, refreshed capabilities | refresh, discover, export, select | trigger regains focus |
 | `PARTIAL_READY` | coherent partial | graph and warnings | same as ready | warnings announced |
 | `EMPTY_READY` | no neighbor devices | local structure and explanation | refresh, discover, export | empty heading focusable |
 | `ACTIVE_CONFIRM` | discover selected | target and timeout dialog | confirm/cancel | modal focus and return |
-| `ACTIVE_RUNNING` | active POST starts | progress and stale prior graph | duplicate submit disabled | progress announced once |
+| `ACTIVE_RUNNING` | active POST starts | progress and stale prior graph | no passive or active duplicate start | progress announced once |
 | `ACTIVE_READY` | active success | merged graph | refresh, rediscover, export | active trigger regains focus |
-| `DEPENDENCY_UNAVAILABLE` | Nmap absent | passive graph and guidance | refresh/export | disabled reason visible |
+| `DEPENDENCY_UNAVAILABLE` | Nmap absent or fails at runtime | passive graph and recovery guidance | passive refresh/export | disabled reason visible; refresh rechecks Nmap |
 | `VALIDATION_ERROR` | request invalid | summary and field errors | edit/cancel | summary then invalid field |
-| `COLLECTION_CONFLICT` | `409` | prior graph and busy message | retry later | message announced |
+| `COLLECTION_CONFLICT` | server `409` from another client | prior graph and busy message | retry later | message announced |
 | `REQUEST_ERROR` | timeout or request failure | prior graph retained | retry/refresh | recovery reachable |
 | `UNSUPPORTED_PLATFORM` | collection unavailable | explanatory state | health/capability details | heading focused |
 
@@ -458,7 +474,7 @@ Pointer pan, bounded pointer-centered zoom, keyboard-selectable nodes/edges, Esc
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Coverage includes typed commands, Nmap resolution, XML parsing, Phase A/B validation, exact containment boundaries, overlapping local-owner preservation, strict macOS route parsing, malformed four-column route rejection, topology invariants, protected POST routes, read-only GETs, Host/origin checks, concurrency, snapshot preservation, export, static containment, headers, and repository hygiene.
+Coverage includes typed commands, Nmap resolution, XML parsing, IPv4/MAC and effective-target evidence validation, Phase A/B validation, interface-evidence failure classification, exact containment boundaries, overlapping local-owner preservation, strict macOS route parsing, malformed four-column route rejection, topology invariants, protected POST routes, read-only GETs, Host/origin checks, concurrency, snapshot preservation, export, static containment, headers, and repository hygiene.
 
 ### Frontend logic
 
@@ -466,7 +482,7 @@ Coverage includes typed commands, Nmap resolution, XML parsing, Phase A/B valida
 node --test tests/frontend/core.test.mjs
 ```
 
-Coverage includes UI transitions, API errors, target presentation, deterministic coordinates, rectangle overlap, dynamic upstream position, compact mode, sorting, selection, and export filename.
+Coverage includes UI transitions, passive/active interleaving denial, stale completion rejection, dependency unavailable-to-available recovery, API errors, target presentation, deterministic coordinates, rectangle overlap, dynamic upstream position, compact mode, sorting, selection, and export filename.
 
 ### Full regression
 
@@ -478,7 +494,7 @@ Full mode requires compile checks, metadata parsing, Python tests, contract cons
 
 ## Separate runtime acceptance
 
-Formal project acceptance later requires exact-revision evidence from supported macOS for startup, health/capabilities, protected passive refresh, read-only topology/export, invalid Host/origin rejection, Nmap-unavailable behavior, one authorized bounded active discovery, timeout behavior, collection conflict, browser interactions, keyboard/focus, reduced motion, 200% zoom, and representative tunnel/partial/empty cases.
+Formal project acceptance later requires exact-revision evidence from supported macOS for startup, health/capabilities, protected passive refresh, read-only topology/export, invalid Host/origin rejection, Nmap-unavailable and restored-Nmap recovery, one authorized bounded active discovery, timeout behavior, cross-client collection conflict, browser interactions, keyboard/focus, reduced motion, 200% zoom, and representative tunnel/partial/empty cases.
 
 ## Privacy and operational limits
 
