@@ -42,7 +42,21 @@ export function reduceState(state, action) {
     case "CAPABILITIES": return { ...state, capabilities: action.capabilities };
     case "SELECT": return { ...state, selectedId: action.id };
     case "CLEAR_SELECTION": return { ...state, selectedId: null };
-    case "ERROR": return { ...state, phase: action.phase, error: action.error };
+    case "ERROR": {
+      let capabilities = state.capabilities;
+      if (action.phase === UI_STATES.DEPENDENCY_UNAVAILABLE && capabilities?.active_discovery) {
+        capabilities = {
+          ...capabilities,
+          active_discovery: {
+            ...capabilities.active_discovery,
+            available: false,
+            unavailable_reason: "dependency_unavailable",
+            resolution_source: action.error?.error?.details?.resolution_source ?? "unavailable",
+          },
+        };
+      }
+      return { ...state, phase: action.phase, error: action.error, capabilities };
+    }
     default: return state;
   }
 }
