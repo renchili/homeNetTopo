@@ -111,8 +111,33 @@ def consistency_guards() -> None:
         InterfaceFact("en0", ("UP",), "physical", (InterfaceAddress("192.168.1.1", 24, "192.168.1.0/24"),)),
         InterfaceFact("en1", ("UP",), "physical", (InterfaceAddress("192.168.1.2", 25, "192.168.1.0/25"),)),
     )
-    if tuple(map(str, discovery.validate_phase_b(overlap_request, overlap_interfaces))) != validated_targets:
+    effective_targets = discovery.validate_phase_b(overlap_request, overlap_interfaces)
+    if tuple(map(str, effective_targets)) != validated_targets:
         raise RuntimeError("Phase B must preserve targets owned by overlapping local networks")
+
+    trusted_host = discovery.ActiveHost("192.168.1.20", "02:00:00:00:00:20")
+    if discovery.validate_active_hosts((trusted_host,), effective_targets) != (trusted_host,):
+        raise RuntimeError("active host validation changed an in-scope Nmap result")
+    try:
+        discovery.validate_active_hosts((discovery.ActiveHost("192.168.2.20"),), effective_targets)
+    except discovery.ValidationError as exc:
+        if exc.code != "collection_failed" or exc.status != 500:
+            raise RuntimeError("out-of-range Nmap evidence uses the wrong normalized error") from exc
+    else:
+        raise RuntimeError("active host validation accepted a host outside effective targets")
+
+    invalid_mac_xml = (
+        "<nmaprun><host><status state='up'/>"
+        "<address addr='192.168.1.20' addrtype='ipv4'/>"
+        "<address addr='not-a-mac' addrtype='mac'/></host></nmaprun>"
+    )
+    try:
+        discovery.parse_nmap_xml(invalid_mac_xml)
+    except discovery.ValidationError as exc:
+        if exc.code != "collection_failed" or exc.status != 500:
+            raise RuntimeError("invalid Nmap MAC uses the wrong normalized error") from exc
+    else:
+        raise RuntimeError("the Nmap parser accepted an invalid MAC address")
 
     invalid_route_output = (
         "Routing tables\n\nInternet:\n"
@@ -146,6 +171,7 @@ def consistency_guards() -> None:
     discovery_tests = (ROOT / "tests/test_discovery.py").read_text(encoding="utf-8")
     server_tests = (ROOT / "tests/test_server.py").read_text(encoding="utf-8")
     web_tests = (ROOT / "tests/test_web_contract.py").read_text(encoding="utf-8")
+    frontend_tests = (ROOT / "tests/frontend/core.test.mjs").read_text(encoding="utf-8")
 
     for route in ("/api/v1/topology/refresh", "/api/v1/discover", "/api/v1/topology/export"):
         missing_owners = [name for name, text in (("server", server), ("api", api), ("readme", readme)) if route not in text]
@@ -166,17 +192,26 @@ def consistency_guards() -> None:
         if "adjacent sibling targets" not in text.lower():
             raise RuntimeError(f"active-target contract mismatch in {owner}: adjacent siblings are not explicit")
 
+    for marker in ("failures: tuple[tuple[str, str], ...]", "validate_active_hosts", "interface_failure"):
+        if marker not in server:
+            raise RuntimeError(f"active orchestration boundary missing from server.py: {marker}")
+
     expected_test_markers = {
         "tests/test_discovery.py": (
             "test_contained_targets_owned_by_overlapping_local_networks_remain_separate",
+            "test_invalid_nmap_ipv4_or_mac_fails",
+            "test_active_hosts_must_belong_to_effective_targets",
         ),
         "tests/test_server.py": (
             "test_real_active_discover_rejects_phase_b_before_resolving_nmap",
             "test_real_active_discover_preserves_phase_b_effective_targets_and_order",
             "test_real_active_discover_command_failure_preserves_previous_snapshot",
+            "test_real_active_discover_rejects_untrusted_nmap_evidence_and_preserves_snapshot",
+            "test_real_active_discover_classifies_interface_source_failure_before_nmap",
         ),
         "tests/test_web_contract.py": (
             "test_status_and_validation_states_have_focus_owners_and_recovery_logic",
+            "test_passive_loading_keeps_trigger_focusable_and_dependency_failure_disables_discovery",
         ),
     }
     test_sources = {
@@ -188,6 +223,8 @@ def consistency_guards() -> None:
         missing_markers = [marker for marker in markers if marker not in test_sources[path]]
         if missing_markers:
             raise RuntimeError(f"required regression definitions missing from {path}: {missing_markers}")
+    if "runtime dependency failure disables active capability" not in frontend_tests:
+        raise RuntimeError("frontend dependency-recovery test is missing")
 
     for value in ("route_inference", "address_membership"):
         if value not in topology_source or value not in api:
@@ -202,6 +239,7 @@ def consistency_guards() -> None:
 def asset_guards() -> None:
     html = (ROOT / "web/index.html").read_text(encoding="utf-8")
     app = (ROOT / "web/app.js").read_text(encoding="utf-8")
+    core = (ROOT / "web/core.mjs").read_text(encoding="utf-8")
     if re.search(r"<script(?![^>]+src=)[^>]*>", html, re.IGNORECASE):
         raise RuntimeError("inline script violates CSP")
     if re.search(r"<style[^>]*>", html, re.IGNORECASE):
@@ -220,9 +258,19 @@ def asset_guards() -> None:
         "restoreFocus: false",
         "No neighbor devices observed",
         "Unsupported platform",
+        "passiveInFlight",
+        'setAttribute("aria-disabled", "true")',
+        'removeAttribute("aria-disabled")',
+        "dependencyUnavailable",
+        "Install or restore Nmap",
     ):
         if marker not in app:
             raise RuntimeError(f"frontend focus/recovery contract missing: {marker}")
+    if 'elements["refresh-button"].disabled = true' in app:
+        raise RuntimeError("passive loading must not remove the focused refresh trigger from navigation")
+    for marker in ('unavailable_reason: "dependency_unavailable"', "available: false"):
+        if marker not in core:
+            raise RuntimeError(f"frontend capability recovery missing: {marker}")
     for path in (ROOT / "web").iterdir():
         if not path.is_file():
             continue
