@@ -22,12 +22,12 @@
 | Q-010 | Request body and command bounds | RESOLVED | 16 KiB body; passive timeout 5s; stdout 2 MiB; stderr 64 KiB; kill grace 2s | Public contract and exact test boundaries. |
 | Q-011 | Browser request protection | RESOLVED | Host allowlist plus custom header, Origin and Fetch Metadata checks for both collection POST endpoints | No permissive CORS or preflight bypass. |
 | Q-012 | Read-only and collection endpoints | RESOLVED | GET endpoints never execute commands; passive refresh and active discover are protected POST endpoints | Cross-origin pages cannot trigger collection through a simple GET. |
-| Q-013 | Collection concurrency | RESOLVED | One collection at a time; second collection returns `409 collection_in_progress` | No waiting, merging, or background queue. |
+| Q-013 | Collection concurrency | RESOLVED | One collection at a time; the browser suppresses a second passive or active start while one is in flight, and the server returns `409 collection_in_progress` for other clients | No waiting, merging, phase overwrite, or background queue. |
 | Q-014 | Snapshot lifecycle | RESOLVED | Process-memory latest snapshot, no TTL, atomic replacement, failed operations preserve previous snapshot | Export and topology GET return `404` when absent. |
 | Q-015 | Active validation sequence | RESOLVED | Phase A validates request syntax and absolute safety before commands; Phase B validates local-network containment after fresh passive collection | Nmap is forbidden until both phases pass. |
 | Q-016 | Unsupported-platform capabilities | RESOLVED | Health may work; capabilities report passive false and active unavailable with reason `unsupported_platform` | No collection command is attempted. |
-| Q-017 | Nmap capability disclosure | RESOLVED | Report availability and resolution source only | Full executable path is not exposed to the browser. |
-| Q-018 | Nmap output parser | RESOLVED | XML from stdout parsed with `xml.etree.ElementTree` | Version-tolerant structured parsing is tested with short inline synthetic XML inputs. |
+| Q-017 | Nmap capability disclosure and recovery | RESOLVED | Report availability and resolution source only; after a runtime dependency failure, a passive refresh rechecks capabilities | Full executable path is not exposed, and restored Nmap can be detected without reloading the page. |
+| Q-018 | Nmap output parser | RESOLVED | XML from stdout is parsed with `xml.etree.ElementTree`; IPv4 and MAC values are validated, and every up-host must remain inside the Phase B effective target set | Malformed or out-of-range evidence returns normalized `collection_failed` and cannot publish a new snapshot. |
 | Q-019 | Uncertain topology links | RESOLVED | Evidence, observed/inferred marker, and confidence | Prevents physical-topology overclaiming. |
 | Q-020 | Graph coordinate convention | RESOLVED | Node coordinates are top-left world coordinates | Layout and overlap tests use rectangle bounds consistently. |
 | Q-021 | Upstream graph position | RESOLVED | Dynamically placed after the right edge of the widest device grid | Fixed minimum `x=1160`, otherwise grid-right plus 48. |
