@@ -40,6 +40,17 @@ class DiscoveryValidationTests(unittest.TestCase):
             ("192.168.1.0/25", "192.168.1.128/25"),
         )
 
+    def test_contained_targets_owned_by_overlapping_local_networks_remain_separate(self):
+        local = (
+            interface("192.168.1.0/24", name="en0"),
+            interface("192.168.1.0/25", name="en1"),
+        )
+        request = self.request(["192.168.1.0/24", "192.168.1.0/25"])
+        self.assertEqual(
+            tuple(map(str, validate_phase_b(request, local))),
+            ("192.168.1.0/24", "192.168.1.0/25"),
+        )
+
     def test_supernet_noncanonical_overlap_adjacent_unrelated_and_tunnel_fail(self):
         cases = [
             (["192.168.0.0/23"], interface()),
