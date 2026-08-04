@@ -57,6 +57,8 @@ Current test-data policy:
 
 - GET routes are read-only and do not start collection commands.
 - Passive refresh uses only approved passive commands.
+- A nonempty command output that contains no recognizable facts is a parse failure, not a successful empty source.
+- macOS route rows require the IPv4 table header and recognizable destination, gateway, flags, and interface columns; abbreviated network destinations, IPv4 gateways, `link#N`, and MAC gateways are supported.
 - Active discovery validates the request before lock and commands, then checks containment against fresh eligible local networks before resolving or invoking Nmap.
 - One collection runs at a time; concurrent collection returns `409 collection_in_progress`.
 - Successful snapshots replace the in-memory snapshot atomically; failure preserves the previous snapshot.
@@ -67,8 +69,10 @@ Current test-data policy:
 - Target union: at most 1024 unique IPv4 addresses.
 - Total operation timeout: default 30 seconds, accepted range 5–120.
 - Nmap per-host timeout: fixed 5 seconds.
-- Targets must equal or be contained by an eligible non-tunnel local network.
-- Supernets, partial overlap, adjacent, unrelated, tunnel-only, public, documentation, loopback, link-local, multicast, unspecified, and reserved ranges are rejected.
+- Targets must be RFC 1918 networks within `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16` and must equal or be contained by an eligible non-tunnel local network.
+- Every target is assigned to its most-specific containing local network.
+- Exact duplicates and contained targets may be removed only within the same owner group. Adjacent sibling targets remain separate, and the command layer preserves the Phase B effective target set except for exact duplicate removal and deterministic ordering.
+- Supernets, partial overlap, adjacent, unrelated, tunnel-only, non-RFC1918, public, documentation, loopback, link-local, multicast, unspecified, and reserved ranges are rejected.
 - Nmap is limited to host discovery XML output.
 
 ### Browser and static delivery
