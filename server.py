@@ -24,7 +24,14 @@ from homenettopo.commands import (
     routes_spec,
     run_command,
 )
-from homenettopo.discovery import MAX_BODY_BYTES, ValidationError, parse_nmap_xml, validate_phase_a, validate_phase_b
+from homenettopo.discovery import (
+    MAX_BODY_BYTES,
+    ValidationError,
+    parse_nmap_xml,
+    validate_active_hosts,
+    validate_phase_a,
+    validate_phase_b,
+)
 from homenettopo.interfaces import InterfaceFact, parse_ifconfig
 from homenettopo.models import ActiveDiscoveryMetadata, SourceStatus, SourceStatusValue, WarningItem
 from homenettopo.neighbors import NeighborFact, parse_neighbors
@@ -64,6 +71,7 @@ class PassiveParts:
     neighbors: tuple[NeighborFact, ...]
     sources: tuple[SourceStatus, ...]
     warnings: tuple[WarningItem, ...]
+    failures: tuple[tuple[str, str], ...] = ()
 
 
 class AppState:
@@ -84,7 +92,7 @@ class AppState:
         values: dict[str, Any] = {}
         sources: list[SourceStatus] = []
         warnings: list[WarningItem] = []
-        failure_codes: list[str] = []
+        failures: list[tuple[str, str]] = []
         collectors: tuple[tuple[str, Any, Callable[[str], Any]], ...] = (
             ("interfaces", interfaces_spec(), parse_ifconfig),
             ("routes", routes_spec(), parse_routes),
@@ -99,18 +107,18 @@ class AppState:
                     raise ValueError("No interface facts were parsed.")
                 values[name] = parsed
             except CommandError as exc:
-                failure_codes.append(exc.code)
+                failures.append((name, exc.code))
                 sources.append(SourceStatus(name, SourceStatusValue.FAILED, "Collection command failed."))
                 warnings.append(WarningItem(f"{name}_collection_failed", f"{name.title()} evidence could not be collected.", name))
             except (ValueError, UnicodeError):
-                failure_codes.append("collection_failed")
+                failures.append((name, "collection_failed"))
                 sources.append(SourceStatus(name, SourceStatusValue.FAILED, "Collected output could not be parsed."))
                 warnings.append(WarningItem(f"{name}_parse_failed", f"{name.title()} evidence could not be parsed.", name))
             else:
                 sources.append(SourceStatus(name, SourceStatusValue.OK, duration_ms=result.duration_ms))
 
         if not any(values.get(name) for name in ("interfaces", "routes", "neighbors")):
-            if "command_timeout" in failure_codes:
+            if any(code == "command_timeout" for _, code in failures):
                 raise ApiError(504, "command_timeout", "Passive collection timed out before a coherent snapshot could be produced.")
             raise ApiError(500, "collection_failed", "No coherent passive snapshot could be produced.")
 
@@ -120,6 +128,7 @@ class AppState:
             neighbors=values.get("neighbors", ()),
             sources=tuple(sources),
             warnings=tuple(warnings),
+            failures=tuple(failures),
         )
 
     def passive_refresh(self):
@@ -136,6 +145,12 @@ class AppState:
 
     def active_discover(self, request):
         parts = self.collect_passive_parts()
+        interface_failure = dict(parts.failures).get("interfaces")
+        if interface_failure == "command_timeout":
+            raise ApiError(504, "command_timeout", "Interface collection timed out; active target containment could not be verified.")
+        if interface_failure:
+            raise ApiError(500, "collection_failed", "Interface evidence is unavailable; active target containment could not be verified.")
+
         effective = validate_phase_b(request, parts.interfaces)
         resolution = resolve_nmap(self.nmap_path)
         if not resolution.path:
@@ -147,7 +162,7 @@ class AppState:
                 request.operation_timeout_seconds,
             )
         )
-        hosts = parse_nmap_xml(result.stdout)
+        hosts = validate_active_hosts(parse_nmap_xml(result.stdout), effective)
         metadata = ActiveDiscoveryMetadata(
             requested_networks=tuple(str(item) for item in request.networks),
             effective_networks=tuple(str(item) for item in effective),
