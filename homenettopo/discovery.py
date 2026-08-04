@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -23,6 +24,7 @@ DOCUMENTATION_RANGES = tuple(
     ipaddress.IPv4Network(value)
     for value in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
 )
+_MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 
 
 class ValidationError(ValueError):
@@ -154,18 +156,44 @@ def parse_nmap_xml(text: str) -> tuple[ActiveHost, ...]:
         status = host.find("status")
         if status is None or status.get("state") != "up":
             continue
-        ipv4 = None
-        mac = None
+        raw_ipv4 = None
+        raw_mac = None
         for address in host.findall("address"):
             if address.get("addrtype") == "ipv4":
-                ipv4 = address.get("addr")
+                raw_ipv4 = address.get("addr")
             elif address.get("addrtype") == "mac":
-                mac = address.get("addr", "").lower() or None
-        if not ipv4:
+                raw_mac = address.get("addr")
+        if not raw_ipv4:
             continue
         try:
-            ipaddress.IPv4Address(ipv4)
-        except ipaddress.AddressValueError:
-            continue
+            ipv4 = str(ipaddress.IPv4Address(raw_ipv4))
+        except ipaddress.AddressValueError as exc:
+            raise ValidationError("collection_failed", "Nmap XML contains an invalid IPv4 address.", status=500) from exc
+        mac = None
+        if raw_mac:
+            mac = raw_mac.lower()
+            if not _MAC_RE.fullmatch(mac):
+                raise ValidationError("collection_failed", "Nmap XML contains an invalid MAC address.", status=500)
         hosts[ipv4] = ActiveHost(ipv4, mac)
     return tuple(sorted(hosts.values(), key=lambda item: ipaddress.IPv4Address(item.address)))
+
+
+def validate_active_hosts(
+    hosts: Iterable[ActiveHost],
+    effective_networks: Iterable[ipaddress.IPv4Network],
+) -> tuple[ActiveHost, ...]:
+    allowed = tuple(effective_networks)
+    validated: dict[str, ActiveHost] = {}
+    for host in hosts:
+        try:
+            address = ipaddress.IPv4Address(host.address)
+        except ipaddress.AddressValueError as exc:
+            raise ValidationError("collection_failed", "Nmap returned an invalid host address.", status=500) from exc
+        if not any(address in network for network in allowed):
+            raise ValidationError(
+                "collection_failed",
+                "Nmap returned a host outside the validated target networks.",
+                status=500,
+            )
+        validated[str(address)] = ActiveHost(str(address), host.mac_address)
+    return tuple(sorted(validated.values(), key=lambda item: ipaddress.IPv4Address(item.address)))
