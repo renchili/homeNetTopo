@@ -85,7 +85,7 @@ web/styles.css
   Visual tokens, responsive layout, graph states, focus, and reduced motion.
 
 scripts/deploy.py
-  Current-user macOS LaunchAgent installation, runtime allowlist copy,
+  Current-user macOS LaunchAgent installation, exact runtime file allowlist,
   rollback, loopback health verification, status, restart, and uninstall.
 
 scripts/check.py
@@ -296,33 +296,44 @@ plist    ~/Library/LaunchAgents/com.homenettopo.local.plist
 logs     ~/Library/Logs/HomeNetTopo
 ```
 
-The copied runtime is an explicit allowlist:
+The copied runtime is the exact 15-file `RUNTIME_FILES` allowlist:
 
 ```text
 server.py
 metadata.json
 scripts/deploy.py
-homenettopo/
-web/
+homenettopo/__init__.py
+homenettopo/commands.py
+homenettopo/discovery.py
+homenettopo/interfaces.py
+homenettopo/models.py
+homenettopo/neighbors.py
+homenettopo/routes.py
+homenettopo/topology.py
+web/index.html
+web/app.js
+web/core.mjs
+web/styles.css
 ```
 
-Tests, documentation, Git metadata, caches, reports, topology exports, command logs, and machine-specific network data are not deployed.
+Directory-recursive copying is not used. Tests, documentation, Git metadata, caches, reports, topology exports, command logs, machine-specific network data, and every unlisted file are excluded.
 
 ### Install and update flow
 
 1. require macOS and Python 3.10+;
 2. validate the requested port and optional executable Nmap path;
-3. verify every runtime allowlist path exists;
-4. copy the allowlist to a temporary sibling staging directory;
-5. boot out an existing user LaunchAgent when present;
-6. move the existing runtime to a temporary rollback directory;
-7. atomically move the staged runtime into the fixed install path;
-8. atomically write a mode-`0600` LaunchAgent plist;
-9. bootstrap and kickstart `com.homenettopo.local` in `gui/<uid>`;
-10. poll only `http://127.0.0.1:<port>/api/v1/health`;
-11. delete the rollback directory only after the health response identifies HomeNetTopo as healthy.
+3. require each allowlisted source to be a contained regular file, not a symbolic link;
+4. copy each file without following symbolic links into a temporary sibling staging directory;
+5. revalidate the staged file set;
+6. boot out an existing user LaunchAgent when present;
+7. move the existing runtime to a temporary rollback directory;
+8. atomically move the staged runtime into the fixed install path;
+9. atomically write a mode-`0600` LaunchAgent plist;
+10. bootstrap and kickstart `com.homenettopo.local` in `gui/<uid>`;
+11. poll only `http://127.0.0.1:<port>/api/v1/health`, with environment proxies disabled and a bounded response body;
+12. delete the rollback directory only after the health response identifies HomeNetTopo as healthy.
 
-If activation or health verification fails, deployment boots out the failed service, restores the prior runtime and plist, and re-bootstrap attempts the prior user service when one existed.
+If replacement itself fails, it restores the old runtime before returning the error. If later activation or health verification fails, deployment boots out the failed service, restores the prior runtime and plist, and attempts to bootstrap and kickstart the prior user service.
 
 The generated LaunchAgent always passes `--bind 127.0.0.1`. It may pass a validated port and optional canonical Nmap path. It uses `RunAtLoad`, restarts after unexpected failure, writes stdout/stderr to the user log directory, and does not use a shell.
 
@@ -549,7 +560,7 @@ Public models, parsers, orchestration functions, deployment actions, and regress
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Coverage includes typed commands, Nmap resolution, XML parsing, IPv4/MAC and effective-target evidence validation, Phase A/B validation, interface-evidence failure classification, exact containment boundaries, overlapping local-owner preservation, strict macOS route parsing, malformed four-column route rejection, topology invariants, protected POST routes, read-only GETs, Host/origin checks, concurrency, snapshot preservation, export, static containment, headers, per-user deployment configuration, deployment runtime allowlisting, and repository hygiene.
+Coverage includes typed commands, Nmap resolution, XML parsing, IPv4/MAC and effective-target evidence validation, Phase A/B validation, interface-evidence failure classification, exact containment boundaries, overlapping local-owner preservation, strict macOS route parsing, malformed four-column route rejection, topology invariants, protected POST routes, read-only GETs, Host/origin checks, concurrency, snapshot preservation, export, static containment, headers, per-user deployment configuration, exact deployment file allowlisting, symlink rejection, rollback behavior, and repository hygiene.
 
 ### Frontend logic
 
