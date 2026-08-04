@@ -67,10 +67,12 @@ It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, 
 - `scripts/deploy.py` installs only into the current user's Library and never uses `sudo`.
 - The LaunchAgent label is `com.homenettopo.local` in `gui/<uid>`.
 - The service always receives `--bind 127.0.0.1`.
-- The runtime copy is limited to `server.py`, `metadata.json`, `scripts/deploy.py`, `homenettopo/`, and `web/`.
+- The deployment copies only the 15 explicit `RUNTIME_FILES`: `server.py`, `metadata.json`, `scripts/deploy.py`, the eight named `homenettopo/*.py` files, and the four named web assets.
+- Directory-recursive copying is not allowed; unlisted files, caches, tests, and local artifacts are excluded.
 - Fixed paths are `~/Library/Application Support/HomeNetTopo`, `~/Library/LaunchAgents/com.homenettopo.local.plist`, and `~/Library/Logs/HomeNetTopo`.
+- Source and staged files must be regular contained files and may not be symbolic links.
 - Updates stage a complete runtime and keep the previous runtime and plist until LaunchAgent startup and loopback health succeed.
-- Health verification contacts only `127.0.0.1`.
+- Health verification contacts only `127.0.0.1`, disables environment proxies, and bounds the response body.
 - Uninstall retains logs unless `--purge-logs` is explicitly requested.
 
 ### Code documentation
