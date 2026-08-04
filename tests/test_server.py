@@ -6,9 +6,11 @@ import threading
 import unittest
 from unittest import mock
 
-from homenettopo.commands import CommandResult
-from homenettopo.models import ActiveDiscoveryMetadata, TopologySnapshot
-from server import ApiError, AppState, HomeNetTopoServer
+from homenettopo.commands import CommandError, CommandResult
+from homenettopo.discovery import ValidationError, validate_phase_a
+from homenettopo.interfaces import InterfaceAddress, InterfaceFact
+from homenettopo.models import ActiveDiscoveryMetadata, SourceStatus, SourceStatusValue, TopologySnapshot
+from server import ApiError, AppState, HomeNetTopoServer, PassiveParts
 
 
 def empty_snapshot(*, mode="passive"):
@@ -16,6 +18,26 @@ def empty_snapshot(*, mode="passive"):
     if mode == "active":
         active = ActiveDiscoveryMetadata(("192.168.1.0/24",), ("192.168.1.0/24",), True, 5, 0, 30)
     return TopologySnapshot("1", f"{mode}-snapshot", "2026-08-03T00:00:00Z", mode, "darwin", False, (), (), (), (), (), active)
+
+
+def interface_fact(network: str, name: str, kind: str = "physical") -> InterfaceFact:
+    parsed = __import__("ipaddress").IPv4Network(network)
+    address = str(next(parsed.hosts())) if parsed.num_addresses > 2 else str(parsed.network_address)
+    return InterfaceFact(name, ("UP",), kind, (InterfaceAddress(address, parsed.prefixlen, str(parsed)),))
+
+
+def passive_parts(*interfaces: InterfaceFact) -> PassiveParts:
+    return PassiveParts(
+        interfaces=tuple(interfaces),
+        routes=(),
+        neighbors=(),
+        sources=(
+            SourceStatus("interfaces", SourceStatusValue.OK),
+            SourceStatus("routes", SourceStatusValue.OK),
+            SourceStatus("neighbors", SourceStatusValue.OK),
+        ),
+        warnings=(),
+    )
 
 
 class RunningServer:
@@ -145,6 +167,84 @@ class ServerTests(unittest.TestCase):
             status, _, payload = running.request("POST", "/api/v1/discover", body=body, headers=COLLECTION_HEADERS)
             self.assertEqual((status, payload["error"]["code"]), (424, "dependency_unavailable"))
             self.assertIs(running.state.snapshot, previous)
+
+    def test_real_active_discover_rejects_phase_b_before_resolving_nmap(self):
+        state = AppState(port=8765, nmap_path=None)
+        previous = empty_snapshot()
+        state.snapshot = previous
+        request = validate_phase_a({"networks": ["192.168.2.0/24"], "operation_timeout_seconds": 30})
+        parts = passive_parts(interface_fact("192.168.1.0/24", "en0"))
+        with (
+            mock.patch.object(state, "collect_passive_parts", return_value=parts),
+            mock.patch("server.resolve_nmap") as resolver,
+            mock.patch("server.run_command") as command,
+            self.assertRaises(ValidationError),
+        ):
+            state.active_discover(request)
+        resolver.assert_not_called()
+        command.assert_not_called()
+        self.assertIs(state.snapshot, previous)
+
+    def test_real_active_discover_preserves_phase_b_effective_targets_and_order(self):
+        state = AppState(port=8765, nmap_path=None)
+        request = validate_phase_a({
+            "networks": ["192.168.1.0/24", "192.168.1.0/25"],
+            "operation_timeout_seconds": 30,
+        })
+        parts = passive_parts(
+            interface_fact("192.168.1.0/24", "en0"),
+            interface_fact("192.168.1.0/25", "en1"),
+        )
+        order: list[str] = []
+        captured: dict[str, object] = {}
+
+        def collect():
+            order.append("collect")
+            return parts
+
+        def resolve(_explicit):
+            order.append("resolve")
+            return mock.Mock(path="/opt/homebrew/bin/nmap", source="explicit")
+
+        def make_spec(path, networks, timeout):
+            order.append("spec")
+            captured["path"] = path
+            captured["networks"] = tuple(networks)
+            captured["timeout"] = timeout
+            return object()
+
+        def run(_spec):
+            order.append("run")
+            return CommandResult("<nmaprun/>", "", 0, 7)
+
+        with (
+            mock.patch.object(state, "collect_passive_parts", side_effect=collect),
+            mock.patch("server.resolve_nmap", side_effect=resolve),
+            mock.patch("server.nmap_spec", side_effect=make_spec),
+            mock.patch("server.run_command", side_effect=run),
+        ):
+            snapshot = state.active_discover(request)
+
+        self.assertEqual(order, ["collect", "resolve", "spec", "run"])
+        self.assertEqual(captured["networks"], ("192.168.1.0/24", "192.168.1.0/25"))
+        self.assertEqual(snapshot.active_discovery.effective_networks, captured["networks"])
+        self.assertIs(state.snapshot, snapshot)
+
+    def test_real_active_discover_command_failure_preserves_previous_snapshot(self):
+        state = AppState(port=8765, nmap_path=None)
+        previous = empty_snapshot()
+        state.snapshot = previous
+        request = validate_phase_a({"networks": ["192.168.1.0/24"], "operation_timeout_seconds": 30})
+        parts = passive_parts(interface_fact("192.168.1.0/24", "en0"))
+        with (
+            mock.patch.object(state, "collect_passive_parts", return_value=parts),
+            mock.patch("server.resolve_nmap", return_value=mock.Mock(path="/opt/homebrew/bin/nmap", source="explicit")),
+            mock.patch("server.nmap_spec", return_value=object()),
+            mock.patch("server.run_command", side_effect=CommandError("collection_failed", "Nmap failed.")),
+            self.assertRaises(CommandError),
+        ):
+            state.active_discover(request)
+        self.assertIs(state.snapshot, previous)
 
     def test_collection_conflict_is_immediate(self):
         with RunningServer() as running:
