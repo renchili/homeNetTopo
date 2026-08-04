@@ -4,9 +4,9 @@ Home Net Topology (`homeNetTopo`) is a local-first macOS application that collec
 
 ## Implementation status
 
-The repository contains the Python service, macOS parsers, bounded Nmap adapter, topology model, static browser interface, deterministic test definitions with inline synthetic parser inputs, and a full-regression entrypoint.
+The repository contains the Python service, macOS parsers, bounded Nmap adapter, topology model, static browser interface, deterministic test definitions with inline synthetic parser inputs, a per-user macOS deployment script, and a full-regression entrypoint.
 
-**This revision has not been executed or runtime-accepted.** Source presence is not evidence that startup, tests, browser behavior, Nmap discovery, or real-network collection succeeds on a supported Mac.
+**This revision has not been executed or runtime-accepted.** Source presence is not evidence that startup, deployment, tests, browser behavior, Nmap discovery, or real-network collection succeeds on a supported Mac.
 
 ## Requirements
 
@@ -19,7 +19,7 @@ Production:
 
 Development verification additionally requires Node.js 20 or newer. No npm packages are used.
 
-## Start the service
+## Start from the repository
 
 ```text
 python3 server.py
@@ -39,6 +39,50 @@ python3 server.py --nmap-path /opt/homebrew/bin/nmap
 ```
 
 The first release rejects any bind other than `127.0.0.1`.
+
+## Deploy as a macOS user service
+
+`scripts/deploy.py` installs HomeNetTopo as a LaunchAgent for the current macOS user. It never uses `sudo`, never changes the loopback bind, and copies only this runtime allowlist:
+
+```text
+server.py
+metadata.json
+scripts/deploy.py
+homenettopo/
+web/
+```
+
+Install or update:
+
+```text
+python3 scripts/deploy.py install
+```
+
+Use a different loopback port or an explicit Nmap executable:
+
+```text
+python3 scripts/deploy.py install --port 8877
+python3 scripts/deploy.py install --nmap-path /opt/homebrew/bin/nmap
+```
+
+Manage the installed service:
+
+```text
+python3 scripts/deploy.py status
+python3 scripts/deploy.py restart
+python3 scripts/deploy.py uninstall
+python3 scripts/deploy.py uninstall --purge-logs
+```
+
+The deployment locations are fixed to the current user:
+
+```text
+~/Library/Application Support/HomeNetTopo
+~/Library/LaunchAgents/com.homenettopo.local.plist
+~/Library/Logs/HomeNetTopo
+```
+
+Installation stages the runtime before replacing the active copy. If LaunchAgent activation or the loopback health check fails, the script restores the previous runtime and property list. Uninstall retains logs unless `--purge-logs` is supplied.
 
 ## Discovery behavior
 
@@ -111,6 +155,10 @@ The browser UI provides passive refresh, explicit active discovery, observed and
 
 Specific IPv4 routes are represented as inferred `routes_to` relationships from a gateway to a destination boundary. The graph is a logical view, not proof of physical cabling, switching, VLANs, wireless infrastructure, isolated devices, or networks hidden behind other routers.
 
+## Code documentation policy
+
+Comments and docstrings explain contracts that are not obvious from syntax: security boundaries, parser failure rules, state ownership, atomic publication, rollback behavior, and deterministic algorithms. They should explain *why* a rule exists rather than repeat assignments or control flow. `python3 scripts/check.py` verifies documentation on these critical owners.
+
 ## Privacy and exclusions
 
 Topology data remains in process memory unless the user downloads an export. The application does not require cloud services, accounts, telemetry, CDNs, or externally hosted assets.
@@ -139,10 +187,12 @@ It reports frontend tests as `NOT RUN` and must not be cited as full-regression 
 
 - Static source generation: complete.
 - Test definitions: present.
+- Deployment script: present, not executed.
 - Python tests: not run.
 - Frontend tests: not run.
 - Full regression: not run.
 - macOS startup: not run.
+- LaunchAgent deployment: not run.
 - Browser interaction: not run.
 - Nmap discovery: not run.
 - Real-network checks: not run.
