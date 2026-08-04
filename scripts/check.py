@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run repository-relative compile, contract, test, asset, and hygiene checks.
 
-This script is the single full-regression entrypoint.  A stage reports PASS only
+This script is the single full-regression entrypoint. A stage reports PASS only
 when it actually executes successfully; ``--python-only`` remains development
 feedback and is never full-regression evidence.
 """
@@ -99,8 +99,8 @@ def documentation_guards() -> None:
         ),
         "homenettopo/topology.py": ("<module>", "build_snapshot"),
         "scripts/deploy.py": (
-            "<module>", "DeploymentError", "build_launch_agent", "stage_runtime", "install",
-            "restart", "status", "uninstall", "parse_args", "main",
+            "<module>", "DeploymentError", "validate_source_root", "build_launch_agent", "stage_runtime",
+            "replace_runtime", "install", "restart", "status", "uninstall", "parse_args", "main",
         ),
         "scripts/check.py": ("<module>", "StageResult", "documentation_guards", "consistency_guards", "main"),
     }
@@ -315,6 +315,8 @@ def consistency_guards() -> None:
             "class DeploymentScriptTests",
             "test_launch_agent_is_user_scoped_and_loopback_only",
             "test_runtime_copy_is_an_explicit_minimal_allowlist",
+            "test_source_validation_rejects_symbolic_links",
+            "test_replace_failure_restores_previous_runtime",
         ),
         "tests/test_web_contract.py": (
             "test_status_and_validation_states_have_focus_owners_and_recovery_logic",
@@ -357,8 +359,13 @@ def consistency_guards() -> None:
     for marker in (
         'LABEL = "com.homenettopo.local"',
         '"--bind",\n        "127.0.0.1"',
-        'RUNTIME_FILES = ("server.py", "metadata.json", "scripts/deploy.py")',
-        'RUNTIME_DIRS = ("homenettopo", "web")',
+        '"homenettopo/__init__.py"',
+        '"homenettopo/topology.py"',
+        '"web/index.html"',
+        '"web/styles.css"',
+        'validate_source_root(staging)',
+        'ProxyHandler({})',
+        'runtime_replaced = False',
         'run_launchctl("bootstrap"',
         "wait_for_health(port)",
     ):
