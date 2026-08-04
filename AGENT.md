@@ -60,6 +60,8 @@ Requirements:
 - report only the Nmap resolution source, never the full path, through the public capability API;
 - pass only canonical targets that completed both validation phases;
 - parse Nmap XML from stdout with the Python standard library;
+- accept only valid IPv4 and canonical MAC evidence from up hosts;
+- require every reported up-host IPv4 address to remain inside the Phase B effective target set before publishing it;
 - apply total subprocess deadlines, captured-output limits, and bounded terminate/kill cleanup;
 - normalize failures before they reach the browser.
 
@@ -121,14 +123,29 @@ Phase A failure must not acquire the collection lock or start any command.
 Under the collection lock:
 
 1. run the approved passive commands;
-2. derive eligible non-tunnel local RFC 1918 networks;
-3. require every requested target to be equal to or contained by one eligible local network;
-4. group targets by their most-specific containing local network;
-5. remove only exact duplicates and contained targets within each group, without merging adjacent siblings;
-6. recalculate the final unique-address union;
-7. reject any target that is a supernet, partial overlap, adjacent network, tunnel-only network, unrelated RFC 1918 network, or non-RFC1918 network.
+2. require successful interface evidence before active containment can be evaluated;
+3. derive eligible non-tunnel local RFC 1918 networks;
+4. require every requested target to be equal to or contained by one eligible local network;
+5. group targets by their most-specific containing local network;
+6. remove only exact duplicates and contained targets within each group, without merging adjacent siblings;
+7. recalculate the final unique-address union;
+8. reject any target that is a supernet, partial overlap, adjacent network, tunnel-only network, unrelated RFC 1918 network, or non-RFC1918 network.
+
+Interface command timeout is `504 command_timeout`; unavailable or unparseable interface evidence is `500 collection_failed`. A successful interface collection with no eligible local RFC 1918 network is `400 invalid_target`.
 
 Only after Phase A and Phase B succeed may the service resolve and invoke Nmap. The rule is **no Nmap invocation before final validation**, not “no passive command before validation.”
+
+### Nmap evidence validation
+
+Before active evidence is merged or a snapshot is published:
+
+1. require an `nmaprun` XML root;
+2. accept only hosts whose status is `up`;
+3. validate every reported IPv4 address;
+4. normalize and validate every reported MAC address;
+5. require every accepted IPv4 address to belong to at least one Phase B effective target network;
+6. reject malformed or out-of-range evidence as `500 collection_failed`;
+7. preserve the previous snapshot on every failure.
 
 ## Browser request boundary
 
@@ -184,14 +201,15 @@ Rules:
 - `POST /api/v1/discover` performs Phase A validation, fresh passive collection, Phase B containment validation, then optional Nmap discovery.
 - Export never collects or mutates state.
 - At most one passive or active collection runs at a time.
-- A second collection request returns `409 collection_in_progress` immediately; it is not queued or merged.
+- The browser maintains one shared collection-in-flight state and suppresses a second passive or active start until the first finishes.
+- A collection request from another client while the server lock is held returns `409 collection_in_progress` immediately; it is not queued or merged.
 - A successful or coherent partial passive refresh replaces the latest snapshot atomically.
 - A successful active operation replaces the latest snapshot atomically.
 - Failed collection preserves the previous snapshot.
 - Intermediate passive data from a failed active operation is not published.
 - Snapshots have no automatic TTL; clients use `collected_at` to judge freshness.
 
-## Unsupported-platform capability behavior
+## Unsupported-platform and optional-tool capability behavior
 
 Health may return `200` on a non-macOS host and report the normalized platform.
 
@@ -201,6 +219,8 @@ Capabilities on an unsupported platform must report:
 - active discovery `available: false`;
 - active discovery `unavailable_reason: "unsupported_platform"`;
 - no command collection is attempted.
+
+When Nmap becomes unavailable during an active request, the browser disables active discovery while preserving passive use. A later passive refresh re-reads `/api/v1/capabilities`; restored Nmap availability returns the UI to the ready state without requiring a page reload.
 
 ## Topology and evidence model
 
@@ -226,17 +246,17 @@ Every node and edge must carry enough provenance to distinguish observed facts f
 ## Current ownership
 
 ```text
-server.py                         HTTP routes, browser boundary, collection lock, snapshot owner, static delivery
-homenettopo/commands.py           typed approved commands and bounded subprocess execution
+server.py                         HTTP routes, browser boundary, collection lock, active orchestration, snapshot owner, static delivery
+homenettopo/commands.py           typed approved commands, Nmap resolution, and bounded subprocess execution
 homenettopo/interfaces.py         macOS interface parser
 homenettopo/routes.py             IPv4 route parser
 homenettopo/neighbors.py          ARP parser
-homenettopo/discovery.py          Phase A/B target validation, Nmap resolution, XML parsing
+homenettopo/discovery.py          Phase A/B target validation, Nmap XML parsing, active-evidence validation
 homenettopo/models.py             validated JSON-serializable domain model
 homenettopo/topology.py           topology construction, merge, confidence, deterministic order
 web/index.html                    accessible page structure
-web/core.mjs                      pure UI state, API mapping, and deterministic layout
-web/app.js                        fetch, DOM/SVG, pointer/keyboard, focus, download adapter
+web/core.mjs                      pure UI state, collection coordination, API mapping, and deterministic layout
+web/app.js                        fetch, capability recovery, DOM/SVG, pointer/keyboard, focus, download adapter
 web/styles.css                    visual tokens, responsive layout, focus, reduced motion
 tests/                            deterministic Python tests with short synthetic parser inputs inline
 tests/frontend/core.test.mjs      Node built-in tests for pure frontend logic
