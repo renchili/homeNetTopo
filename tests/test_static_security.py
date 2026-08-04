@@ -136,6 +136,7 @@ class DeploymentScriptTests(unittest.TestCase):
         self.assertNotIn("https://", source)
         self.assertIn("ProxyHandler({})", source)
         self.assertIn("runtime_replaced", source)
+        self.assertIn("follow_symlinks=False", source)
 
     def test_source_validation_rejects_symbolic_links(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -151,6 +152,18 @@ class DeploymentScriptTests(unittest.TestCase):
                 self.skipTest(f"symbolic links are unavailable: {exc}")
             with self.assertRaises(self.deploy.DeploymentError):
                 self.deploy.validate_source_root(root)
+
+    def test_loaded_service_must_stop_before_replacement(self):
+        loaded = self.deploy.subprocess.CompletedProcess(("launchctl", "print"), 0, "", "")
+        with mock.patch.object(
+            self.deploy,
+            "run_launchctl",
+            side_effect=(loaded, self.deploy.DeploymentError("synthetic bootout failure")),
+        ) as launchctl:
+            with self.assertRaises(self.deploy.DeploymentError):
+                self.deploy.bootout_if_loaded()
+        self.assertEqual(launchctl.call_args_list[0], mock.call("print", self.deploy.service_target(), check=False))
+        self.assertEqual(launchctl.call_args_list[1], mock.call("bootout", self.deploy.service_target(), check=True))
 
     def test_replace_failure_restores_previous_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
