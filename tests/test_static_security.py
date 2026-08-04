@@ -90,16 +90,12 @@ class DeploymentScriptTests(unittest.TestCase):
         cls.deploy = load_deploy_module()
 
     def make_runtime_source(self, root: Path) -> None:
-        """Create the minimal synthetic runtime tree expected by the deployer."""
+        """Create the exact synthetic runtime files expected by the deployer."""
 
         for relative in self.deploy.RUNTIME_FILES:
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(relative, encoding="utf-8")
-        for relative in self.deploy.RUNTIME_DIRS:
-            path = root / relative
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "runtime.txt").write_text(relative, encoding="utf-8")
 
     def test_launch_agent_is_user_scoped_and_loopback_only(self):
         payload = self.deploy.build_launch_agent("/usr/local/bin/python3", 8765, None)
@@ -115,9 +111,24 @@ class DeploymentScriptTests(unittest.TestCase):
     def test_runtime_copy_is_an_explicit_minimal_allowlist(self):
         self.assertEqual(
             self.deploy.RUNTIME_FILES,
-            ("server.py", "metadata.json", "scripts/deploy.py"),
+            (
+                "server.py",
+                "metadata.json",
+                "scripts/deploy.py",
+                "homenettopo/__init__.py",
+                "homenettopo/commands.py",
+                "homenettopo/discovery.py",
+                "homenettopo/interfaces.py",
+                "homenettopo/models.py",
+                "homenettopo/neighbors.py",
+                "homenettopo/routes.py",
+                "homenettopo/topology.py",
+                "web/index.html",
+                "web/app.js",
+                "web/core.mjs",
+                "web/styles.css",
+            ),
         )
-        self.assertEqual(self.deploy.RUNTIME_DIRS, ("homenettopo", "web"))
         source = DEPLOY_PATH.read_text(encoding="utf-8")
         self.assertNotIn("sudo", source)
         self.assertNotIn("shell=True", source)
@@ -132,7 +143,8 @@ class DeploymentScriptTests(unittest.TestCase):
             self.make_runtime_source(root)
             target = root / "outside.txt"
             target.write_text("outside", encoding="utf-8")
-            candidate = root / "web" / "linked.txt"
+            candidate = root / "web" / "app.js"
+            candidate.unlink()
             try:
                 candidate.symlink_to(target)
             except OSError as exc:
