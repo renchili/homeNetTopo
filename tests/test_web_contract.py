@@ -68,6 +68,18 @@ class WebContractTests(unittest.TestCase):
         ):
             self.assertIn(marker, script)
 
+    def test_passive_loading_keeps_trigger_focusable_and_dependency_failure_disables_discovery(self):
+        script = (WEB / "app.js").read_text()
+        core = (WEB / "core.mjs").read_text()
+        self.assertIn("passiveInFlight", script)
+        self.assertIn('setAttribute("aria-disabled", "true")', script)
+        self.assertIn('removeAttribute("aria-disabled")', script)
+        self.assertNotIn('elements["refresh-button"].disabled = true', script)
+        self.assertIn("dependencyUnavailable", script)
+        self.assertIn("Install or restore Nmap", script)
+        self.assertIn('unavailable_reason: "dependency_unavailable"', core)
+        self.assertIn("available: false", core)
+
 
 if __name__ == "__main__":
     unittest.main()
