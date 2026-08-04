@@ -76,7 +76,9 @@ class WebContractTests(unittest.TestCase):
         self.assertNotIn("passiveInFlight", script)
         self.assertIn('collection: "passive"', script)
         self.assertIn('collection: "active"', script)
-        self.assertIn("loadCapabilities({ reportError: false })", script)
+        recheck = script.index("loadCapabilities({ reportError: false })")
+        completion = script.index('dispatch({ type: "PASSIVE_SUCCESS", snapshot })')
+        self.assertLess(recheck, completion)
         self.assertIn("Restore Nmap, then refresh passive to check again.", script)
         self.assertIn('setAttribute("aria-disabled", "true")', script)
         self.assertIn('removeAttribute("aria-disabled")', script)
@@ -84,6 +86,7 @@ class WebContractTests(unittest.TestCase):
         self.assertIn('unavailable_reason: "dependency_unavailable"', core)
         self.assertIn("available: false", core)
         self.assertIn("const recovered =", core)
+        self.assertIn("if (state.collectionInFlight && !action.collection) return state", core)
 
 
 if __name__ == "__main__":
