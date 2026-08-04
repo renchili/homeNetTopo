@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Repository-relative full regression entrypoint."""
+"""Run repository-relative compile, contract, test, asset, and hygiene checks.
+
+This script is the single full-regression entrypoint.  A stage reports PASS only
+when it actually executes successfully; ``--python-only`` remains development
+feedback and is never full-regression evidence.
+"""
 
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import subprocess
@@ -19,18 +25,24 @@ PROHIBITED_SUFFIXES = {".pyc", ".pcap", ".pcapng", ".log", ".sqlite", ".db"}
 
 @dataclass
 class StageResult:
+    """One executed regression stage and its user-visible result."""
+
     name: str
     status: str
     detail: str = ""
 
 
 def run_process(argv: list[str]) -> None:
+    """Run one repository command and normalize nonzero exits."""
+
     completed = subprocess.run(argv, cwd=ROOT, check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"command failed ({completed.returncode}): {' '.join(argv)}")
 
 
 def load_metadata() -> dict:
+    """Load the compact product contract and require its stable top-level keys."""
+
     metadata = json.loads((ROOT / "metadata.json").read_text(encoding="utf-8"))
     required = {"name", "status", "runtime", "collection_api", "active_discovery", "snapshot_policy"}
     missing = required - metadata.keys()
@@ -40,10 +52,78 @@ def load_metadata() -> dict:
 
 
 def parse_metadata() -> None:
+    """Regression stage wrapper for metadata loading."""
+
     load_metadata()
 
 
+def _qualified_docstrings(path: Path) -> dict[str, str | None]:
+    """Collect module, top-level, and class-method docstrings by qualified name."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    result: dict[str, str | None] = {"<module>": ast.get_docstring(tree)}
+    for node in tree.body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            result[node.name] = ast.get_docstring(node)
+        if isinstance(node, ast.ClassDef):
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    result[f"{node.name}.{child.name}"] = ast.get_docstring(child)
+    return result
+
+
+def documentation_guards() -> None:
+    """Require useful documentation at the project's non-obvious boundaries."""
+
+    required: dict[str, tuple[str, ...]] = {
+        "server.py": (
+            "<module>", "ApiError", "PassiveParts", "AppState", "AppState.collect_passive_parts",
+            "AppState.passive_refresh", "AppState.active_discover", "HomeNetTopoServer",
+            "HomeNetTopoHandler", "HomeNetTopoHandler._validate_collection_headers",
+            "HomeNetTopoHandler._serve_static", "parse_args", "main",
+        ),
+        "homenettopo/commands.py": (
+            "<module>", "CommandError", "CommandKind", "CommandSpec", "CommandResult",
+            "NmapResolution", "resolve_nmap", "nmap_spec", "run_command",
+        ),
+        "homenettopo/discovery.py": (
+            "<module>", "ValidationError", "DiscoveryRequest", "ActiveHost", "validate_phase_a",
+            "eligible_local_networks", "validate_phase_b", "parse_nmap_xml", "validate_active_hosts",
+        ),
+        "homenettopo/interfaces.py": ("<module>", "InterfaceAddress", "InterfaceFact", "parse_ifconfig"),
+        "homenettopo/routes.py": ("<module>", "RouteFact", "parse_routes"),
+        "homenettopo/neighbors.py": ("<module>", "NeighborFact", "parse_neighbors"),
+        "homenettopo/models.py": (
+            "<module>", "ModelError", "Confidence", "NodeKind", "EdgeType", "Evidence", "Node", "Edge",
+            "TopologySnapshot", "TopologySnapshot.validate", "TopologySnapshot.to_dict",
+        ),
+        "homenettopo/topology.py": ("<module>", "build_snapshot"),
+        "scripts/deploy.py": (
+            "<module>", "DeploymentError", "build_launch_agent", "stage_runtime", "install",
+            "restart", "status", "uninstall", "parse_args", "main",
+        ),
+        "scripts/check.py": ("<module>", "StageResult", "documentation_guards", "consistency_guards", "main"),
+    }
+    for relative, symbols in required.items():
+        docs = _qualified_docstrings(ROOT / relative)
+        missing = [symbol for symbol in symbols if not docs.get(symbol)]
+        if missing:
+            raise RuntimeError(f"required code documentation missing from {relative}: {missing}")
+
+    core = (ROOT / "web/core.mjs").read_text(encoding="utf-8")
+    app = (ROOT / "web/app.js").read_text(encoding="utf-8")
+    for owner, text, markers in (
+        ("web/core.mjs", core, ("Pure frontend state", "/**\n * Apply one state action", "Count the unique address union", "Place nodes in deterministic subnet-owned lanes")),
+        ("web/app.js", app, ("Browser adapter for HomeNetTopo", "Capability recovery must finish", "HTML strings are never injected", "Render accessible selectable SVG")),
+    ):
+        missing = [marker for marker in markers if marker not in text]
+        if missing:
+            raise RuntimeError(f"required code comments missing from {owner}: {missing}")
+
+
 def consistency_guards() -> None:
+    """Check cross-owner contracts that unit tests alone cannot express."""
+
     required_paths = [
         "server.py",
         "homenettopo/commands.py",
@@ -53,12 +133,14 @@ def consistency_guards() -> None:
         "homenettopo/neighbors.py",
         "homenettopo/routes.py",
         "homenettopo/topology.py",
+        "scripts/deploy.py",
         "web/index.html",
         "web/core.mjs",
         "web/app.js",
         "web/styles.css",
         "tests/test_discovery.py",
         "tests/test_server.py",
+        "tests/test_static_security.py",
         "tests/test_web_contract.py",
         "tests/frontend/core.test.mjs",
     ]
@@ -169,8 +251,10 @@ def consistency_guards() -> None:
     commands_source = (ROOT / "homenettopo/commands.py").read_text(encoding="utf-8")
     models_source = (ROOT / "homenettopo/models.py").read_text(encoding="utf-8")
     topology_source = (ROOT / "homenettopo/topology.py").read_text(encoding="utf-8")
+    deploy_source = (ROOT / "scripts/deploy.py").read_text(encoding="utf-8")
     discovery_tests = (ROOT / "tests/test_discovery.py").read_text(encoding="utf-8")
     server_tests = (ROOT / "tests/test_server.py").read_text(encoding="utf-8")
+    security_tests = (ROOT / "tests/test_static_security.py").read_text(encoding="utf-8")
     web_tests = (ROOT / "tests/test_web_contract.py").read_text(encoding="utf-8")
     frontend_tests = (ROOT / "tests/frontend/core.test.mjs").read_text(encoding="utf-8")
 
@@ -227,6 +311,11 @@ def consistency_guards() -> None:
             "test_real_active_discover_rejects_untrusted_nmap_evidence_and_preserves_snapshot",
             "test_real_active_discover_classifies_interface_source_failure_before_nmap",
         ),
+        "tests/test_static_security.py": (
+            "class DeploymentScriptTests",
+            "test_launch_agent_is_user_scoped_and_loopback_only",
+            "test_runtime_copy_is_an_explicit_minimal_allowlist",
+        ),
         "tests/test_web_contract.py": (
             "test_status_and_validation_states_have_focus_owners_and_recovery_logic",
             "test_collection_coordination_and_capability_recheck_contract",
@@ -235,6 +324,7 @@ def consistency_guards() -> None:
     test_sources = {
         "tests/test_discovery.py": discovery_tests,
         "tests/test_server.py": server_tests,
+        "tests/test_static_security.py": security_tests,
         "tests/test_web_contract.py": web_tests,
     }
     for path, markers in expected_test_markers.items():
@@ -244,6 +334,9 @@ def consistency_guards() -> None:
     for marker in (
         "collection state prevents interleaving and ignores stale completions",
         "runtime dependency failure disables and refreshed capabilities restore active discovery",
+        "selection state is explicit and clearable",
+        "eligible targets are sorted and unique address totals are stable",
+        "export filename is deterministic for a snapshot timestamp",
     ):
         if marker not in frontend_tests:
             raise RuntimeError(f"frontend collection/recovery test is missing: {marker}")
@@ -254,11 +347,31 @@ def consistency_guards() -> None:
     if "ROUTES_TO" not in models_source or "EdgeType.ROUTES_TO" not in topology_source or "routes_to" not in api:
         raise RuntimeError("routes_to contract is not connected across model, topology, and API")
 
+    deployment_owners = (("agent", agent), ("design", design), ("plan", plan), ("readme", readme))
+    for owner, text in deployment_owners:
+        if "scripts/deploy.py" not in text or "LaunchAgent" not in text:
+            raise RuntimeError(f"deployment contract mismatch in {owner}")
+    for prohibited in ("sudo", "shell=True", "0.0.0.0", "https://"):
+        if prohibited in deploy_source:
+            raise RuntimeError(f"deployment script violates the local safety boundary: {prohibited}")
+    for marker in (
+        'LABEL = "com.homenettopo.local"',
+        '"--bind",\n        "127.0.0.1"',
+        'RUNTIME_FILES = ("server.py", "metadata.json", "scripts/deploy.py")',
+        'RUNTIME_DIRS = ("homenettopo", "web")',
+        'run_launchctl("bootstrap"',
+        "wait_for_health(port)",
+    ):
+        if marker not in deploy_source:
+            raise RuntimeError(f"deployment script contract missing: {marker}")
+
     if re.search(r"(?m)^fixtures/\s+", agent) or (ROOT / "fixtures").exists():
         raise RuntimeError("independent fixtures directory is not authorized")
 
 
 def asset_guards() -> None:
+    """Check CSP-compatible assets, safe DOM sinks, and focus contracts."""
+
     html = (ROOT / "web/index.html").read_text(encoding="utf-8")
     app = (ROOT / "web/app.js").read_text(encoding="utf-8")
     core = (ROOT / "web/core.mjs").read_text(encoding="utf-8")
@@ -320,6 +433,8 @@ def asset_guards() -> None:
 
 
 def hygiene_guards() -> None:
+    """Reject tracked caches, reports, runtime exports, and local network data."""
+
     if (ROOT / "tests/__init__.py").exists():
         raise RuntimeError("tests/__init__.py is an unnecessary package marker for unittest discovery")
     completed = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, check=False, capture_output=True)
@@ -336,6 +451,8 @@ def hygiene_guards() -> None:
 
 
 def node_version() -> int:
+    """Require the documented Node.js major version for full regression."""
+
     completed = subprocess.run(["node", "--version"], cwd=ROOT, check=False, capture_output=True, text=True)
     if completed.returncode != 0:
         raise RuntimeError("Node.js 20+ is required for full regression")
@@ -346,6 +463,8 @@ def node_version() -> int:
 
 
 def main() -> int:
+    """Execute every configured stage and print one truthful summary."""
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--python-only", action="store_true", help="Skip frontend Node tests; not full regression evidence")
     args = parser.parse_args()
@@ -354,6 +473,7 @@ def main() -> int:
         ("compile", lambda: run_process([sys.executable, "-m", "compileall", "-q", "server.py", "homenettopo", "tests", "scripts"])),
         ("metadata", parse_metadata),
         ("python-tests", lambda: run_process([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"])),
+        ("documentation", documentation_guards),
         ("contracts", consistency_guards),
         ("assets", asset_guards),
     ]
