@@ -163,6 +163,7 @@ def consistency_guards() -> None:
     api = (ROOT / "docs/api-spec.md").read_text(encoding="utf-8")
     design = (ROOT / "docs/design.md").read_text(encoding="utf-8")
     plan = (ROOT / "docs/plan.md").read_text(encoding="utf-8")
+    questions = (ROOT / "docs/questions.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     agent = (ROOT / "AGENT.md").read_text(encoding="utf-8")
     commands_source = (ROOT / "homenettopo/commands.py").read_text(encoding="utf-8")
@@ -192,6 +193,23 @@ def consistency_guards() -> None:
         if "adjacent sibling targets" not in text.lower():
             raise RuntimeError(f"active-target contract mismatch in {owner}: adjacent siblings are not explicit")
 
+    evidence_contract_owners = (
+        ("agent", agent),
+        ("api", api),
+        ("design", design),
+        ("plan", plan),
+        ("questions", questions),
+    )
+    for owner, text in evidence_contract_owners:
+        lowered = text.lower()
+        for phrase in ("effective target", "collection_failed", "mac"):
+            if phrase not in lowered:
+                raise RuntimeError(f"Nmap evidence contract mismatch in {owner}: missing {phrase}")
+    for owner, text in evidence_contract_owners:
+        lowered = text.lower()
+        if "passive refresh" not in lowered or "capabil" not in lowered:
+            raise RuntimeError(f"capability recovery contract mismatch in {owner}")
+
     for marker in ("failures: tuple[tuple[str, str], ...]", "validate_active_hosts", "interface_failure"):
         if marker not in server:
             raise RuntimeError(f"active orchestration boundary missing from server.py: {marker}")
@@ -211,7 +229,7 @@ def consistency_guards() -> None:
         ),
         "tests/test_web_contract.py": (
             "test_status_and_validation_states_have_focus_owners_and_recovery_logic",
-            "test_passive_loading_keeps_trigger_focusable_and_dependency_failure_disables_discovery",
+            "test_collection_coordination_and_capability_recheck_contract",
         ),
     }
     test_sources = {
@@ -223,8 +241,12 @@ def consistency_guards() -> None:
         missing_markers = [marker for marker in markers if marker not in test_sources[path]]
         if missing_markers:
             raise RuntimeError(f"required regression definitions missing from {path}: {missing_markers}")
-    if "runtime dependency failure disables active capability" not in frontend_tests:
-        raise RuntimeError("frontend dependency-recovery test is missing")
+    for marker in (
+        "collection state prevents interleaving and ignores stale completions",
+        "runtime dependency failure disables and refreshed capabilities restore active discovery",
+    ):
+        if marker not in frontend_tests:
+            raise RuntimeError(f"frontend collection/recovery test is missing: {marker}")
 
     for value in ("route_inference", "address_membership"):
         if value not in topology_source or value not in api:
@@ -258,19 +280,31 @@ def asset_guards() -> None:
         "restoreFocus: false",
         "No neighbor devices observed",
         "Unsupported platform",
-        "passiveInFlight",
+        "collectionInFlight",
+        'collection: "passive"',
+        'collection: "active"',
+        "loadCapabilities({ reportError: false })",
         'setAttribute("aria-disabled", "true")',
         'removeAttribute("aria-disabled")',
-        "dependencyUnavailable",
-        "Install or restore Nmap",
+        "Restore Nmap, then refresh passive to check again.",
     ):
         if marker not in app:
             raise RuntimeError(f"frontend focus/recovery contract missing: {marker}")
+    if "passiveInFlight" in app:
+        raise RuntimeError("passive-only concurrency state must not replace shared collection coordination")
     if 'elements["refresh-button"].disabled = true' in app:
-        raise RuntimeError("passive loading must not remove the focused refresh trigger from navigation")
-    for marker in ('unavailable_reason: "dependency_unavailable"', "available: false"):
+        raise RuntimeError("collection loading must not remove the focused refresh trigger from navigation")
+    for marker in (
+        "collectionInFlight: null",
+        'collectionInFlight: "passive"',
+        'collectionInFlight: "active"',
+        "if (action.collection && state.collectionInFlight !== action.collection) return state",
+        'unavailable_reason: "dependency_unavailable"',
+        "available: false",
+        "const recovered =",
+    ):
         if marker not in core:
-            raise RuntimeError(f"frontend capability recovery missing: {marker}")
+            raise RuntimeError(f"frontend collection/capability state missing: {marker}")
     for path in (ROOT / "web").iterdir():
         if not path.is_file():
             continue
