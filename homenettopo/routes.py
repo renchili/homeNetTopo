@@ -50,7 +50,8 @@ def _normalize_destination(value: str) -> str:
     else:
         prefix_length = 32 if len(octets) == 4 else len(octets) * 8
 
-    padded = ".".join(str(octet) for octet in (*octets, *(0 for _ in range(4 - len(octets)))))
+    padded_octets = [*octets, *([0] * (4 - len(octets)))]
+    padded = ".".join(str(octet) for octet in padded_octets)
     return str(ipaddress.IPv4Network(f"{padded}/{prefix_length}", strict=False))
 
 
