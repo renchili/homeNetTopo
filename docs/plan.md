@@ -53,6 +53,7 @@ It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, 
 - Nmap may run only after both validation phases pass.
 - Parsed Nmap IPv4 and optional MAC evidence is validated before topology construction.
 - Every accepted up-host remains inside at least one effective target network.
+- Malformed or out-of-range Nmap evidence returns `500 collection_failed` and cannot publish a snapshot.
 - Failed operations preserve the previous snapshot.
 
 ### Browser and static delivery
