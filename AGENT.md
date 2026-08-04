@@ -232,16 +232,19 @@ Deployment rules:
 - never request or invoke `sudo`;
 - never add a LAN, wildcard, IPv6, or configurable bind;
 - use the Python 3.10+ interpreter that runs the deployment script;
-- copy only `server.py`, `metadata.json`, `scripts/deploy.py`, `homenettopo/`, and `web/`;
-- do not copy tests, `.git`, documentation, caches, reports, local inventories, exports, or scan data;
+- copy only the exact 15-file `RUNTIME_FILES` list: `server.py`, `metadata.json`, `scripts/deploy.py`, the eight named `homenettopo/*.py` files, and the four named web assets;
+- do not recursively copy directories or include unlisted files, tests, `.git`, documentation, caches, reports, local inventories, exports, or scan data;
+- require every source and staged runtime entry to be a regular contained file and not a symbolic link;
+- copy without following symbolic links and validate the staged tree again;
 - stage the new runtime before replacing the installed tree;
 - retain a rollback copy until LaunchAgent bootstrap and loopback `/api/v1/health` succeed;
+- perform health checks only through `127.0.0.1`, without environment proxies and with a bounded response body;
 - install under `~/Library/Application Support/HomeNetTopo`;
 - write `~/Library/LaunchAgents/com.homenettopo.local.plist`;
 - write service logs under `~/Library/Logs/HomeNetTopo`;
 - uninstall leaves logs unless the user explicitly supplies `--purge-logs`.
 
-The deployment script may contact only the local `127.0.0.1` health endpoint. Cloud deployment, remote hosts, containers, system daemons, package installers, and administrator-level installation are outside the first release.
+The deployment script does not contact remote hosts. Cloud deployment, containers, system daemons, package installers, and administrator-level installation are outside the first release.
 
 ## Topology and evidence model
 
