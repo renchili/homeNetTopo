@@ -10,7 +10,7 @@ import {
 } from "/core.mjs";
 
 const elements = Object.fromEntries([
-  "snapshot-meta", "refresh-button", "discover-button", "export-button", "status-text", "discover-reason",
+  "snapshot-meta", "refresh-button", "discover-button", "export-button", "status-heading", "status-text", "discover-reason",
   "warning-list", "graph-viewport", "topology-svg", "graph-scene", "details-content", "zoom-out", "zoom-in",
   "fit-view", "reset-view", "discover-dialog", "discover-form", "network-options", "operation-timeout",
   "address-total", "dialog-error", "dialog-close", "dialog-cancel", "dialog-confirm",
@@ -24,6 +24,31 @@ let dialogReturnFocus = null;
 function dispatch(action) {
   state = reduceState(state, action);
   render();
+}
+
+function focusElement(element) {
+  if (!element || element.disabled || typeof element.focus !== "function") return;
+  requestAnimationFrame(() => element.focus({ preventScroll: true }));
+}
+
+function focusStatusHeading() {
+  focusElement(elements["status-heading"]);
+}
+
+function clearDialogValidation() {
+  elements["dialog-error"].textContent = "";
+  for (const field of elements["discover-form"].querySelectorAll("[aria-invalid='true']")) {
+    field.removeAttribute("aria-invalid");
+  }
+}
+
+function focusDialogValidation(message, field) {
+  elements["dialog-error"].textContent = message;
+  if (field) field.setAttribute("aria-invalid", "true");
+  focusElement(elements["dialog-error"]);
+  if (field) {
+    requestAnimationFrame(() => requestAnimationFrame(() => field.focus({ preventScroll: true })));
+  }
 }
 
 async function api(path, options = {}) {
@@ -46,44 +71,59 @@ async function loadCapabilities() {
     dispatch({ type: "CAPABILITIES", capabilities: await api("/api/v1/capabilities") });
   } catch (error) {
     dispatch({ type: "ERROR", phase: UI_STATES.REQUEST_ERROR, error: { error: { code: "request_error", message: "Capabilities could not be loaded." } } });
+    focusStatusHeading();
   }
 }
 
-async function refreshPassive() {
+async function refreshPassive(event = null) {
+  const returnFocus = event?.currentTarget ?? null;
+  let focusStatus = false;
   dispatch({ type: "PASSIVE_START" });
   elements["refresh-button"].disabled = true;
   try {
     const snapshot = await api("/api/v1/topology/refresh", collectionOptions({}));
     dispatch({ type: "PASSIVE_SUCCESS", snapshot });
+    focusStatus = state.phase === UI_STATES.EMPTY_READY;
   } catch (error) {
     dispatch({ type: "ERROR", phase: mapApiError(error), error });
+    focusStatus = true;
   } finally {
     elements["refresh-button"].disabled = false;
+    if (focusStatus) focusStatusHeading();
+    else focusElement(returnFocus);
   }
 }
 
 function openDiscoverDialog() {
   if (!state.snapshot) return;
   dialogReturnFocus = document.activeElement;
+  clearDialogValidation();
   dispatch({ type: "ACTIVE_CONFIRM" });
   renderNetworkOptions();
   elements["discover-dialog"].showModal();
-  elements["network-options"].querySelector("input")?.focus();
+  focusElement(elements["network-options"].querySelector("input") ?? elements["operation-timeout"]);
 }
 
-function closeDiscoverDialog(restoreState = true) {
+function closeDiscoverDialog({ restoreState = true, restoreFocus = true } = {}) {
+  const returnFocus = dialogReturnFocus;
   if (elements["discover-dialog"].open) elements["discover-dialog"].close();
-  elements["dialog-error"].textContent = "";
+  clearDialogValidation();
   if (restoreState) dispatch({ type: "ACTIVE_CANCEL" });
-  dialogReturnFocus?.focus();
+  dialogReturnFocus = null;
+  if (restoreFocus) focusElement(returnFocus);
+  return returnFocus;
 }
 
 function networkOptionKey(network) {
   return `${network.cidr}|${network.interface}`;
 }
 
+function selectedNetworkKeys() {
+  return new Set([...elements["network-options"].querySelectorAll("input:checked")].map((input) => input.value));
+}
+
 function selectedNetworks() {
-  const selectedKeys = new Set([...elements["network-options"].querySelectorAll("input:checked")].map((input) => input.value));
+  const selectedKeys = selectedNetworkKeys();
   return eligibleNetworks(state.snapshot).filter((network) => selectedKeys.has(networkOptionKey(network)));
 }
 
@@ -93,7 +133,7 @@ function updateAddressTotal() {
   elements["dialog-confirm"].disabled = selected.length === 0;
 }
 
-function renderNetworkOptions() {
+function renderNetworkOptions(selectedKeys = new Set()) {
   elements["network-options"].replaceChildren();
   for (const network of eligibleNetworks(state.snapshot)) {
     const label = document.createElement("label");
@@ -102,7 +142,13 @@ function renderNetworkOptions() {
     input.type = "checkbox";
     input.name = "network";
     input.value = networkOptionKey(network);
-    input.addEventListener("change", updateAddressTotal);
+    input.checked = selectedKeys.has(input.value);
+    input.setAttribute("aria-describedby", "dialog-error");
+    input.addEventListener("change", () => {
+      input.removeAttribute("aria-invalid");
+      if (selectedNetworks().length) elements["dialog-error"].textContent = "";
+      updateAddressTotal();
+    });
     const span = document.createElement("span");
     span.textContent = `${network.cidr} via ${network.interface} · ${network.address_count} addresses`;
     label.append(input, span);
@@ -113,20 +159,65 @@ function renderNetworkOptions() {
 
 async function runActiveDiscovery(event) {
   event.preventDefault();
-  const networks = [...new Set(selectedNetworks().map((network) => network.cidr))];
+  clearDialogValidation();
+  const selectedKeys = selectedNetworkKeys();
+  const selected = selectedNetworks();
+  const networks = [...new Set(selected.map((network) => network.cidr))];
   const timeout = Number(elements["operation-timeout"].value);
-  if (!networks.length || !Number.isInteger(timeout) || timeout < 5 || timeout > 120) {
-    elements["dialog-error"].textContent = "Select at least one network and enter a timeout from 5 through 120 seconds.";
+  if (!networks.length) {
+    focusDialogValidation(
+      "Select at least one eligible local network.",
+      elements["network-options"].querySelector("input"),
+    );
     return;
   }
-  closeDiscoverDialog(false);
+  if (!Number.isInteger(timeout) || timeout < 5 || timeout > 120) {
+    focusDialogValidation("Enter a timeout from 5 through 120 seconds.", elements["operation-timeout"]);
+    return;
+  }
+
+  const returnFocus = closeDiscoverDialog({ restoreState: false, restoreFocus: false });
   dispatch({ type: "ACTIVE_START" });
+  focusStatusHeading();
   try {
     const snapshot = await api("/api/v1/discover", collectionOptions({ networks, operation_timeout_seconds: timeout }));
     dispatch({ type: "ACTIVE_SUCCESS", snapshot });
+    focusElement(returnFocus);
   } catch (error) {
-    dispatch({ type: "ERROR", phase: mapApiError(error), error });
+    const phase = mapApiError(error);
+    dispatch({ type: "ERROR", phase, error });
+    if (phase === UI_STATES.VALIDATION_ERROR) {
+      dialogReturnFocus = returnFocus;
+      renderNetworkOptions(selectedKeys);
+      elements["operation-timeout"].value = String(timeout);
+      elements["discover-dialog"].showModal();
+      const invalidField = error?.error?.details?.fields?.includes("operation_timeout_seconds")
+        ? elements["operation-timeout"]
+        : elements["network-options"].querySelector("input:checked") ?? elements["network-options"].querySelector("input");
+      focusDialogValidation(error?.error?.message ?? "The discovery request was rejected.", invalidField);
+    } else {
+      focusStatusHeading();
+    }
   }
+}
+
+function statusHeading() {
+  const headings = {
+    [UI_STATES.BOOT]: "Topology status",
+    [UI_STATES.LOADING_PASSIVE]: "Passive collection in progress",
+    [UI_STATES.PASSIVE_READY]: "Passive topology ready",
+    [UI_STATES.PARTIAL_READY]: "Partial topology ready",
+    [UI_STATES.EMPTY_READY]: "No neighbor devices observed",
+    [UI_STATES.ACTIVE_CONFIRM]: "Confirm active discovery",
+    [UI_STATES.ACTIVE_RUNNING]: "Active discovery in progress",
+    [UI_STATES.ACTIVE_READY]: "Active topology ready",
+    [UI_STATES.DEPENDENCY_UNAVAILABLE]: "Active discovery unavailable",
+    [UI_STATES.VALIDATION_ERROR]: "Review the discovery request",
+    [UI_STATES.COLLECTION_CONFLICT]: "Collection already running",
+    [UI_STATES.REQUEST_ERROR]: "Request failed",
+    [UI_STATES.UNSUPPORTED_PLATFORM]: "Unsupported platform",
+  };
+  return headings[state.phase] ?? "Topology status";
 }
 
 function statusMessage() {
@@ -256,6 +347,7 @@ function renderWarnings() {
 }
 
 function render() {
+  elements["status-heading"].textContent = statusHeading();
   elements["status-text"].textContent = statusMessage();
   const snapshot = state.snapshot;
   elements["snapshot-meta"].textContent = snapshot ? `${snapshot.mode} · ${new Date(snapshot.collected_at).toLocaleString()}` : "No snapshot loaded.";
@@ -265,7 +357,7 @@ function render() {
   elements["discover-button"].disabled = !snapshot || !active?.available || !eligible.length || state.phase === UI_STATES.ACTIVE_RUNNING;
   elements["discover-reason"].textContent = !active?.available
     ? active?.unavailable_reason === "unsupported_platform" ? "Active discovery is unavailable on this platform." : "Install Nmap to enable bounded active discovery."
-    : !eligible.length && snapshot ? "No eligible non-tunnel private network is available." : "";
+    : !eligible.length && snapshot ? "No eligible non-tunnel RFC 1918 network is available." : "";
   renderWarnings();
   renderGraph();
   renderDetails();
@@ -308,6 +400,7 @@ async function exportSnapshot() {
     URL.revokeObjectURL(url);
   } catch (error) {
     dispatch({ type: "ERROR", phase: mapApiError(error), error });
+    focusStatusHeading();
   }
 }
 
