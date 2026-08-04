@@ -89,6 +89,18 @@ class DeploymentScriptTests(unittest.TestCase):
     def setUpClass(cls):
         cls.deploy = load_deploy_module()
 
+    def make_runtime_source(self, root: Path) -> None:
+        """Create the minimal synthetic runtime tree expected by the deployer."""
+
+        for relative in self.deploy.RUNTIME_FILES:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(relative, encoding="utf-8")
+        for relative in self.deploy.RUNTIME_DIRS:
+            path = root / relative
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "runtime.txt").write_text(relative, encoding="utf-8")
+
     def test_launch_agent_is_user_scoped_and_loopback_only(self):
         payload = self.deploy.build_launch_agent("/usr/local/bin/python3", 8765, None)
         arguments = payload["ProgramArguments"]
@@ -111,6 +123,46 @@ class DeploymentScriptTests(unittest.TestCase):
         self.assertNotIn("shell=True", source)
         self.assertNotIn("0.0.0.0", source)
         self.assertNotIn("https://", source)
+        self.assertIn("ProxyHandler({})", source)
+        self.assertIn("runtime_replaced", source)
+
+    def test_source_validation_rejects_symbolic_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_runtime_source(root)
+            target = root / "outside.txt"
+            target.write_text("outside", encoding="utf-8")
+            candidate = root / "web" / "linked.txt"
+            try:
+                candidate.symlink_to(target)
+            except OSError as exc:
+                self.skipTest(f"symbolic links are unavailable: {exc}")
+            with self.assertRaises(self.deploy.DeploymentError):
+                self.deploy.validate_source_root(root)
+
+    def test_replace_failure_restores_previous_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            install = parent / "HomeNetTopo"
+            staging = parent / "staging"
+            install.mkdir()
+            staging.mkdir()
+            (install / "version.txt").write_text("old", encoding="utf-8")
+            (staging / "version.txt").write_text("new", encoding="utf-8")
+            original_rename = Path.rename
+
+            def fail_staging_rename(path, target):
+                if path == staging:
+                    raise OSError("synthetic replacement failure")
+                return original_rename(path, target)
+
+            with (
+                mock.patch.object(self.deploy, "INSTALL_DIR", install),
+                mock.patch.object(Path, "rename", new=fail_staging_rename),
+                self.assertRaises(OSError),
+            ):
+                self.deploy.replace_runtime(staging)
+            self.assertEqual((install / "version.txt").read_text(encoding="utf-8"), "old")
 
     def test_port_validation_rejects_invalid_values(self):
         self.assertEqual(self.deploy.validate_port("8765"), 8765)
