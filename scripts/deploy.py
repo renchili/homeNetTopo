@@ -3,8 +3,8 @@
 
 The deployment intentionally stays inside the current user's Library directory,
 never requests administrator privileges, and keeps the service bound to
-127.0.0.1. It copies only the explicit runtime allowlist below, so tests,
-repository metadata, and local development artifacts are not deployed.
+127.0.0.1. It copies only the exact runtime file allowlist below, so tests,
+repository metadata, caches, and local development artifacts are not deployed.
 """
 
 from __future__ import annotations
@@ -29,8 +29,23 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_DIR = Path.home() / "Library" / "Application Support" / "HomeNetTopo"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 LOG_DIR = Path.home() / "Library" / "Logs" / "HomeNetTopo"
-RUNTIME_FILES = ("server.py", "metadata.json", "scripts/deploy.py")
-RUNTIME_DIRS = ("homenettopo", "web")
+RUNTIME_FILES = (
+    "server.py",
+    "metadata.json",
+    "scripts/deploy.py",
+    "homenettopo/__init__.py",
+    "homenettopo/commands.py",
+    "homenettopo/discovery.py",
+    "homenettopo/interfaces.py",
+    "homenettopo/models.py",
+    "homenettopo/neighbors.py",
+    "homenettopo/routes.py",
+    "homenettopo/topology.py",
+    "web/index.html",
+    "web/app.js",
+    "web/core.mjs",
+    "web/styles.css",
+)
 DEFAULT_PORT = 8765
 HEALTH_TIMEOUT_SECONDS = 10
 MAX_HEALTH_BYTES = 4096
@@ -73,27 +88,23 @@ def canonical_executable(value: str | None) -> str | None:
 
 
 def validate_source_root(root: Path = SOURCE_ROOT) -> None:
-    """Verify that deployable paths contain only regular files and directories."""
+    """Verify every deployable file is regular, contained, and not a symlink."""
 
     root = root.resolve()
     missing: list[str] = []
-    for relative in (*RUNTIME_FILES, *RUNTIME_DIRS):
+    for relative in RUNTIME_FILES:
         source = root / relative
         if source.is_symlink():
             raise DeploymentError(f"Runtime source contains a symbolic link: {relative}")
         if not source.exists():
             missing.append(relative)
             continue
-        candidates = (source,) if source.is_file() else (source, *source.rglob("*"))
-        for candidate in candidates:
-            if candidate.is_symlink():
-                raise DeploymentError(f"Runtime source contains a symbolic link: {candidate.relative_to(root)}")
-            if not candidate.is_file() and not candidate.is_dir():
-                raise DeploymentError(f"Runtime source contains a special file: {candidate.relative_to(root)}")
-            try:
-                candidate.resolve().relative_to(root)
-            except ValueError as exc:
-                raise DeploymentError(f"Runtime source escapes the repository: {candidate}") from exc
+        if not source.is_file():
+            raise DeploymentError(f"Runtime source is not a regular file: {relative}")
+        try:
+            source.resolve().relative_to(root)
+        except ValueError as exc:
+            raise DeploymentError(f"Runtime source escapes the repository: {source}") from exc
     if missing:
         raise DeploymentError(f"Runtime source paths are missing: {', '.join(missing)}")
 
@@ -159,7 +170,7 @@ def bootout_if_loaded() -> None:
 
 
 def stage_runtime(root: Path = SOURCE_ROOT) -> Path:
-    """Copy and revalidate the runtime allowlist in a temporary sibling tree."""
+    """Copy and revalidate the exact runtime files in a temporary sibling tree."""
 
     validate_source_root(root)
     INSTALL_DIR.parent.mkdir(parents=True, exist_ok=True)
@@ -170,8 +181,6 @@ def stage_runtime(root: Path = SOURCE_ROOT) -> Path:
             destination = staging / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
-        for relative in RUNTIME_DIRS:
-            shutil.copytree(root / relative, staging / relative, symlinks=True)
         # Validate the copied tree as well, so a link introduced between the
         # first validation and copy cannot enter the installed runtime.
         validate_source_root(staging)
@@ -303,7 +312,9 @@ def install(port: int, nmap_path: str | None) -> None:
             restore_runtime(backup)
         restore_plist(previous_plist)
         if previous_plist is not None and INSTALL_DIR.exists():
-            run_launchctl("bootstrap", service_domain(), str(PLIST_PATH), check=False)
+            restored = run_launchctl("bootstrap", service_domain(), str(PLIST_PATH), check=False)
+            if restored.returncode == 0:
+                run_launchctl("kickstart", "-k", service_target(), check=False)
         shutil.rmtree(staging, ignore_errors=True)
         raise
     else:
