@@ -66,7 +66,7 @@ def consistency_guards() -> None:
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     import server as server_module
-    from homenettopo import commands, discovery
+    from homenettopo import commands, discovery, routes
 
     metadata = load_metadata()
     active = metadata["active_discovery"]
@@ -95,8 +95,33 @@ def consistency_guards() -> None:
     if "RFC 1918" not in metadata.get("network_scope", ""):
         raise RuntimeError("metadata network scope must explicitly identify RFC 1918")
 
+    validated_targets = ("192.168.1.0/24", "192.168.1.0/25")
+    if commands._canonical_targets(validated_targets) != validated_targets:
+        raise RuntimeError("the command layer must preserve contained targets validated under distinct Phase B owners")
+
+    invalid_route_output = (
+        "Routing tables\n\nInternet:\n"
+        "Destination Gateway Flags Netif\n"
+        "alpha beta gamma delta\n"
+    )
+    try:
+        routes.parse_routes(invalid_route_output)
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("the route parser accepted an unrecognized four-column row")
+
+    abbreviated_routes = routes.parse_routes(
+        "Routing tables\n\nInternet:\n"
+        "Destination Gateway Flags Netif Expire\n"
+        "192.168.1/24 link#4 UCS en0 !\n"
+    )
+    if len(abbreviated_routes) != 1 or abbreviated_routes[0].destination != "192.168.1.0/24":
+        raise RuntimeError("the route parser does not support the macOS abbreviated-network format")
+
     server = (ROOT / "server.py").read_text(encoding="utf-8")
     api = (ROOT / "docs/api-spec.md").read_text(encoding="utf-8")
+    design = (ROOT / "docs/design.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     agent = (ROOT / "AGENT.md").read_text(encoding="utf-8")
     commands_source = (ROOT / "homenettopo/commands.py").read_text(encoding="utf-8")
@@ -113,6 +138,14 @@ def consistency_guards() -> None:
         missing_owners = [name for name, text in (("commands", commands_source), ("api", api), ("readme", readme)) if value not in text]
         if missing_owners:
             raise RuntimeError(f"Nmap contract mismatch for {value}: {missing_owners}")
+
+    for owner, text in (("agent", agent), ("api", api), ("design", design)):
+        for phrase in ("RFC 1918", "most-specific containing local network"):
+            if phrase not in text:
+                raise RuntimeError(f"active-target contract mismatch in {owner}: missing {phrase}")
+    for owner, text in (("agent", agent), ("api", api), ("design", design), ("readme", readme)):
+        if "adjacent sibling targets" not in text.lower():
+            raise RuntimeError(f"active-target contract mismatch in {owner}: adjacent siblings are not explicit")
 
     for value in ("route_inference", "address_membership"):
         if value not in topology_source or value not in api:
