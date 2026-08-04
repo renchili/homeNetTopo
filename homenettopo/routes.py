@@ -1,4 +1,4 @@
-"""Parser for macOS IPv4 routing-table output."""
+"""Parse the strict IPv4 subset of macOS ``netstat -rn -f inet`` output."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ _MAC_GATEWAY_RE = re.compile(r"^[0-9A-Fa-f]{1,2}(?::[0-9A-Fa-f]{1,2}){5}$")
 
 @dataclass(frozen=True)
 class RouteFact:
+    """One normalized IPv4 routing-table row."""
+
     destination: str
     gateway: str
     flags: tuple[str, ...]
@@ -22,6 +24,8 @@ class RouteFact:
 
 
 def _normalize_destination(value: str) -> str:
+    """Expand full or abbreviated macOS destinations to canonical CIDR."""
+
     if value == "default":
         return "0.0.0.0/0"
     if value.count("/") > 1:
@@ -48,6 +52,8 @@ def _normalize_destination(value: str) -> str:
         if not 0 <= prefix_length <= 32:
             raise ValueError("invalid IPv4 destination")
     else:
+        # macOS may print classful-looking abbreviations such as ``127`` or
+        # ``169.254``; the number of supplied octets determines the prefix.
         prefix_length = 32 if len(octets) == 4 else len(octets) * 8
 
     padded_octets = [*octets, *([0] * (4 - len(octets)))]
@@ -56,6 +62,8 @@ def _normalize_destination(value: str) -> str:
 
 
 def _normalize_gateway(value: str) -> str:
+    """Accept only IPv4, ``link#N``, or six-octet MAC gateway forms."""
+
     try:
         return str(ipaddress.IPv4Address(value))
     except ipaddress.AddressValueError:
@@ -67,6 +75,13 @@ def _normalize_gateway(value: str) -> str:
 
 
 def parse_routes(text: str) -> tuple[RouteFact, ...]:
+    """Return deterministic routes from a recognized macOS IPv4 table.
+
+    Only the first four route columns are semantic.  Optional trailing columns,
+    including ``Expire``, are ignored.  Nonempty output without the table header
+    or without any recognized row is rejected rather than treated as empty.
+    """
+
     routes: list[RouteFact] = []
     candidate_lines = 0
     header_seen = False
