@@ -1,4 +1,9 @@
-"""Deterministic topology construction with explicit provenance."""
+"""Build deterministic logical topology with explicit evidence provenance.
+
+The output is intentionally conservative: route and address membership produce
+inferred relationships, while direct interface and ARP facts remain observed.
+Nothing in this module claims physical cabling or hidden infrastructure.
+"""
 
 from __future__ import annotations
 
@@ -31,10 +36,14 @@ from .routes import RouteFact
 
 
 def _slug(value: str) -> str:
+    """Convert an address-like value into a stable identifier fragment."""
+
     return value.replace("/", "-").replace(":", "-").replace(".", "-")
 
 
 def _content_fingerprint(snapshot: TopologySnapshot) -> str:
+    """Create a stable snapshot id from content other than the id itself."""
+
     payload = snapshot.to_dict()
     payload.pop("snapshot_id", None)
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -53,6 +62,14 @@ def build_snapshot(
     platform: str = "darwin",
     collected_at: str | None = None,
 ) -> TopologySnapshot:
+    """Merge normalized evidence into one validated, deterministic snapshot.
+
+    Direct command facts create observed nodes and edges.  Route destination and
+    address-to-subnet relationships are added as explicit inference evidence.
+    Conflicting names or MACs are retained and surfaced as warnings rather than
+    silently choosing one identity.
+    """
+
     timestamp = collected_at or utc_now()
     interface_items = tuple(interfaces)
     route_items = tuple(routes)
@@ -68,12 +85,16 @@ def build_snapshot(
     gateway_by_address: dict[str, str] = {}
 
     def add_derived_source(source_type: str) -> None:
+        """Record a deterministic inference source once per snapshot."""
+
         if not any(source.type == source_type for source in source_items):
             source_items.append(SourceStatus(source_type, SourceStatusValue.OK))
 
     host_id = "local-host"
     nodes[host_id] = Node(host_id, NodeKind.LOCAL_HOST, "This Mac", confidence=Confidence.HIGH, observed_at=timestamp)
 
+    # Interface facts establish the local host, subnet nodes, and the only
+    # networks that can later be presented as active-discovery candidates.
     for interface in interface_items:
         interface_id = f"interface:{interface.name}"
         evidence = Evidence("interfaces", "Interface configuration", timestamp, {"flags": list(interface.flags)})
@@ -132,10 +153,14 @@ def build_snapshot(
             )
 
     def matching_subnet(address: str) -> str | None:
+        """Return the most-specific observed subnet containing an address."""
+
         ip = ipaddress.IPv4Address(address)
         candidates = [(node_id, network) for node_id, network in subnet_networks.items() if ip in network]
         return max(candidates, key=lambda item: item[1].prefixlen)[0] if candidates else None
 
+    # Route gateways are observed.  Destination-boundary relationships are
+    # inference because a single host cannot observe the remote path topology.
     for route in route_items:
         try:
             gateway_ip = ipaddress.IPv4Address(route.gateway)
@@ -242,6 +267,8 @@ def build_snapshot(
         )
         add_derived_source("route_inference")
 
+    # ARP and active evidence are merged by IPv4 identity.  The sets preserve
+    # conflicting observations so the UI can show uncertainty explicitly.
     macs_by_address: dict[str, set[str]] = defaultdict(set)
     names_by_address: dict[str, set[str]] = defaultdict(set)
     evidence_by_address: dict[str, list[Evidence]] = defaultdict(list)
@@ -339,6 +366,8 @@ def build_snapshot(
         edges=tuple(sorted(edges.values(), key=lambda item: item.id)),
         active_discovery=active_metadata,
     )
+    # Validate before and after replacing the placeholder id: the fingerprint
+    # must represent the canonical serialized snapshot content.
     snapshot = replace(snapshot, snapshot_id=_content_fingerprint(snapshot))
     snapshot.validate()
     return snapshot
