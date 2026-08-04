@@ -1,4 +1,9 @@
-"""Approved command construction and bounded shell-free execution."""
+"""Construct approved commands and execute them without a shell.
+
+This module is the final process-execution boundary.  Callers may select a
+known command family and validated data, but they cannot supply arbitrary
+executables, flags, environment variables, or shell syntax.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +36,8 @@ DOCUMENTATION_RANGES = tuple(
 
 
 class CommandError(RuntimeError):
+    """Normalized process-construction or execution failure."""
+
     def __init__(self, code: str, message: str, *, returncode: int | None = None) -> None:
         super().__init__(message)
         self.code = code
@@ -38,6 +45,8 @@ class CommandError(RuntimeError):
 
 
 class CommandKind(str, Enum):
+    """Closed set of process families approved by the product contract."""
+
     INTERFACES = "interfaces"
     ROUTES = "routes"
     NEIGHBORS = "neighbors"
@@ -46,6 +55,8 @@ class CommandKind(str, Enum):
 
 @dataclass(frozen=True)
 class CommandSpec:
+    """Immutable command arguments and total execution deadline."""
+
     kind: CommandKind
     argv: tuple[str, ...]
     timeout_seconds: int
@@ -53,6 +64,8 @@ class CommandSpec:
 
 @dataclass(frozen=True)
 class CommandResult:
+    """Bounded UTF-8 process output and timing metadata."""
+
     stdout: str
     stderr: str
     returncode: int
@@ -61,23 +74,33 @@ class CommandResult:
 
 @dataclass(frozen=True)
 class NmapResolution:
+    """Canonical executable path plus a safe public resolution label."""
+
     path: str | None
     source: str
 
 
 def interfaces_spec() -> CommandSpec:
+    """Return the fixed macOS interface-collection command."""
+
     return CommandSpec(CommandKind.INTERFACES, ("/sbin/ifconfig", "-a"), PASSIVE_TIMEOUT_SECONDS)
 
 
 def routes_spec() -> CommandSpec:
+    """Return the fixed macOS IPv4 route-collection command."""
+
     return CommandSpec(CommandKind.ROUTES, ("/usr/sbin/netstat", "-rn", "-f", "inet"), PASSIVE_TIMEOUT_SECONDS)
 
 
 def neighbors_spec() -> CommandSpec:
+    """Return the fixed macOS ARP-cache collection command."""
+
     return CommandSpec(CommandKind.NEIGHBORS, ("/usr/sbin/arp", "-an"), PASSIVE_TIMEOUT_SECONDS)
 
 
 def _verified_executable(candidate: str | None) -> str | None:
+    """Return a canonical executable regular file, never a directory or alias."""
+
     if not candidate:
         return None
     path = os.path.realpath(candidate)
@@ -91,6 +114,8 @@ def _verified_executable(candidate: str | None) -> str | None:
 
 
 def resolve_nmap(explicit_path: str | None = None) -> NmapResolution:
+    """Resolve Nmap in the documented order without exposing PATH details."""
+
     candidates = (
         (explicit_path, "explicit"),
         ("/opt/homebrew/bin/nmap", "homebrew_arm64"),
@@ -105,6 +130,8 @@ def resolve_nmap(explicit_path: str | None = None) -> NmapResolution:
 
 
 def _target_is_eligible(network: ipaddress.IPv4Network) -> bool:
+    """Repeat the absolute RFC 1918 safety boundary at the command adapter."""
+
     within_rfc1918 = any(network == private or network.subnet_of(private) for private in RFC1918_RANGES)
     return within_rfc1918 and not (
         network.is_loopback
@@ -117,6 +144,13 @@ def _target_is_eligible(network: ipaddress.IPv4Network) -> bool:
 
 
 def _canonical_targets(networks: Iterable[str]) -> tuple[str, ...]:
+    """Revalidate and deterministically order the Phase B target set.
+
+    Only exact duplicates are removed here.  Contained targets may belong to
+    different most-specific local owners, so collapsing them again would undo
+    the Phase B authorization decision.
+    """
+
     parsed: list[ipaddress.IPv4Network] = []
     for value in networks:
         if not isinstance(value, str):
@@ -138,6 +172,8 @@ def _canonical_targets(networks: Iterable[str]) -> tuple[str, ...]:
 
 
 def nmap_spec(path: str, networks: Iterable[str], operation_timeout_seconds: int) -> CommandSpec:
+    """Build the single approved Nmap host-discovery invocation."""
+
     verified = _verified_executable(path)
     if not verified or verified != os.path.realpath(path):
         raise CommandError("dependency_unavailable", "Nmap is unavailable.")
@@ -160,6 +196,8 @@ def nmap_spec(path: str, networks: Iterable[str], operation_timeout_seconds: int
 
 
 def _validate_spec(spec: CommandSpec) -> None:
+    """Reject any spec that differs from the exact approved command shape."""
+
     expected = {
         CommandKind.INTERFACES: interfaces_spec(),
         CommandKind.ROUTES: routes_spec(),
@@ -182,6 +220,8 @@ def _validate_spec(spec: CommandSpec) -> None:
 
 
 def _stop_process(process: subprocess.Popen[bytes]) -> None:
+    """Terminate, then kill after the bounded grace period when necessary."""
+
     if process.poll() is not None:
         return
     process.terminate()
@@ -193,6 +233,12 @@ def _stop_process(process: subprocess.Popen[bytes]) -> None:
 
 
 def run_command(spec: CommandSpec) -> CommandResult:
+    """Execute one approved command with total deadline and output limits.
+
+    stdout and stderr are drained concurrently to avoid pipe deadlocks.  The
+    environment is deliberately minimal and ``shell=False`` is non-negotiable.
+    """
+
     _validate_spec(spec)
     started = time.monotonic()
     try:
@@ -222,6 +268,8 @@ def run_command(spec: CommandSpec) -> CommandResult:
                 _stop_process(process)
                 raise CommandError("command_timeout", "The collection command timed out.")
             events = selector.select(timeout=min(remaining, 0.2))
+            # Once the child exits, force a final read from every registered
+            # stream so buffered output is not lost before wait().
             if not events and process.poll() is not None:
                 events = [(key, selectors.EVENT_READ) for key in list(selector.get_map().values())]
             for key, _ in events:
