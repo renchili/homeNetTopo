@@ -50,7 +50,8 @@ homenettopo/interfaces.py
   Parser for `/sbin/ifconfig -a`.
 
 homenettopo/routes.py
-  Parser for `/usr/sbin/netstat -rn -f inet`.
+  Strict parser for `/usr/sbin/netstat -rn -f inet`, including macOS
+  abbreviated destinations, IPv4, link, and MAC gateway forms.
 
 homenettopo/neighbors.py
   Parser for `/usr/sbin/arp -an`, including incomplete records.
@@ -128,12 +129,14 @@ On timeout, terminate the process, wait up to two seconds, then kill if needed. 
 3. acquire the single collection lock or return `409`;
 4. confirm the platform is macOS;
 5. run interfaces, routes, and ARP commands;
-6. parse each source independently;
+6. parse each source independently and treat nonempty unrecognized output as a source failure;
 7. construct a complete or coherent partial passive snapshot;
 8. atomically replace the latest snapshot;
 9. release the lock.
 
 One source may fail while the other evidence remains coherent. Failure of all material passive sources returns `collection_failed` and preserves the prior snapshot.
+
+The route parser requires the IPv4 routing-table header and reads destination, gateway, flags, and interface from the first four route columns. It accepts `default`, full or abbreviated IPv4 destinations, IPv4 gateways, `link#N`, and colon-delimited MAC gateways. Optional Expire data is ignored after the interface column. A nonempty table with no recognizable route rows is a parse failure.
 
 No separate hostname, DNS, vendor, or online lookup occurs.
 
@@ -149,7 +152,7 @@ Before acquiring the collection lock or running commands:
 4. parse JSON object;
 5. require 1–32 network strings;
 6. canonicalize IPv4 networks;
-7. reject public and special address classes;
+7. require every target to be within RFC 1918 space—`10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`—and reject public or special address classes;
 8. reject an absolute unique-address union above 1024;
 9. validate `operation_timeout_seconds` from 5 through 120.
 
@@ -159,41 +162,48 @@ After Phase A succeeds:
 
 1. acquire the collection lock or return `409`;
 2. run fresh passive collection;
-3. derive eligible private IPv4 networks assigned to non-tunnel interfaces;
+3. derive eligible RFC 1918 networks assigned to non-tunnel interfaces;
 4. require every requested target to be equal to or a subnet of one eligible local network;
-5. reject supernets, partial overlaps, adjacent networks, unrelated private networks, and tunnel-only networks;
-6. collapse duplicate and contained targets;
-7. recalculate the final unique-address union and require at most 1024.
+5. assign every target to its most-specific containing local network;
+6. reject supernets, partial overlaps, adjacent networks, unrelated RFC 1918 networks, non-RFC1918 networks, and tunnel-only networks;
+7. remove exact duplicates and contained targets only within the same owner group; adjacent sibling targets remain separate and are never widened;
+8. recalculate the final unique-address union and require at most 1024.
 
 Only after both phases pass:
 
 1. resolve Nmap;
-2. run the fixed XML-output command with the requested total operation deadline;
-3. parse host status and addresses using `xml.etree.ElementTree`;
-4. merge active evidence into the fresh passive snapshot;
-5. atomically replace the latest snapshot;
-6. release the lock.
+2. pass the Phase B effective target set to the fixed command adapter without cross-owner containment reduction;
+3. run the fixed XML-output command with the requested total operation deadline;
+4. parse host status and addresses using `xml.etree.ElementTree`;
+5. merge active evidence into the fresh passive snapshot;
+6. atomically replace the latest snapshot;
+7. release the lock.
 
 A failed active operation preserves the previous snapshot. Intermediate passive data is not published.
 
 ## Target-containment rules
 
-For each requested target `T`, at least one eligible local network `L` must satisfy:
+For each requested target `T`, at least one eligible local RFC 1918 network `L` must satisfy:
 
 ```text
 T == L or T.subnet_of(L)
 ```
 
+When more than one local network contains `T`, the most-specific containing local network owns that target for Phase B reduction.
+
 These are rejected:
 
 - `T` is a supernet of `L`;
 - `T` only partially overlaps `L`;
-- `T` is adjacent to `L`;
-- `T` is private but unrelated;
+- `T` is adjacent to `L` but outside it;
+- `T` is RFC 1918 but unrelated;
+- `T` is outside `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`;
 - `T` is available only through a tunnel interface;
 - `T` is loopback, link-local, multicast, unspecified, public, or reserved-only documentation space.
 
-Tests must cover equal, contained, supernet, partial-overlap, adjacent, unrelated, tunnel-only, 1024-address, 1025-address, 32-network, and 33-network cases.
+Exact duplicates and contained targets may be removed only when they share the same Phase B owner. Adjacent sibling targets and targets owned by different overlapping local networks remain distinct in the Nmap argument list.
+
+Tests must cover equal, contained, duplicate, supernet, partial-overlap, adjacent, unrelated, tunnel-only, overlapping local owners, 1024-address, 1025-address, 32-network, and 33-network cases.
 
 ## Snapshot lifecycle and API ownership
 
@@ -448,7 +458,7 @@ Pointer pan, bounded pointer-centered zoom, keyboard-selectable nodes/edges, Esc
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Coverage includes typed commands, Nmap resolution, XML parsing, Phase A/B validation, exact containment boundaries, topology invariants, protected POST routes, read-only GETs, Host/origin checks, concurrency, snapshot preservation, export, static containment, headers, and repository hygiene.
+Coverage includes typed commands, Nmap resolution, XML parsing, Phase A/B validation, exact containment boundaries, overlapping local-owner preservation, strict macOS route parsing, malformed four-column route rejection, topology invariants, protected POST routes, read-only GETs, Host/origin checks, concurrency, snapshot preservation, export, static containment, headers, and repository hygiene.
 
 ### Frontend logic
 
