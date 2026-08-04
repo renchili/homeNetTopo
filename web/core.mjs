@@ -82,6 +82,7 @@ export function reduceState(state, action) {
     case "SELECT": return { ...state, selectedId: action.id };
     case "CLEAR_SELECTION": return { ...state, selectedId: null };
     case "ERROR": {
+      if (state.collectionInFlight && !action.collection) return state;
       if (action.collection && state.collectionInFlight !== action.collection) return state;
       let capabilities = state.capabilities;
       if (action.phase === UI_STATES.DEPENDENCY_UNAVAILABLE && capabilities?.active_discovery) {
