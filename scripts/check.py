@@ -122,6 +122,7 @@ def consistency_guards() -> None:
     server = (ROOT / "server.py").read_text(encoding="utf-8")
     api = (ROOT / "docs/api-spec.md").read_text(encoding="utf-8")
     design = (ROOT / "docs/design.md").read_text(encoding="utf-8")
+    plan = (ROOT / "docs/plan.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     agent = (ROOT / "AGENT.md").read_text(encoding="utf-8")
     commands_source = (ROOT / "homenettopo/commands.py").read_text(encoding="utf-8")
@@ -139,11 +140,11 @@ def consistency_guards() -> None:
         if missing_owners:
             raise RuntimeError(f"Nmap contract mismatch for {value}: {missing_owners}")
 
-    for owner, text in (("agent", agent), ("api", api), ("design", design)):
+    for owner, text in (("agent", agent), ("api", api), ("design", design), ("plan", plan)):
         for phrase in ("RFC 1918", "most-specific containing local network"):
             if phrase not in text:
                 raise RuntimeError(f"active-target contract mismatch in {owner}: missing {phrase}")
-    for owner, text in (("agent", agent), ("api", api), ("design", design), ("readme", readme)):
+    for owner, text in (("agent", agent), ("api", api), ("design", design), ("plan", plan), ("readme", readme)):
         if "adjacent sibling targets" not in text.lower():
             raise RuntimeError(f"active-target contract mismatch in {owner}: adjacent siblings are not explicit")
 
