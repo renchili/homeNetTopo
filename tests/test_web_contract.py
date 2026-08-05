@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +13,7 @@ class WebContractTests(unittest.TestCase):
         for hook in (
             "refresh-button",
             "discover-button",
+            "discover-capability",
             "export-button",
             "topology-svg",
             "discover-dialog",
@@ -63,7 +63,7 @@ class WebContractTests(unittest.TestCase):
             "requestAnimationFrame",
             'setAttribute("aria-invalid", "true")',
             "restoreFocus: false",
-            "No neighbor devices observed",
+            "No peer devices observed",
             "Unsupported platform",
         ):
             self.assertIn(marker, script)
@@ -79,7 +79,6 @@ class WebContractTests(unittest.TestCase):
         recheck = script.index("loadCapabilities({ reportError: false })")
         completion = script.index('dispatch({ type: "PASSIVE_SUCCESS", snapshot })')
         self.assertLess(recheck, completion)
-        self.assertIn("Restore Nmap, then refresh passive to check again.", script)
         self.assertIn('setAttribute("aria-disabled", "true")', script)
         self.assertIn('removeAttribute("aria-disabled")', script)
         self.assertNotIn('elements["refresh-button"].disabled = true', script)
@@ -88,26 +87,48 @@ class WebContractTests(unittest.TestCase):
         self.assertIn("const recovered =", core)
         self.assertIn("if (state.collectionInFlight && !action.collection) return state", core)
 
-    def test_l2_tunnel_and_routing_presentation_contract(self):
+    def test_discovery_control_is_not_an_unexplained_placeholder(self):
+        html = (WEB / "index.html").read_text()
+        script = (WEB / "app.js").read_text()
+        for marker in (
+            'id="discover-capability"',
+            "handleDiscoverAction",
+            'textContent = "Check Nmap setup"',
+            'textContent = "Nmap: unavailable"',
+            'textContent = "Nmap: ready"',
+            'textContent = "No eligible LAN"',
+            "await loadCapabilities()",
+        ):
+            self.assertIn(marker, html if marker.startswith('id=') else script)
+        self.assertIn('addEventListener("click", handleDiscoverAction)', script)
+
+    def test_gateway_path_and_peer_group_contract(self):
+        html = (WEB / "index.html").read_text()
         core = (WEB / "core.mjs").read_text()
         script = (WEB / "app.js").read_text()
         css = (WEB / "styles.css").read_text()
         for marker in (
-            "presentationGraph",
-            'kind: "l2_segment"',
-            'type: "interface_attached_to_l2"',
-            'type: "l2_carries_subnet"',
-            'type: "member_of_l2"',
-            'properties?.kind === "tunnel"',
-            'lane.type === "tunnel"',
+            '"interface_associated_with"',
+            '"interface_reaches_link"',
+            '"attachment_reaches_gateway"',
+            '"interface_reaches_gateway"',
+            "not transit hops",
+            "groups:",
+            "hiddenRelationshipCount",
         ):
             self.assertIn(marker, core)
-        self.assertIn('return "L2 broadcast domain"', script)
-        self.assertIn('return "L3 tunnel interface"', script)
-        self.assertIn('return "router / gateway"', script)
-        self.assertIn("node-l2_segment", css)
+        self.assertNotIn("l2_segment", core)
+        self.assertNotIn("member_of_l2", core)
+        self.assertIn("Evidence-backed path, not invented physical topology", html)
+        self.assertIn("Other devices are peers, not transit hops", html)
+        self.assertIn("renderNetworkGroup", script)
+        group_render = script.index('for (const group of layout.groups)')
+        edge_render = script.index('for (const edge of layout.edges)')
+        self.assertLess(group_render, edge_render)
+        self.assertIn("node-access_point", css)
+        self.assertIn("node-link_boundary", css)
+        self.assertIn("group-lan_peers", css)
         self.assertIn("interface-kind-tunnel", css)
-        self.assertIn("edge-member_of_l2", css)
 
     def test_canvas_uses_viewbox_camera_full_surface_pan_and_orthogonal_edges(self):
         script = (WEB / "app.js").read_text()
