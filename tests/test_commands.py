@@ -17,6 +17,7 @@ from homenettopo.commands import (
     nmap_spec,
     resolve_nmap,
     run_command,
+    wifi_spec,
 )
 
 
@@ -77,10 +78,25 @@ class FakeSelector:
 
 
 class CommandTests(unittest.TestCase):
-    def test_passive_command_is_absolute_and_typed(self):
-        spec = interfaces_spec()
-        self.assertEqual(spec.kind, CommandKind.INTERFACES)
-        self.assertEqual(spec.argv, ("/sbin/ifconfig", "-a"))
+    def test_passive_commands_are_absolute_and_typed(self):
+        interface = interfaces_spec()
+        wifi = wifi_spec()
+        self.assertEqual(interface.kind, CommandKind.INTERFACES)
+        self.assertEqual(interface.argv, ("/sbin/ifconfig", "-a"))
+        self.assertEqual(wifi.kind, CommandKind.WIFI)
+        self.assertEqual(
+            wifi.argv,
+            (
+                "/usr/sbin/system_profiler",
+                "-json",
+                "-detailLevel",
+                "basic",
+                "-timeout",
+                "5",
+                "SPAirPortDataType",
+            ),
+        )
+        self.assertEqual(wifi.timeout_seconds, 8)
 
     def test_resolves_explicit_executable_and_reports_source_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -101,20 +117,12 @@ class CommandTests(unittest.TestCase):
 
     @mock.patch("homenettopo.commands._verified_executable", return_value="/opt/homebrew/bin/nmap")
     def test_nmap_keeps_adjacent_targets_separate(self, _verified):
-        spec = nmap_spec(
-            "/opt/homebrew/bin/nmap",
-            ["192.168.1.0/25", "192.168.1.128/25"],
-            30,
-        )
+        spec = nmap_spec("/opt/homebrew/bin/nmap", ["192.168.1.0/25", "192.168.1.128/25"], 30)
         self.assertEqual(spec.argv[9:], ("192.168.1.0/25", "192.168.1.128/25"))
 
     @mock.patch("homenettopo.commands._verified_executable", return_value="/opt/homebrew/bin/nmap")
     def test_nmap_preserves_contained_targets_from_distinct_phase_b_owners(self, _verified):
-        spec = nmap_spec(
-            "/opt/homebrew/bin/nmap",
-            ["192.168.1.0/24", "192.168.1.0/25", "192.168.1.0/25"],
-            30,
-        )
+        spec = nmap_spec("/opt/homebrew/bin/nmap", ["192.168.1.0/24", "192.168.1.0/25", "192.168.1.0/25"], 30)
         self.assertEqual(spec.argv[9:], ("192.168.1.0/24", "192.168.1.0/25"))
 
     @mock.patch("homenettopo.commands._verified_executable", return_value="/opt/homebrew/bin/nmap")
@@ -134,11 +142,15 @@ class CommandTests(unittest.TestCase):
             with self.subTest(targets=targets, timeout=timeout), self.assertRaises(CommandError):
                 nmap_spec("/opt/homebrew/bin/nmap", targets, timeout)
 
-    def test_generic_absolute_command_spec_is_rejected_before_popen(self):
-        spec = CommandSpec(CommandKind.INTERFACES, ("/bin/echo", "unsafe"), 5)
-        with mock.patch("homenettopo.commands.subprocess.Popen") as popen, self.assertRaises(CommandError):
-            run_command(spec)
-        popen.assert_not_called()
+    def test_modified_fixed_command_specs_are_rejected_before_popen(self):
+        cases = (
+            CommandSpec(CommandKind.INTERFACES, ("/bin/echo", "unsafe"), 5),
+            CommandSpec(CommandKind.WIFI, ("/usr/sbin/system_profiler", "SPAirPortDataType"), 8),
+        )
+        for spec in cases:
+            with self.subTest(spec=spec), mock.patch("homenettopo.commands.subprocess.Popen") as popen, self.assertRaises(CommandError):
+                run_command(spec)
+            popen.assert_not_called()
 
     def test_popen_failure_is_normalized(self):
         with mock.patch("homenettopo.commands.subprocess.Popen", side_effect=OSError("missing")), self.assertRaises(CommandError) as raised:
