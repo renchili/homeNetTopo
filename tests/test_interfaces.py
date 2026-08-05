@@ -1,7 +1,12 @@
 import json
 import unittest
 
-from homenettopo.interfaces import parse_airport_json, parse_ifconfig
+from homenettopo.interfaces import (
+    merge_wireless_facts,
+    parse_airport_json,
+    parse_ifconfig,
+    parse_wifi_hardware_ports,
+)
 
 
 IFCONFIG_MULTI_INTERFACE = """\
@@ -14,6 +19,20 @@ bridge0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
 IFCONFIG_UTUN_POINT_TO_POINT = """\
 utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
     inet 203.0.113.9 --> 203.0.113.10 netmask 0xffffffff
+"""
+
+NETWORKSETUP_HARDWARE_PORTS = """\
+Hardware Port: Ethernet
+Device: en5
+Ethernet Address: 02:00:00:00:00:05
+
+Hardware Port: Wi-Fi
+Device: en0
+Ethernet Address: 02:00:00:00:00:01
+
+Hardware Port: Thunderbolt Bridge
+Device: bridge0
+Ethernet Address: 02:00:00:00:00:02
 """
 
 
@@ -58,6 +77,19 @@ class InterfaceParserTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_ifconfig("not ifconfig output\n")
 
+    def test_wifi_hardware_ports_identify_only_wifi_bsd_interfaces(self):
+        facts = parse_wifi_hardware_ports(NETWORKSETUP_HARDWARE_PORTS)
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0].interface, "en0")
+        self.assertFalse(facts[0].associated)
+        self.assertIsNone(facts[0].bssid)
+
+    def test_wifi_hardware_ports_accept_legacy_airport_label_and_reject_drift(self):
+        legacy = "Hardware Port: AirPort\nDevice: en1\nEthernet Address: 02:00:00:00:00:01\n"
+        self.assertEqual(parse_wifi_hardware_ports(legacy)[0].interface, "en1")
+        with self.assertRaises(ValueError):
+            parse_wifi_hardware_ports("unexpected output\n")
+
     def test_airport_parser_keeps_only_current_association_and_normalizes_bssid(self):
         facts = parse_airport_json(airport_payload())
         self.assertEqual(len(facts), 1)
@@ -88,6 +120,14 @@ class InterfaceParserTests(unittest.TestCase):
         self.assertIsNone(fact.ssid)
         self.assertIsNone(fact.bssid)
         self.assertFalse(fact.associated)
+
+    def test_media_fallback_survives_profiler_failure_and_details_win_when_available(self):
+        media = parse_wifi_hardware_ports(NETWORKSETUP_HARDWARE_PORTS)
+        self.assertEqual(merge_wireless_facts(media), media)
+        detailed = parse_airport_json(airport_payload())
+        merged = merge_wireless_facts(media, detailed)
+        self.assertEqual(merged[0].bssid, "02:aa:bb:cc:dd:01")
+        self.assertTrue(merged[0].associated)
 
     def test_airport_parser_tolerates_only_a_trailing_profiler_prompt_marker(self):
         self.assertEqual(parse_airport_json(airport_payload() + "%")[0].interface, "en0")
