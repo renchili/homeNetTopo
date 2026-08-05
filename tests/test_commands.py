@@ -17,6 +17,7 @@ from homenettopo.commands import (
     nmap_spec,
     resolve_nmap,
     run_command,
+    wifi_interfaces_spec,
     wifi_spec,
 )
 
@@ -80,9 +81,13 @@ class FakeSelector:
 class CommandTests(unittest.TestCase):
     def test_passive_commands_are_absolute_and_typed(self):
         interface = interfaces_spec()
+        wifi_interfaces = wifi_interfaces_spec()
         wifi = wifi_spec()
         self.assertEqual(interface.kind, CommandKind.INTERFACES)
         self.assertEqual(interface.argv, ("/sbin/ifconfig", "-a"))
+        self.assertEqual(wifi_interfaces.kind, CommandKind.WIFI_INTERFACES)
+        self.assertEqual(wifi_interfaces.argv, ("/usr/sbin/networksetup", "-listallhardwareports"))
+        self.assertEqual(wifi_interfaces.timeout_seconds, 3)
         self.assertEqual(wifi.kind, CommandKind.WIFI)
         self.assertEqual(wifi.argv, ("/usr/sbin/system_profiler", "-json", "-timeout", "5", "SPAirPortDataType"))
         self.assertEqual(wifi.timeout_seconds, 8)
@@ -134,6 +139,7 @@ class CommandTests(unittest.TestCase):
     def test_modified_fixed_command_specs_are_rejected_before_popen(self):
         cases = (
             CommandSpec(CommandKind.INTERFACES, ("/bin/echo", "unsafe"), 5),
+            CommandSpec(CommandKind.WIFI_INTERFACES, ("/usr/sbin/networksetup", "-listallnetworkservices"), 3),
             CommandSpec(CommandKind.WIFI, ("/usr/sbin/system_profiler", "SPAirPortDataType"), 8),
         )
         for spec in cases:
