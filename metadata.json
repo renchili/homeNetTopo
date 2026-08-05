@@ -25,9 +25,12 @@
     "interface_command": "/sbin/ifconfig -a",
     "route_command": "/usr/sbin/netstat -rn -f inet",
     "neighbor_command": "/usr/sbin/arp -an",
-    "wifi_command": "/usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType",
+    "wifi_interface_command": "/usr/sbin/networksetup -listallhardwareports",
+    "wifi_detail_command": "/usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType",
+    "commands_run_concurrently": true,
     "wifi_current_association_only": true,
     "nearby_wifi_scan_retained": false,
+    "wifi_detail_failure_is_optional": true,
     "ethernet_adjacent_device_source": "not_available_without_lldp"
   },
   "active_discovery": {
@@ -46,6 +49,7 @@
   },
   "command_limits": {
     "passive_timeout_seconds": 5,
+    "wifi_interface_timeout_seconds": 3,
     "wifi_timeout_seconds": 8,
     "stdout_bytes": 2097152,
     "stderr_bytes": 65536,
@@ -66,7 +70,7 @@
     "nmap_recheck_action_when_unavailable": true
   },
   "gateway_path": {
-    "wifi_attachment": "current BSSID identifies associated AP radio when exposed",
+    "wifi_attachment": "BSSID identifies the associated AP radio when exposed; Wi-Fi interface plus default route infers an unidentified AP boundary otherwise",
     "ethernet_attachment_without_lldp": "Intermediate L2 path unknown",
     "different_ap_and_gateway_macs": "unknown physical identity relation",
     "same_ap_and_gateway_mac": "same_mac positive relation",
