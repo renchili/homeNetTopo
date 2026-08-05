@@ -1,9 +1,9 @@
 """Parse local interface and Wi-Fi attachment evidence on macOS.
 
 ``ifconfig`` owns IPv4 assignments used for routing and active-target safety.
-``system_profiler SPAirPortDataType -json`` is a separate, best-effort source
-for Wi-Fi media and the current access point. A missing, redacted, or differently
-shaped current-network object must not make a Wi-Fi interface look like Ethernet.
+``networksetup -listallhardwareports`` quickly identifies Wi-Fi BSD interfaces,
+while ``system_profiler SPAirPortDataType -json`` optionally enriches the current
+SSID/BSSID. Missing or redacted details must not make Wi-Fi look like Ethernet.
 """
 
 from __future__ import annotations
@@ -12,9 +12,10 @@ import ipaddress
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 _MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
+_INTERFACE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _REDACTED = {"", "<redacted>", "redacted", "<hidden>", "hidden", "(null)", "null", "none"}
 
 
@@ -44,9 +45,8 @@ class WirelessAttachmentFact:
 
     ``bssid`` identifies the directly associated AP radio when macOS exposes it.
     ``associated`` distinguishes an observed current-network object from the
-    weaker case where System Information only confirms that the BSD interface is
-    Wi-Fi. The latter remains useful when a default route proves that interface
-    currently carries traffic.
+    weaker case where hardware-port evidence only confirms that the BSD interface
+    is Wi-Fi. A default route over that interface still proves a Wi-Fi attachment.
     """
 
     interface: str
@@ -128,6 +128,38 @@ def parse_ifconfig(text: str) -> tuple[InterfaceFact, ...]:
             addresses.append(InterfaceAddress(address, prefix, str(interface.network), peer))
         result.append(InterfaceFact(name, flags, _kind(name, flags), tuple(sorted(addresses, key=lambda item: item.address))))
     return tuple(sorted(result, key=lambda item: item.name))
+
+
+def parse_wifi_hardware_ports(text: str) -> tuple[WirelessAttachmentFact, ...]:
+    """Return Wi-Fi BSD interfaces from ``networksetup`` hardware-port output.
+
+    The command is fast and does not expose nearby networks. Both current
+    ``Wi-Fi`` and legacy ``AirPort`` hardware-port labels are accepted. A block
+    without a valid ``Device`` value is ignored; nonempty unrecognized output is
+    rejected so format drift does not silently remove Wi-Fi media evidence.
+    """
+
+    facts: dict[str, WirelessAttachmentFact] = {}
+    blocks = re.split(r"\n\s*\n", text.strip()) if text.strip() else []
+    recognized = False
+    for block in blocks:
+        fields: dict[str, str] = {}
+        for raw_line in block.splitlines():
+            if ":" not in raw_line:
+                continue
+            key, value = raw_line.split(":", 1)
+            fields[key.strip().lower()] = value.strip()
+        hardware_port = fields.get("hardware port", "")
+        device = fields.get("device", "")
+        if hardware_port:
+            recognized = True
+        if not re.search(r"\b(?:wi-?fi|airport)\b", hardware_port, re.IGNORECASE):
+            continue
+        if device and _INTERFACE_RE.fullmatch(device):
+            facts[device] = WirelessAttachmentFact(device, None, None, False)
+    if text.strip() and not recognized:
+        raise ValueError("networksetup output did not contain hardware-port blocks")
+    return tuple(facts[name] for name in sorted(facts))
 
 
 def _clean_text(value: Any) -> str | None:
@@ -214,6 +246,18 @@ def _fact_rank(fact: WirelessAttachmentFact) -> tuple[int, int, int]:
     """Prefer identified and associated duplicates for one BSD interface."""
 
     return (int(fact.identified), int(fact.associated), int(fact.ssid is not None))
+
+
+def merge_wireless_facts(*collections: Iterable[WirelessAttachmentFact]) -> tuple[WirelessAttachmentFact, ...]:
+    """Merge media detection and optional association details deterministically."""
+
+    facts: dict[str, WirelessAttachmentFact] = {}
+    for collection in collections:
+        for candidate in collection:
+            existing = facts.get(candidate.interface)
+            if existing is None or _fact_rank(candidate) > _fact_rank(existing):
+                facts[candidate.interface] = candidate
+    return tuple(facts[name] for name in sorted(facts))
 
 
 def parse_airport_json(text: str) -> tuple[WirelessAttachmentFact, ...]:
