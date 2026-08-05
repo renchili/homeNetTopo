@@ -25,7 +25,7 @@ X-HomeNetTopo-Request: 1
 
 When present, Origin must match an accepted loopback origin and `Sec-Fetch-Site` must be `same-origin` or `none`. Cross-origin failures return `403 cross_origin_request`. The service emits no permissive CORS and API OPTIONS returns `405 method_not_allowed`.
 
-Only one collection runs at a time. Another client receives `409 collection_in_progress`; requests are not queued or merged. Successful snapshots replace state atomically. Failures preserve the previous snapshot.
+Only one collection runs at a time. Another client receives `409 collection_in_progress`; requests are not queued or merged. Independent fixed passive commands may execute concurrently inside that one collection. Successful snapshots replace state atomically. Failures preserve the previous snapshot.
 
 ## Fixed limits
 
@@ -36,9 +36,10 @@ Only one collection runs at a time. Another client receives `409 collection_in_p
 | Unique target addresses | 1024 |
 | Active total timeout | default 30; range 5–120 seconds |
 | Nmap host timeout | 5 seconds |
-| Interface/route/ARP timeout | 5 seconds |
-| Wi-Fi process timeout | 8 seconds |
-| Wi-Fi profiler timeout | 5 seconds |
+| Interface/route/ARP timeout | 5 seconds each, concurrent |
+| Wi-Fi interface detection timeout | 3 seconds |
+| Wi-Fi profiler process timeout | 8 seconds |
+| Wi-Fi profiler internal timeout | 5 seconds |
 | Captured stdout | 2 MiB |
 | Captured stderr | 64 KiB |
 | Kill grace | 2 seconds |
@@ -48,13 +49,18 @@ Only one collection runs at a time. Another client receives `409 collection_in_p
 ```json
 {
   "error": {
-    "code": "invalid_target",
-    "message": "The requested network is not eligible for active discovery.",
-    "details": {},
+    "code": "command_timeout",
+    "message": "Passive collection timed out in: interfaces, routes.",
+    "details": {
+      "failed_sources": ["interfaces", "routes"],
+      "timeout_sources": ["interfaces", "routes"]
+    },
     "request_id": "local-request-id"
   }
 }
 ```
+
+`failed_sources` and `timeout_sources` contain only normalized source identifiers, never raw command lines, stderr, environment values, or filesystem paths. Optional Wi-Fi profiler failure alone does not return `504`; it is represented in snapshot source status and warnings when material evidence is coherent.
 
 Codes:
 
@@ -74,8 +80,6 @@ not_found
 method_not_allowed
 internal_error
 ```
-
-Messages never expose raw command lines, unrestricted stderr, environment variables, or local filesystem paths.
 
 ## `GET /api/v1/health`
 
@@ -112,6 +116,7 @@ Returns capability data without executing interface, route, ARP, Wi-Fi, or Nmap 
     "host_timeout_seconds": 5
   },
   "link_path": {
+    "wifi_interface_source": "networksetup",
     "wifi_bssid_source": "system_profiler",
     "ethernet_adjacent_device_source": "not_available_without_lldp"
   },
@@ -125,25 +130,21 @@ Returns capability data without executing interface, route, ARP, Wi-Fi, or Nmap 
 
 Allowed Nmap resolution sources are `explicit`, `homebrew_arm64`, `homebrew_intel`, `path`, and `unavailable`. The full executable path is never returned.
 
-`link_path` documents evidence availability, not a claim that LLDP is implemented. The first release can identify a current Wi-Fi AP radio when BSSID is exposed. It cannot guarantee Ethernet adjacent-device identity without LLDP or managed-topology evidence.
+`networksetup` identifies Wi-Fi BSD interfaces. `system_profiler` optionally enriches current SSID/BSSID. `link_path` documents evidence availability, not a claim that LLDP is implemented. The first release cannot guarantee Ethernet adjacent-device identity without LLDP or managed-topology evidence.
 
 When Nmap is unavailable, the browser retains passive use and exposes an explicit capability recheck. A successful passive refresh also re-reads capabilities before releasing the browser collection owner.
 
-## `GET /api/v1/topology`
+## Read-only topology routes
 
-Returns the latest snapshot without collecting. No snapshot returns `404 not_found`. Query parameters are unsupported and return `400 bad_request`.
+`GET /api/v1/topology` returns the latest snapshot without collecting. No snapshot returns `404 not_found`; query parameters return `400 bad_request`.
 
-## `GET /api/v1/topology/export`
-
-Downloads the latest snapshot without collecting or mutating:
+`GET /api/v1/topology/export` downloads the latest snapshot without collecting or mutating:
 
 ```text
 Content-Type: application/json; charset=utf-8
 Content-Disposition: attachment; filename="home-network-topology.json"
 Cache-Control: no-store
 ```
-
-No snapshot returns `404 not_found`.
 
 ## `POST /api/v1/topology/refresh`
 
@@ -159,12 +160,20 @@ Performs passive macOS collection only and never invokes Nmap. Fixed commands ar
 /sbin/ifconfig -a
 /usr/sbin/netstat -rn -f inet
 /usr/sbin/arp -an
+/usr/sbin/networksetup -listallhardwareports
 /usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType
 ```
 
-Interface, route, and ARP are material coherence sources. Wi-Fi association is a best-effort source for the gateway path. Wi-Fi command or parser failure may return `200` with `partial: true`, a failed `wifi` source, and a warning when the other material evidence remains coherent.
+All five commands start concurrently. The collection still has one server lock owner; concurrency is internal and cannot start a second collection.
 
-The Wi-Fi parser retains only current association data and ignores nearby-network lists. A redacted BSSID is represented as unavailable; it is not guessed.
+Interface, route, and ARP are material coherence sources. `wifi_interfaces` is fast media evidence from `networksetup`; `wifi` is best-effort current-association detail from `system_profiler`.
+
+- If profiler detail succeeds, SSID/BSSID enriches the Wi-Fi attachment.
+- If profiler detail times out or fails to parse, `wifi` is failed with a warning while `wifi_interfaces` may still prevent a Wi-Fi default route from being mislabeled as Ethernet.
+- A coherent material result returns `200`, possibly with `partial: true`.
+- If all material evidence is incoherent, return `500 collection_failed` or `504 command_timeout`; details identify `failed_sources` and `timeout_sources`.
+
+The Wi-Fi parsers retain only hardware-port/current-association data and ignore nearby-network lists. A redacted BSSID is unavailable and is never guessed.
 
 Expected errors include `400 invalid_json`, `400 bad_request`, `400 invalid_host`, `403 cross_origin_request`, `409 collection_in_progress`, `413 target_too_large`, `415 bad_request`, `500 collection_failed`, `501 unsupported_platform`, and `504 command_timeout`.
 
@@ -234,42 +243,15 @@ Expected errors additionally include `424 dependency_unavailable`. A failed acti
 }
 ```
 
-Active snapshots add:
+Active snapshots additionally contain `active_discovery` with requested/effective networks, completion, duration, validated host count, total timeout, fixed host timeout, and XML output format. `effective_networks` never widens adjacent sibling targets or collapses across owner groups.
 
-```json
-{
-  "active_discovery": {
-    "requested_networks": ["192.168.1.0/24"],
-    "effective_networks": ["192.168.1.0/24"],
-    "completed": true,
-    "duration_ms": 1200,
-    "hosts_reported_up": 4,
-    "operation_timeout_seconds": 30,
-    "host_timeout_seconds": 5,
-    "output_format": "xml"
-  }
-}
-```
-
-`effective_networks` is the ordered Phase B result. It never widens adjacent sibling targets or collapses across owner groups.
-
-### Source schema
-
-```json
-{
-  "type": "wifi",
-  "status": "ok",
-  "message": null,
-  "duration_ms": 120
-}
-```
-
-Source types include:
+### Source types
 
 ```text
 interfaces
 routes
 neighbors
+wifi_interfaces
 wifi
 nmap
 address_membership
@@ -279,40 +261,9 @@ link_path_inference
 
 Source statuses are `ok`, `warning`, `failed`, and `not_run`.
 
-### Network schema
+### Network and topology semantics
 
-```json
-{
-  "cidr": "192.168.1.0/24",
-  "interface": "en0",
-  "interface_kind": "physical",
-  "eligible_for_active_discovery": true,
-  "eligibility_reason": "eligible_private_local_network",
-  "address_count": 256
-}
-```
-
-`interface_kind` is `physical`, `virtual`, or `tunnel`. Tunnel networks are not active-discovery eligible.
-
-### Node schema
-
-```json
-{
-  "id": "access-point:02-00-00-00-00-01",
-  "kind": "access_point",
-  "label": "Wi-Fi access point",
-  "addresses": [],
-  "mac_addresses": ["02:00:00:00:00:01"],
-  "interface_names": ["en0"],
-  "properties": {
-    "identity_source": "bssid",
-    "physical_identity_with_gateway": "unknown"
-  },
-  "evidence": [],
-  "confidence": "high",
-  "observed_at": "2026-08-03T03:00:00Z"
-}
-```
+Network descriptors expose canonical CIDR, interface, interface kind, active eligibility, reason, and address count. Tunnel networks are not active-discovery eligible.
 
 Node kinds:
 
@@ -327,24 +278,13 @@ device
 upstream_boundary
 ```
 
-`access_point` represents the current associated Wi-Fi radio. `link_boundary` explicitly represents an unobserved intermediate Layer-2 path. It is not a fabricated switch. Peer `device` nodes remain subnet members rather than transit hops.
+`access_point` has three evidence levels:
 
-### Edge schema
+- canonical BSSID: observed current AP radio;
+- current association without BSSID: observed AP boundary with unavailable identity;
+- Wi-Fi interface plus default route: inferred AP boundary with unavailable identity.
 
-```json
-{
-  "id": "edge:access-point:gateway",
-  "source": "access-point:02-00-00-00-00-01",
-  "target": "gateway:192.168.1.1",
-  "type": "attachment_reaches_gateway",
-  "observed": false,
-  "confidence": "medium",
-  "evidence": [],
-  "properties": {
-    "physical_identity_relation": "unknown"
-  }
-}
-```
+A non-Wi-Fi path without LLDP/managed evidence uses `link_boundary` labelled `Intermediate L2 path unknown`. Peer `device` nodes remain subnet members, not transit hops.
 
 Edge types:
 
@@ -361,15 +301,11 @@ routes_to
 upstream_of
 ```
 
-Semantics:
+An `interface_associated_with` edge is observed when association data exists and inferred when only Wi-Fi media plus the default route is known. `member_of` is peer context, never transit order. `routes_to` and `upstream_of` are Layer-3 inference. Every edge exposes observed status, confidence, evidence, and properties; the schema does not claim physical wiring.
 
-- `interface_associated_with` is observed current Wi-Fi association evidence;
-- `interface_reaches_link` and `attachment_reaches_gateway` are explicit path inference;
-- `interface_reaches_gateway` is used for a direct logical tunnel path;
-- `member_of` describes subnet peers and never means transit order;
-- `routes_to` and `upstream_of` describe Layer-3 route inference.
+## Browser response policy
 
-Every edge exposes `observed`, confidence, evidence, and properties. The schema does not claim physical wiring.
+The CSP permits repository-owned fonts and `data:` fonts with `font-src 'self' data:`. It does not permit external font origins, external scripts, or external styles.
 
 ## Compatibility
 
