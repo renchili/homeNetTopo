@@ -3,8 +3,7 @@
  *
  * Pure state and layout decisions live in core.mjs. This file owns fetch,
  * focus recovery, safe DOM/SVG construction, the viewBox camera, pointer input,
- * and downloads. User-controlled values are assigned through textContent or
- * attributes; HTML strings are never injected into the document.
+ * explicit capability recovery, and downloads.
  */
 
 import {
@@ -22,7 +21,7 @@ import {
 } from "/core.mjs";
 
 const elements = Object.fromEntries([
-  "snapshot-meta", "refresh-button", "discover-button", "export-button", "status-heading", "status-text", "discover-reason",
+  "snapshot-meta", "refresh-button", "discover-button", "discover-capability", "export-button", "status-heading", "status-text", "discover-reason",
   "warning-list", "graph-viewport", "topology-svg", "graph-scene", "details-content", "zoom-out", "zoom-in",
   "fit-view", "reset-view", "discover-dialog", "discover-form", "network-options", "operation-timeout",
   "address-total", "dialog-error", "dialog-close", "dialog-cancel", "dialog-confirm",
@@ -31,19 +30,17 @@ const elements = Object.fromEntries([
 let state = initialState();
 let camera = null;
 let layoutBounds = null;
-let currentLayout = { nodes: [], edges: [], bounds: null };
+let currentLayout = { nodes: [], groups: [], edges: [], bounds: null };
 let renderedSnapshotKey = null;
 let drag = null;
 let suppressGraphClick = false;
 let dialogReturnFocus = null;
 
-/** Apply one reducer action, then render the resulting single source of truth. */
 function dispatch(action) {
   state = reduceState(state, action);
   render();
 }
 
-/** Move focus after the current DOM update without scrolling the canvas. */
 function focusElement(element) {
   if (!element || element.disabled || typeof element.focus !== "function") return;
   requestAnimationFrame(() => element.focus({ preventScroll: true }));
@@ -55,12 +52,9 @@ function focusStatusHeading() {
 
 function clearDialogValidation() {
   elements["dialog-error"].textContent = "";
-  for (const field of elements["discover-form"].querySelectorAll("[aria-invalid='true']")) {
-    field.removeAttribute("aria-invalid");
-  }
+  for (const field of elements["discover-form"].querySelectorAll("[aria-invalid='true']")) field.removeAttribute("aria-invalid");
 }
 
-/** Announce the summary before moving focus to the invalid field. */
 function focusDialogValidation(message, field) {
   elements["dialog-error"].textContent = message;
   if (field) field.setAttribute("aria-invalid", "true");
@@ -68,7 +62,6 @@ function focusDialogValidation(message, field) {
   if (field) requestAnimationFrame(() => requestAnimationFrame(() => field.focus({ preventScroll: true })));
 }
 
-/** Fetch one JSON API response and preserve the public error envelope. */
 async function api(path, options = {}) {
   const response = await fetch(path, { cache: "no-store", ...options });
   const payload = await response.json().catch(() => ({ error: { code: "request_error", message: "The server returned an unreadable response." } }));
@@ -76,7 +69,6 @@ async function api(path, options = {}) {
   return payload;
 }
 
-/** Build the protected headers shared by both command-triggering POST routes. */
 function collectionOptions(body) {
   return {
     method: "POST",
@@ -85,7 +77,6 @@ function collectionOptions(body) {
   };
 }
 
-/** Refresh optional-tool capabilities without starting collection commands. */
 async function loadCapabilities({ reportError = true } = {}) {
   try {
     dispatch({ type: "CAPABILITIES", capabilities: await api("/api/v1/capabilities") });
@@ -99,7 +90,6 @@ async function loadCapabilities({ reportError = true } = {}) {
   }
 }
 
-/** Run passive collection and restore focus to the action that started it. */
 async function refreshPassive(event = null) {
   if (state.collectionInFlight) return;
   const returnFocus = event?.currentTarget ?? null;
@@ -120,7 +110,7 @@ async function refreshPassive(event = null) {
 }
 
 function openDiscoverDialog() {
-  if (!state.snapshot || state.collectionInFlight || !state.capabilities?.active_discovery?.available) return;
+  if (!state.snapshot || state.collectionInFlight || !state.capabilities?.active_discovery?.available || !eligibleNetworks(state.snapshot).length) return;
   dialogReturnFocus = document.activeElement;
   clearDialogValidation();
   dispatch({ type: "ACTIVE_CONFIRM" });
@@ -129,7 +119,23 @@ function openDiscoverDialog() {
   focusElement(elements["network-options"].querySelector("input") ?? elements["operation-timeout"]);
 }
 
-/** Close the modal and optionally restore reducer state and trigger focus. */
+/** Recheck Nmap when unavailable; otherwise open the bounded discovery dialog. */
+async function handleDiscoverAction() {
+  if (state.collectionInFlight) return;
+  const active = state.capabilities?.active_discovery;
+  if (!active?.available) {
+    elements["discover-capability"].textContent = "Nmap: checking…";
+    const loaded = await loadCapabilities();
+    if (!loaded) return;
+    if (!state.capabilities?.active_discovery?.available) {
+      elements["discover-reason"].textContent = "Nmap is still unavailable. Install or restore Nmap, then use Check Nmap setup again.";
+      focusElement(elements["discover-capability"]);
+      return;
+    }
+  }
+  openDiscoverDialog();
+}
+
 function closeDiscoverDialog({ restoreState = true, restoreFocus = true } = {}) {
   const returnFocus = dialogReturnFocus;
   if (elements["discover-dialog"].open) elements["discover-dialog"].close();
@@ -159,7 +165,6 @@ function updateAddressTotal() {
   elements["dialog-confirm"].disabled = selected.length === 0;
 }
 
-/** Rebuild options with DOM nodes so CIDRs and interfaces remain plain text. */
 function renderNetworkOptions(selectedKeys = new Set()) {
   elements["network-options"].replaceChildren();
   for (const network of eligibleNetworks(state.snapshot)) {
@@ -184,7 +189,6 @@ function renderNetworkOptions(selectedKeys = new Set()) {
   updateAddressTotal();
 }
 
-/** Validate confirmation input, then run the single bounded active request. */
 async function runActiveDiscovery(event) {
   event.preventDefault();
   if (state.collectionInFlight) return;
@@ -221,9 +225,7 @@ async function runActiveDiscovery(event) {
         ? elements["operation-timeout"]
         : elements["network-options"].querySelector("input:checked") ?? elements["network-options"].querySelector("input");
       focusDialogValidation(error?.error?.message ?? "The discovery request was rejected.", invalidField);
-    } else {
-      focusStatusHeading();
-    }
+    } else focusStatusHeading();
   }
 }
 
@@ -233,7 +235,7 @@ function statusHeading() {
     [UI_STATES.LOADING_PASSIVE]: "Passive collection in progress",
     [UI_STATES.PASSIVE_READY]: "Passive topology ready",
     [UI_STATES.PARTIAL_READY]: "Partial topology ready",
-    [UI_STATES.EMPTY_READY]: "No neighbor devices observed",
+    [UI_STATES.EMPTY_READY]: "No peer devices observed",
     [UI_STATES.ACTIVE_CONFIRM]: "Confirm active discovery",
     [UI_STATES.ACTIVE_RUNNING]: "Active discovery in progress",
     [UI_STATES.ACTIVE_READY]: "Active topology ready",
@@ -249,10 +251,10 @@ function statusHeading() {
 function statusMessage() {
   const messages = {
     [UI_STATES.BOOT]: "Preparing the application…",
-    [UI_STATES.LOADING_PASSIVE]: "Collecting interface, route, and neighbor evidence…",
-    [UI_STATES.PASSIVE_READY]: "Passive topology is ready.",
+    [UI_STATES.LOADING_PASSIVE]: "Collecting interface, Wi-Fi association, route, and neighbor evidence…",
+    [UI_STATES.PASSIVE_READY]: "The local path and passive peer evidence are ready.",
     [UI_STATES.PARTIAL_READY]: "A partial topology is ready. Review source warnings.",
-    [UI_STATES.EMPTY_READY]: "Local network structure is visible, but no neighbor devices were observed.",
+    [UI_STATES.EMPTY_READY]: "The gateway path is visible, but no peer devices were observed.",
     [UI_STATES.ACTIVE_CONFIRM]: "Confirm bounded active discovery.",
     [UI_STATES.ACTIVE_RUNNING]: "Running bounded Nmap host discovery…",
     [UI_STATES.ACTIVE_READY]: "Active discovery completed.",
@@ -265,7 +267,6 @@ function statusMessage() {
   return state.error?.error?.message ?? messages[state.phase] ?? "";
 }
 
-/** Create SVG elements without serializing user-controlled markup. */
 function svgElement(name, attributes = {}) {
   const element = document.createElementNS("http://www.w3.org/2000/svg", name);
   Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, String(value)));
@@ -278,11 +279,10 @@ function truncate(label, compact) {
 }
 
 function nodeSubtitle(node) {
-  if (node.kind === "l2_segment") return "L2 broadcast domain";
-  if (node.kind === "gateway") return "router / gateway";
+  if (node.kind === "access_point") return node.mac_addresses?.length ? "Observed Wi-Fi AP" : "Wi-Fi AP · identity unavailable";
+  if (node.kind === "link_boundary") return "Unknown L2 transit";
+  if (node.kind === "gateway") return "Router / gateway";
   if (node.kind === "interface" && node.properties?.kind === "tunnel") return "L3 tunnel interface";
-  if (node.kind === "subnet" && node.laneType === "tunnel") return "tunnel network";
-  if (node.kind === "subnet" && node.laneType === "system") return "system network";
   return node.kind.replaceAll("_", " ");
 }
 
@@ -293,11 +293,32 @@ function nodeClass(node) {
   return classes.join(" ");
 }
 
-/** Render accessible SVG nodes and orthogonal edges from pure layout output. */
+function renderNetworkGroup(group) {
+  const selected = group.nodeIds.includes(state.selectedId);
+  const container = svgElement("g", {
+    class: `network-group group-${group.kind} ${selected ? "selected" : ""}`,
+    transform: `translate(${group.x} ${group.y})`,
+    tabindex: "0",
+    role: "button",
+    "aria-label": `${group.label}. ${group.subtitle}`,
+    "data-id": group.id,
+  });
+  container.append(svgElement("rect", { width: group.width, height: group.height, rx: 14 }));
+  const title = svgElement("text", { x: 18, y: 26, class: "group-title" });
+  title.textContent = group.label;
+  const subtitle = svgElement("text", { x: 18, y: 48, class: "group-subtitle" });
+  subtitle.textContent = group.subtitle;
+  container.append(title, subtitle);
+  container.addEventListener("click", () => dispatch({ type: "SELECT", id: group.id }));
+  container.addEventListener("keydown", selectableKeyHandler);
+  return container;
+}
+
+/** Render subnet context first, then path edges and selectable nodes. */
 function renderGraph() {
   elements["graph-scene"].replaceChildren();
   if (!state.snapshot) {
-    currentLayout = { nodes: [], edges: [], bounds: null };
+    currentLayout = { nodes: [], groups: [], edges: [], bounds: null };
     layoutBounds = null;
     camera = null;
     renderedSnapshotKey = null;
@@ -307,6 +328,8 @@ function renderGraph() {
   currentLayout = layout;
   layoutBounds = layout.bounds;
   const byId = new Map(layout.nodes.map((node) => [node.id, node]));
+
+  for (const group of layout.groups) elements["graph-scene"].append(renderNetworkGroup(group));
   for (const edge of layout.edges) {
     const source = byId.get(edge.source);
     const target = byId.get(edge.target);
@@ -348,9 +371,7 @@ function renderGraph() {
   if (!camera || snapshotKey !== renderedSnapshotKey) {
     renderedSnapshotKey = snapshotKey;
     fitView();
-  } else {
-    applyView();
-  }
+  } else applyView();
 }
 
 function selectableKeyHandler(event) {
@@ -361,19 +382,18 @@ function selectableKeyHandler(event) {
 }
 
 function layerLabel(item) {
-  if (item.kind === "l2_segment" || ["interface_attached_to_l2", "l2_carries_subnet", "member_of_l2"].includes(item.type)) return "Layer 2";
+  if (item.kind === "access_point" || item.kind === "link_boundary" || ["interface_associated_with", "interface_reaches_link", "attachment_reaches_gateway"].includes(item.type)) return "Layer 2 attachment path";
   if (item.kind === "interface" && item.properties?.kind === "tunnel") return "Layer 3 tunnel";
   if (item.kind || item.type) return "Layer 3 / logical";
   return "Unknown";
 }
 
-/** Rebuild the details panel from snapshot or presentation-only layout items. */
 function renderDetails() {
   const id = state.selectedId;
   if (!id || !state.snapshot) {
     const message = document.createElement("p");
     message.className = "muted";
-    message.textContent = "Select a node or edge to inspect evidence, layer, and confidence.";
+    message.textContent = "Select a path node, peer, network, or edge to inspect evidence and confidence.";
     elements["details-content"].replaceChildren(message);
     return;
   }
@@ -414,7 +434,53 @@ function renderWarnings() {
   }
 }
 
-/** Render all state-derived controls without introducing a second state owner. */
+function renderDiscoveryControl(snapshot, collectionBusy) {
+  const active = state.capabilities?.active_discovery;
+  const eligible = eligibleNetworks(snapshot);
+  if (collectionBusy) {
+    elements["discover-button"].textContent = "Collection running…";
+    elements["discover-button"].disabled = true;
+    elements["discover-capability"].textContent = "Nmap: waiting";
+    return;
+  }
+  if (!snapshot) {
+    elements["discover-button"].textContent = "Discover devices";
+    elements["discover-button"].disabled = true;
+    elements["discover-capability"].textContent = active ? `Nmap: ${active.available ? "ready" : "unavailable"}` : "Nmap: checking";
+    return;
+  }
+  if (!active) {
+    elements["discover-button"].textContent = "Checking Nmap…";
+    elements["discover-button"].disabled = true;
+    elements["discover-capability"].textContent = "Nmap: checking";
+    return;
+  }
+  if (active.unavailable_reason === "unsupported_platform") {
+    elements["discover-button"].textContent = "Discovery unavailable";
+    elements["discover-button"].disabled = true;
+    elements["discover-capability"].textContent = "Nmap: unsupported platform";
+    elements["discover-reason"].textContent = "Active discovery is supported only on macOS.";
+    return;
+  }
+  if (!active.available) {
+    elements["discover-button"].textContent = "Check Nmap setup";
+    elements["discover-button"].disabled = false;
+    elements["discover-capability"].textContent = "Nmap: unavailable";
+    elements["discover-reason"].textContent = "Nmap is optional and is not currently available. Passive topology still works.";
+    return;
+  }
+  elements["discover-capability"].textContent = "Nmap: ready";
+  if (!eligible.length) {
+    elements["discover-button"].textContent = "No eligible LAN";
+    elements["discover-button"].disabled = true;
+    elements["discover-reason"].textContent = "No eligible non-tunnel RFC 1918 network is available for active discovery.";
+    return;
+  }
+  elements["discover-button"].textContent = "Discover devices";
+  elements["discover-button"].disabled = false;
+  elements["discover-reason"].textContent = "";
+}
+
 function render() {
   elements["status-heading"].textContent = statusHeading();
   elements["status-text"].textContent = statusMessage();
@@ -429,27 +495,16 @@ function render() {
     elements["refresh-button"].removeAttribute("aria-disabled");
     elements["refresh-button"].removeAttribute("aria-busy");
   }
-  const active = state.capabilities?.active_discovery;
-  const eligible = eligibleNetworks(snapshot);
-  const dependencyUnavailable = state.phase === UI_STATES.DEPENDENCY_UNAVAILABLE || active?.unavailable_reason === "dependency_unavailable";
-  elements["discover-button"].disabled = !snapshot || !active?.available || !eligible.length || collectionBusy || dependencyUnavailable;
-  elements["discover-reason"].textContent = dependencyUnavailable
-    ? "Restore Nmap, then refresh passive to check again."
-    : !active?.available
-      ? active?.unavailable_reason === "unsupported_platform" ? "Active discovery is unavailable on this platform." : "Install Nmap, then refresh passive to check again."
-      : !eligible.length && snapshot ? "No eligible non-tunnel RFC 1918 network is available." : "";
+  renderDiscoveryControl(snapshot, collectionBusy);
   renderWarnings();
   renderGraph();
   renderDetails();
 }
 
-/** Apply the camera rectangle directly to the SVG viewBox. */
 function applyView() {
-  if (!camera) return;
-  elements["topology-svg"].setAttribute("viewBox", `${camera.x} ${camera.y} ${camera.width} ${camera.height}`);
+  if (camera) elements["topology-svg"].setAttribute("viewBox", `${camera.x} ${camera.y} ${camera.width} ${camera.height}`);
 }
 
-/** Fit all layout content into the current viewport. */
 function fitView() {
   if (!layoutBounds) return;
   const rect = elements["graph-viewport"].getBoundingClientRect();
@@ -457,7 +512,6 @@ function fitView() {
   applyView();
 }
 
-/** Apply bounded pointer-centered zoom in world coordinates. */
 function changeZoom(factor, clientOrigin = null) {
   if (!camera) return;
   const rect = elements["topology-svg"].getBoundingClientRect();
@@ -467,20 +521,15 @@ function changeZoom(factor, clientOrigin = null) {
   const ratioY = rect.height ? (clientY - rect.top) / rect.height : 0.5;
   const worldX = camera.x + ratioX * camera.width;
   const worldY = camera.y + ratioY * camera.height;
-  const maxWidth = Math.max(20000, (layoutBounds?.width ?? camera.width) * 8);
-  camera = zoomCamera(camera, factor, worldX, worldY, 220, maxWidth);
+  camera = zoomCamera(camera, factor, worldX, worldY, 220, Math.max(20000, (layoutBounds?.width ?? camera.width) * 8));
   applyView();
 }
 
-/** Download the server-owned snapshot without re-running collection. */
 async function exportSnapshot() {
   if (!state.snapshot) return;
   try {
     const response = await fetch("/api/v1/topology/export", { cache: "no-store" });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({ error: { code: "request_error", message: "Export failed." } }));
-      throw payload;
-    }
+    if (!response.ok) throw await response.json();
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -495,7 +544,7 @@ async function exportSnapshot() {
 }
 
 elements["refresh-button"].addEventListener("click", refreshPassive);
-elements["discover-button"].addEventListener("click", openDiscoverDialog);
+elements["discover-button"].addEventListener("click", handleDiscoverAction);
 elements["export-button"].addEventListener("click", exportSnapshot);
 elements["discover-form"].addEventListener("submit", runActiveDiscovery);
 elements["dialog-close"].addEventListener("click", () => closeDiscoverDialog());
@@ -511,17 +560,9 @@ elements["graph-viewport"].addEventListener("wheel", (event) => {
   changeZoom(event.deltaY < 0 ? 1.12 : 1 / 1.12, { x: event.clientX, y: event.clientY });
 }, { passive: false });
 
-// Panning starts anywhere in the canvas, including on nodes and edges. A small
-// movement threshold distinguishes a click-to-select from a drag-to-pan.
 elements["graph-viewport"].addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || !camera) return;
-  drag = {
-    pointerId: event.pointerId,
-    x: event.clientX,
-    y: event.clientY,
-    camera: { ...camera },
-    moved: false,
-  };
+  drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, camera: { ...camera }, moved: false };
   elements["graph-viewport"].classList.add("is-panning");
   elements["graph-viewport"].setPointerCapture(event.pointerId);
 });
@@ -532,11 +573,7 @@ elements["graph-viewport"].addEventListener("pointermove", (event) => {
   const deltaX = event.clientX - drag.x;
   const deltaY = event.clientY - drag.y;
   if (Math.hypot(deltaX, deltaY) > 3) drag.moved = true;
-  camera = {
-    ...drag.camera,
-    x: drag.camera.x - deltaX * (drag.camera.width / Math.max(1, rect.width)),
-    y: drag.camera.y - deltaY * (drag.camera.height / Math.max(1, rect.height)),
-  };
+  camera = { ...drag.camera, x: drag.camera.x - deltaX * (drag.camera.width / Math.max(1, rect.width)), y: drag.camera.y - deltaY * (drag.camera.height / Math.max(1, rect.height)) };
   applyView();
 });
 
@@ -557,7 +594,6 @@ elements["graph-viewport"].addEventListener("click", (event) => {
   event.stopImmediatePropagation();
   suppressGraphClick = false;
 }, true);
-
 window.addEventListener("resize", () => requestAnimationFrame(fitView));
 
 document.addEventListener("keydown", (event) => {
