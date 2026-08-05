@@ -16,14 +16,17 @@
     </div>
     <div class="header-actions" aria-label="Topology actions">
       <button id="refresh-button" type="button">Refresh passive</button>
-      <button id="discover-button" type="button" disabled aria-describedby="discover-reason">Discover devices</button>
+      <div class="capability-action">
+        <button id="discover-button" type="button" disabled aria-describedby="discover-capability discover-reason">Discover devices</button>
+        <span id="discover-capability" class="capability-status" tabindex="-1" aria-live="polite">Nmap: checking</span>
+      </div>
       <button id="export-button" type="button" disabled>Export JSON</button>
     </div>
   </header>
 
   <section class="notice" aria-labelledby="limitation-title">
-    <h2 id="limitation-title">Logical view, not physical proof</h2>
-    <p>This page shows evidence visible from this Mac and deterministic inferences. Hidden switches, VLANs, isolated clients, VPN paths, and sleeping devices may be absent.</p>
+    <h2 id="limitation-title">Evidence-backed path, not invented physical topology</h2>
+    <p>The main row shows the route from this Mac toward its gateway. Wi-Fi access points are shown when a current BSSID is available. Transparent Ethernet switches cannot normally be enumerated without LLDP or managed-network evidence and remain explicitly unknown. Other devices are peers, not transit hops.</p>
   </section>
 
   <section id="status-region" class="status-region" aria-live="polite" aria-atomic="true">
@@ -36,7 +39,7 @@
   <main class="workspace">
     <section class="graph-panel" aria-labelledby="graph-title">
       <div class="graph-toolbar">
-        <h2 id="graph-title">Topology</h2>
+        <h2 id="graph-title">Gateway path and LAN peers</h2>
         <div role="group" aria-label="Graph view controls">
           <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
           <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
@@ -44,9 +47,9 @@
           <button id="reset-view" type="button">Reset</button>
         </div>
       </div>
-      <div id="graph-viewport" class="graph-viewport" tabindex="0" aria-label="Interactive topology graph">
+      <div id="graph-viewport" class="graph-viewport" tabindex="0" aria-label="Interactive gateway path and peer graph">
         <svg id="topology-svg" role="img" aria-labelledby="graph-title graph-description">
-          <desc id="graph-description">A left-to-right logical network topology. Solid links are observed and dashed links are inferred.</desc>
+          <desc id="graph-description">An evidence-backed path from this Mac through its interface and known or unknown local attachment to the gateway. Peer devices are grouped separately and are not shown as transit hops.</desc>
           <g id="graph-scene"></g>
         </svg>
       </div>
@@ -54,7 +57,7 @@
 
     <aside id="details-panel" class="details-panel" aria-labelledby="details-title">
       <h2 id="details-title">Details</h2>
-      <div id="details-content"><p class="muted">Select a node or edge to inspect evidence and confidence.</p></div>
+      <div id="details-content"><p class="muted">Select a path node, peer, network, or edge to inspect evidence and confidence.</p></div>
     </aside>
   </main>
 
@@ -63,11 +66,11 @@
       <div class="dialog-header">
         <div>
           <p class="eyebrow">EXPLICIT ACTIVE ACTION</p>
-          <h2 id="discover-title">Discover devices with Nmap</h2>
+          <h2 id="discover-title">Discover peer devices with Nmap</h2>
         </div>
         <button id="dialog-close" class="icon-button" type="button" aria-label="Close discovery dialog">×</button>
       </div>
-      <p>Nmap will run host discovery only. No ports, services, operating-system detection, DNS lookup, or public targets are used.</p>
+      <p>Nmap will run host discovery only. It can find responding peers but cannot reveal transparent switches, AP backhaul, or prove the physical path to the gateway.</p>
       <fieldset>
         <legend>Eligible local networks</legend>
         <div id="network-options" class="network-options"></div>
