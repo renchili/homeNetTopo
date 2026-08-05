@@ -84,18 +84,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(interface.kind, CommandKind.INTERFACES)
         self.assertEqual(interface.argv, ("/sbin/ifconfig", "-a"))
         self.assertEqual(wifi.kind, CommandKind.WIFI)
-        self.assertEqual(
-            wifi.argv,
-            (
-                "/usr/sbin/system_profiler",
-                "-json",
-                "-detailLevel",
-                "basic",
-                "-timeout",
-                "5",
-                "SPAirPortDataType",
-            ),
-        )
+        self.assertEqual(wifi.argv, ("/usr/sbin/system_profiler", "-json", "-timeout", "5", "SPAirPortDataType"))
         self.assertEqual(wifi.timeout_seconds, 8)
 
     def test_resolves_explicit_executable_and_reports_source_only(self):
