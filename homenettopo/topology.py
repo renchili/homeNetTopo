@@ -1,10 +1,10 @@
 """Build deterministic topology with explicit path uncertainty.
 
-A local endpoint can observe its interface, current Wi-Fi BSSID, route gateway,
-and ARP mappings. It cannot normally enumerate transparent Ethernet switches.
-The graph therefore creates an observed access-point node when BSSID evidence is
-available and an explicit unknown link boundary otherwise. Peer devices remain
-subnet members and are never placed in the host-to-gateway transit path.
+A local endpoint can observe its interface, Wi-Fi media, optional current BSSID,
+route gateway, and ARP mappings. It cannot normally enumerate transparent
+Ethernet switches. The graph creates an access-point boundary for a default route
+on a known Wi-Fi interface and an explicit unknown link boundary only for a
+non-Wi-Fi path without adjacent-device evidence. Peer devices are never transit.
 """
 
 from __future__ import annotations
@@ -67,11 +67,11 @@ def build_snapshot(
 ) -> TopologySnapshot:
     """Merge normalized evidence into one immutable topology snapshot.
 
-    Default-route paths use only evidence available from this Mac. Wi-Fi BSSID
-    identifies the directly associated AP radio. A non-Wi-Fi path without an
-    adjacent-device protocol is represented by ``link_boundary`` rather than a
-    fabricated switch. Exact AP/gateway MAC equality is recorded, but different
-    interface MACs are not treated as proof that they are different appliances.
+    A BSSID identifies the associated AP radio. When only hardware-port evidence
+    identifies the default-route interface as Wi-Fi, the AP boundary is inferred
+    without inventing its identity. A non-Wi-Fi path without LLDP or managed
+    topology evidence remains an explicit ``link_boundary``. Exact AP/gateway
+    MAC equality is recorded, but different MACs do not prove different boxes.
     """
 
     timestamp = collected_at or utc_now()
@@ -183,16 +183,21 @@ def build_snapshot(
         if wireless is not None:
             suffix = _slug(wireless.bssid) if wireless.bssid else f"unknown-{interface_name}"
             attachment_id = f"access-point:{suffix}"
+            association_observed = wireless.associated
+            evidence_source = "wifi" if association_observed else "wifi_interfaces"
+            evidence_summary = "Current Wi-Fi association" if association_observed else "Wi-Fi hardware port used by the default route"
             wifi_evidence = Evidence(
-                "wifi",
-                "Current Wi-Fi association",
+                evidence_source,
+                evidence_summary,
                 timestamp,
                 {
                     "interface": interface_name,
+                    "association_observed": association_observed,
                     "bssid_available": wireless.identified,
                     "ssid_available": wireless.ssid is not None,
                 },
             )
+            identity_source = "bssid" if wireless.identified else ("association_without_bssid" if association_observed else "wifi_interface_and_default_route")
             nodes[attachment_id] = Node(
                 attachment_id,
                 NodeKind.ACCESS_POINT,
@@ -201,7 +206,8 @@ def build_snapshot(
                 interface_names=(interface_name,),
                 properties={
                     "ssid": wireless.ssid,
-                    "identity_source": "bssid" if wireless.identified else "redacted_or_unavailable",
+                    "association_observed": association_observed,
+                    "identity_source": identity_source,
                     "physical_identity_with_gateway": "unknown",
                 },
                 evidence=(wifi_evidence,),
@@ -214,14 +220,15 @@ def build_snapshot(
                 interface_id,
                 attachment_id,
                 EdgeType.INTERFACE_ASSOCIATED_WITH,
-                True,
+                association_observed,
                 Confidence.HIGH if wireless.identified else Confidence.MEDIUM,
-                (wifi_evidence,),
+                (wifi_evidence, route_evidence) if not association_observed else (wifi_evidence,),
+                {"inference": None if association_observed else "wifi_interface_plus_default_route"},
             )
             path_edge_id = f"edge:{attachment_id}:{gateway_id}"
             path_evidence = Evidence(
                 "link_path_inference",
-                "Gateway is reached beyond the associated Wi-Fi access point",
+                "Gateway is reached beyond the Wi-Fi attachment",
                 timestamp,
                 {"interface": interface_name, "physical_identity_relation": "unknown"},
             )
