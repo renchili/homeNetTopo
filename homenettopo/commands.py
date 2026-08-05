@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Iterable
 
 PASSIVE_TIMEOUT_SECONDS = 5
+WIFI_INTERFACES_TIMEOUT_SECONDS = 3
 WIFI_TIMEOUT_SECONDS = 8
 STDOUT_LIMIT = 2 * 1024 * 1024
 STDERR_LIMIT = 64 * 1024
@@ -45,6 +46,7 @@ class CommandKind(str, Enum):
     INTERFACES = "interfaces"
     ROUTES = "routes"
     NEIGHBORS = "neighbors"
+    WIFI_INTERFACES = "wifi_interfaces"
     WIFI = "wifi"
     NMAP = "nmap"
 
@@ -94,12 +96,23 @@ def neighbors_spec() -> CommandSpec:
     return CommandSpec(CommandKind.NEIGHBORS, ("/usr/sbin/arp", "-an"), PASSIVE_TIMEOUT_SECONDS)
 
 
-def wifi_spec() -> CommandSpec:
-    """Return bounded JSON collection for the current Wi-Fi association.
+def wifi_interfaces_spec() -> CommandSpec:
+    """Return fast read-only detection of BSD interfaces serving Wi-Fi ports."""
 
-    Full AirPort detail is requested because reduced profiler detail can omit
-    association fields. The parser keeps only the current interface association,
-    ignores nearby scan entries, and treats redacted BSSID as unavailable.
+    return CommandSpec(
+        CommandKind.WIFI_INTERFACES,
+        ("/usr/sbin/networksetup", "-listallhardwareports"),
+        WIFI_INTERFACES_TIMEOUT_SECONDS,
+    )
+
+
+def wifi_spec() -> CommandSpec:
+    """Return bounded JSON enrichment for the current Wi-Fi association.
+
+    ``networksetup`` separately establishes which BSD interface is Wi-Fi. Full
+    AirPort detail is optional enrichment for SSID/BSSID; reduced profiler detail
+    can omit those fields. The parser ignores nearby scan entries and treats
+    redacted BSSID as unavailable.
     """
 
     return CommandSpec(
@@ -213,6 +226,7 @@ def _validate_spec(spec: CommandSpec) -> None:
         CommandKind.INTERFACES: interfaces_spec(),
         CommandKind.ROUTES: routes_spec(),
         CommandKind.NEIGHBORS: neighbors_spec(),
+        CommandKind.WIFI_INTERFACES: wifi_interfaces_spec(),
         CommandKind.WIFI: wifi_spec(),
     }
     if spec.kind in expected:
