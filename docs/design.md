@@ -2,11 +2,11 @@
 
 ## Status
 
-This document defines the intended first implementation. It is not evidence that the application, tests, deployment, Wi-Fi profiler, browser interaction, or Nmap path has run successfully.
+This document defines the intended first implementation. It is not evidence that the application, tests, deployment, Wi-Fi commands, browser interaction, or Nmap path has run successfully.
 
 ## Goals
 
-- Collect IPv4, route, ARP, and current Wi-Fi association evidence visible from the Mac.
+- Collect IPv4, route, ARP, Wi-Fi media, and optional current-association evidence visible from the Mac.
 - Show an evidence-backed path toward the default gateway.
 - Keep same-subnet peers separate from transit-path nodes.
 - Preserve tunnel interfaces as explicit Layer-3 paths.
@@ -28,9 +28,9 @@ This document defines the intended first implementation. It is not evidence that
 Production uses macOS, Python 3.10+, the Python standard library, repository-owned browser assets, and optional Nmap. Node.js 20+ is development-only.
 
 ```text
-server.py                  loopback HTTP, security boundary, source orchestration, lock, snapshots
+server.py                  loopback HTTP, security boundary, concurrent source orchestration, lock, snapshots
 homenettopo/commands.py    exact command allowlist, Nmap resolution, bounded subprocess runner
-homenettopo/interfaces.py  ifconfig and current Wi-Fi association parsers
+homenettopo/interfaces.py  ifconfig, networksetup Wi-Fi media, profiler association parsing and merge
 homenettopo/routes.py      IPv4 route parser
 homenettopo/neighbors.py   ARP parser
 homenettopo/discovery.py   Phase A/B and Nmap evidence validation
@@ -49,15 +49,16 @@ scripts/check.py           full regression and cross-owner guards
 The browser and HTTP body cannot supply executable names or arguments.
 
 ```text
-INTERFACES  /sbin/ifconfig -a
-ROUTES      /usr/sbin/netstat -rn -f inet
-NEIGHBORS   /usr/sbin/arp -an
-WIFI        /usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType
-DISCOVERY   <canonical-nmap-path> -sn -n --max-retries 1
-            --host-timeout 5s -oX - <validated-targets...>
+INTERFACES       /sbin/ifconfig -a
+ROUTES           /usr/sbin/netstat -rn -f inet
+NEIGHBORS        /usr/sbin/arp -an
+WIFI_INTERFACES  /usr/sbin/networksetup -listallhardwareports
+WIFI_DETAILS     /usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType
+DISCOVERY        <canonical-nmap-path> -sn -n --max-retries 1
+                 --host-timeout 5s -oX - <validated-targets...>
 ```
 
-Commands run with `shell=False`, a minimal environment, bounded output, total deadlines, and terminate/kill cleanup. Interface, route, and ARP commands use five seconds. Wi-Fi profiling uses an eight-second process deadline around the profiler’s fixed five-second timeout.
+Commands run with `shell=False`, a minimal environment, bounded output, total deadlines, and terminate/kill cleanup. Interface, route, and ARP commands use five seconds. Wi-Fi hardware-port detection uses three seconds. Wi-Fi profiling uses an eight-second process deadline around the profiler’s fixed five-second timeout.
 
 Nmap resolution order is explicit path, Apple Silicon Homebrew, Intel Homebrew, then `PATH`. The public API exposes only the resolution source.
 
@@ -67,21 +68,26 @@ Nmap resolution order is explicit path, Apple Silicon Homebrew, Intel Homebrew, 
 2. Require an empty JSON object.
 3. Acquire the single collection lock.
 4. Require macOS.
-5. Run interface, route, ARP, and Wi-Fi commands independently.
+5. Launch interface, route, ARP, `networksetup`, and `system_profiler` commands concurrently.
 6. Parse each source with explicit failure semantics.
-7. Construct a complete or coherent partial snapshot.
-8. Publish atomically and release the lock.
-9. Re-read capabilities before the browser releases its passive collection owner.
+7. Merge fast Wi-Fi media detection with optional association details.
+8. Construct a complete or coherent partial snapshot.
+9. Publish atomically and release the lock.
+10. Re-read capabilities before the browser releases its passive collection owner.
 
-Interface, route, and ARP are the material coherence sources. Wi-Fi association is additional path evidence: its failure creates a warning and partial snapshot but does not erase otherwise coherent topology.
+The server still owns one collection. Concurrent command execution is internal and shortens wall-clock duration to approximately the slowest command deadline rather than the sum of all deadlines.
+
+Interface, route, and ARP are material coherence sources. `networksetup` supplies `wifi_interfaces` media evidence. `system_profiler` supplies optional `wifi` SSID/BSSID detail. A profiler timeout or parse failure creates a warning and partial snapshot but does not discard valid Wi-Fi media evidence and cannot by itself cause `504`.
+
+If no material source is coherent, errors expose normalized `failed_sources`. A `504 command_timeout` also exposes `timeout_sources`, allowing the browser/operator to identify the actual source without leaking commands or stderr.
 
 ## Determining the path to the gateway
 
 The topology builder uses the default route’s interface and gateway.
 
-### Wi-Fi association evidence
+### Wi-Fi evidence
 
-`system_profiler` JSON is searched only for current interface association objects. Nearby-network scan lists are ignored.
+`networksetup -listallhardwareports` establishes which BSD interfaces are Wi-Fi. `system_profiler` JSON is searched only for current interface association objects; nearby-network scan lists are ignored.
 
 When a canonical BSSID is present:
 
@@ -92,14 +98,16 @@ interface
   → interface_associated_with       observed
 access_point
   → attachment_reaches_gateway      inferred
- gateway
+gateway
   → upstream_of                     inferred
 upstream_boundary
 ```
 
 The BSSID identifies an associated AP radio. It does not prove the physical identity of the router appliance. Exact AP BSSID and gateway ARP MAC equality is positive `same_mac` evidence. Different MACs remain `unknown` because one device may expose different radio and routed-interface MAC addresses.
 
-When the current association is visible but BSSID is redacted or missing, the graph keeps an `access_point` node labelled as identity unavailable. It never guesses or silently merges it with the gateway.
+When current association is visible but BSSID is redacted or missing, the graph keeps an observed `access_point` node labelled as identity unavailable. It never guesses or silently merges it with the gateway.
+
+When only `networksetup` identifies the default-route interface as Wi-Fi, the graph creates an inferred unidentified AP boundary. The interface-to-AP edge cites Wi-Fi-media plus default-route evidence and remains visibly inferred. It must not fall back to the generic Ethernet `Intermediate L2 path unknown` node.
 
 ### Ethernet and unclassified non-tunnel links
 
@@ -115,7 +123,7 @@ link_boundary "Intermediate L2 path unknown"
 gateway
 ```
 
-The boundary properties state that it may represent a direct link, switch, bridge, or mesh backhaul. It is uncertainty, not an invented device.
+The boundary may represent a direct link, switch, bridge, or mesh backhaul. It is uncertainty, not an invented device.
 
 ### Tunnel paths
 
@@ -129,7 +137,7 @@ No access point, switch, or Layer-2 broadcast-domain node is inserted.
 
 ### LAN peers
 
-`member_of` and `gateway_for_subnet` express address/subnet context. They do not express forwarding order. The browser groups subnets and peer devices below the main path and does not render membership edges as transit lines.
+`member_of` and `gateway_for_subnet` express address/subnet context. They do not express forwarding order. The browser groups subnet peer devices below the main path and does not render membership edges as transit lines.
 
 ## Active discovery
 
@@ -158,7 +166,7 @@ After fresh passive collection:
 - preserve adjacent sibling targets and distinct overlapping-owner targets;
 - recalculate the address union.
 
-Interface timeout is `504 command_timeout`. Missing or unparseable interface evidence is `500 collection_failed`. Successful interface evidence without an eligible network is `400 invalid_target`.
+Interface timeout is `504 command_timeout` with `timeout_sources: ["interfaces"]`. Missing or unparseable interface evidence is `500 collection_failed`. Successful interface evidence without an eligible network is `400 invalid_target`.
 
 Only after both phases pass may Nmap run. Nmap XML must have an `nmaprun` root. Only `up` hosts are accepted. IPv4 and optional MAC values are validated, and every accepted address must belong to at least one effective target. Malformed or out-of-effective-target evidence is `500 collection_failed`. Failed operations preserve the prior snapshot and do not publish intermediate passive data.
 
@@ -183,6 +191,8 @@ POST /api/v1/discover
 ```
 
 One collection runs at a time. Another client gets `409 collection_in_progress`. The browser uses one `collectionInFlight` owner and ignores stale completions.
+
+The CSP permits repository fonts and `data:` fonts through `font-src 'self' data:`. It does not permit external font, script, or style origins. Browser-extension `runtime.lastError` messages are outside application execution.
 
 ## Browser information architecture
 
@@ -225,14 +235,6 @@ upstream         x = 1040
 
 Each interface owns a vertical lane. The path row is above an optional subnet/peer context group. Peers use up to three columns, or four for more than 30 devices. Membership edges are omitted from rendered path edges.
 
-The layout output contains:
-
-- positioned path and peer nodes;
-- subnet/peer group rectangles;
-- only path edges;
-- hidden relationship count;
-- complete world bounds.
-
 Rendered path edge types are:
 
 ```text
@@ -262,16 +264,7 @@ device
 upstream_boundary
 ```
 
-Path edge types add:
-
-```text
-interface_associated_with
-interface_reaches_link
-attachment_reaches_gateway
-interface_reaches_gateway
-```
-
-Sources add `wifi` and `link_path_inference`. Every inferred path edge remains visibly inferred with confidence and evidence. The schema does not claim physical wiring.
+Sources include `wifi_interfaces`, `wifi`, and `link_path_inference`. Every inferred path edge remains visibly inferred with confidence and evidence. The schema does not claim physical wiring.
 
 ## Current-user deployment
 
@@ -279,7 +272,7 @@ Sources add `wifi` and `link_path_inference`. Every inferred path edge remains v
 
 ## Testing design
 
-Python tests cover command allowlists, Wi-Fi parser redaction/current-network filtering, route and ARP parsers, active validation, path node/edge schema, Wi-Fi AP path, unknown Ethernet path, tunnel path, AP/gateway MAC relation, source degradation, HTTP security, deployment, and snapshot preservation.
+Python tests cover command allowlists, fast Wi-Fi hardware-port parsing, profiler redaction/current-network filtering, media/detail merge, concurrent degradation, source-specific `timeout_sources`, route and ARP parsing, active validation, path schema, Wi-Fi AP path, unknown Ethernet path, tunnel path, AP/gateway MAC relation, HTTP security, deployment, and snapshot preservation.
 
 Node tests cover reducer ownership, capability recovery, evidence graph preservation, path order, peer grouping, hidden membership edges, tunnel paths, layout determinism, rectangle overlap, camera fit/zoom, address arithmetic, selection, and export naming.
 
@@ -295,4 +288,4 @@ It includes compile, metadata, Python tests, documentation guards, contract guar
 
 Snapshots remain in memory unless exported. Do not commit real SSIDs, BSSIDs, IPs, MACs, hostnames, logs, captures, or scan results.
 
-Formal acceptance still requires exact-revision execution on supported macOS, including real `system_profiler` output and redaction behavior, browser interaction, LaunchAgent lifecycle, Nmap unavailable/recovery, one bounded active discovery, and regression execution.
+Formal acceptance still requires exact-revision execution on supported macOS, including real `networksetup` and `system_profiler` behavior, browser interaction, LaunchAgent lifecycle, Nmap unavailable/recovery, one bounded active discovery, and regression execution.
