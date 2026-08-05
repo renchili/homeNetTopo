@@ -81,6 +81,21 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(access_point.properties["identity_source"], "redacted_or_unavailable")
         self.assertIn("identity unavailable", access_point.label)
 
+    def test_wifi_media_only_evidence_does_not_fall_back_to_unknown_l2_transit(self):
+        interfaces, routes, neighbors, sources = self.parts()
+        snapshot = build_snapshot(
+            interfaces=interfaces,
+            routes=routes,
+            neighbors=neighbors,
+            wireless_attachments=(WirelessAttachmentFact("en0", None, None, associated=False),),
+            sources=(*sources, SourceStatus("wifi", SourceStatusValue.OK)),
+            collected_at="2026-08-03T00:00:00Z",
+        )
+        access_point = next(node for node in snapshot.nodes if node.kind.value == "access_point")
+        self.assertEqual(access_point.interface_names, ("en0",))
+        self.assertFalse(any(node.kind.value == "link_boundary" for node in snapshot.nodes))
+        self.assertNotEqual(access_point.label, "Intermediate L2 path unknown")
+
     def test_same_observed_mac_can_link_ap_and_gateway_identity(self):
         interfaces, routes, _, sources = self.parts()
         shared_mac = "02:00:00:00:00:01"
