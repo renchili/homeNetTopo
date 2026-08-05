@@ -26,14 +26,8 @@ KILL_GRACE_SECONDS = 2
 NMAP_HOST_TIMEOUT_SECONDS = 5
 MAX_NETWORKS = 32
 MAX_ADDRESSES = 1024
-RFC1918_RANGES = tuple(
-    ipaddress.IPv4Network(value)
-    for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
-)
-DOCUMENTATION_RANGES = tuple(
-    ipaddress.IPv4Network(value)
-    for value in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
-)
+RFC1918_RANGES = tuple(ipaddress.IPv4Network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+DOCUMENTATION_RANGES = tuple(ipaddress.IPv4Network(value) for value in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"))
 
 
 class CommandError(RuntimeError):
@@ -103,22 +97,14 @@ def neighbors_spec() -> CommandSpec:
 def wifi_spec() -> CommandSpec:
     """Return bounded JSON collection for the current Wi-Fi association.
 
-    ``system_profiler`` is used only for the current AirPort interface state.
-    Nearby scan results are ignored by the parser, and redacted BSSID values are
-    treated as unavailable rather than guessed.
+    Full AirPort detail is requested because reduced profiler detail can omit
+    association fields. The parser keeps only the current interface association,
+    ignores nearby scan entries, and treats redacted BSSID as unavailable.
     """
 
     return CommandSpec(
         CommandKind.WIFI,
-        (
-            "/usr/sbin/system_profiler",
-            "-json",
-            "-detailLevel",
-            "basic",
-            "-timeout",
-            "5",
-            "SPAirPortDataType",
-        ),
+        ("/usr/sbin/system_profiler", "-json", "-timeout", "5", "SPAirPortDataType"),
         WIFI_TIMEOUT_SECONDS,
     )
 
