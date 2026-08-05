@@ -1,4 +1,9 @@
-"""Validated topology models and deterministic JSON serialization."""
+"""Define validated topology models and deterministic JSON serialization.
+
+The model is the final schema boundary before a snapshot reaches the local API
+or export. Access-point and link-boundary nodes describe evidence about the
+host-to-gateway path; they never claim an unobserved switch or physical cable.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +22,8 @@ class ModelError(ValueError):
 
 
 class Confidence(str, Enum):
+    """Evidence strength exposed through the public snapshot."""
+
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
@@ -51,6 +58,8 @@ class EdgeType(str, Enum):
 
 
 class SourceStatusValue(str, Enum):
+    """Collection or inference status for one named evidence source."""
+
     OK = "ok"
     WARNING = "warning"
     FAILED = "failed"
@@ -64,6 +73,8 @@ def utc_now() -> str:
 
 
 def _parse_utc(value: str) -> None:
+    """Require the exact UTC timestamp form used by snapshot serialization."""
+
     if not isinstance(value, str) or not value.endswith("Z"):
         raise ModelError("timestamp must be RFC 3339 UTC")
     try:
@@ -75,6 +86,8 @@ def _parse_utc(value: str) -> None:
 
 
 def _json_value(value: Any) -> Any:
+    """Convert enums and immutable containers to stable JSON values."""
+
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, (list, tuple)):
@@ -85,6 +98,8 @@ def _json_value(value: Any) -> Any:
 
 
 def _validate_json(value: Any) -> None:
+    """Reject property values that cannot be represented by the JSON API."""
+
     if value is None or isinstance(value, (str, int, float, bool)):
         return
     if isinstance(value, (list, tuple)):
@@ -99,6 +114,8 @@ def _validate_json(value: Any) -> None:
 
 
 def _validate_address(value: str) -> None:
+    """Require canonical IPv4 host or network notation."""
+
     try:
         ipaddress.IPv4Network(value, strict=True) if "/" in value else ipaddress.IPv4Address(value)
     except (TypeError, ValueError) as exc:
@@ -106,6 +123,8 @@ def _validate_address(value: str) -> None:
 
 
 def _validate_evidence(item: Evidence) -> None:
+    """Validate one provenance record and its optional properties."""
+
     if not item.source or not item.summary:
         raise ModelError("evidence source and summary must be nonempty")
     if item.observed_at is not None:
@@ -114,12 +133,16 @@ def _validate_evidence(item: Evidence) -> None:
 
 
 def _nonnegative(value: Any, label: str) -> None:
+    """Reject booleans and negative values for counters and durations."""
+
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ModelError(f"{label} must be a nonnegative integer")
 
 
 @dataclass(frozen=True)
 class Evidence:
+    """Provenance attached to a node or edge."""
+
     source: str
     summary: str
     observed_at: str | None = None
@@ -128,6 +151,8 @@ class Evidence:
 
 @dataclass(frozen=True)
 class SourceStatus:
+    """Outcome and optional duration for one evidence source."""
+
     type: str
     status: SourceStatusValue
     message: str | None = None
@@ -136,6 +161,8 @@ class SourceStatus:
 
 @dataclass(frozen=True)
 class NetworkDescriptor:
+    """Interface-owned IPv4 network and active-discovery eligibility."""
+
     cidr: str
     interface: str
     interface_kind: str
@@ -146,6 +173,8 @@ class NetworkDescriptor:
 
 @dataclass(frozen=True)
 class WarningItem:
+    """User-visible nonfatal uncertainty or partial-source warning."""
+
     code: str
     message: str
     source: str | None = None
@@ -169,7 +198,7 @@ class Node:
 
 @dataclass(frozen=True)
 class Edge:
-    """Directed relationship between known topology nodes."""
+    """Directed observed or inferred relationship between known nodes."""
 
     id: str
     source: str
@@ -183,6 +212,8 @@ class Edge:
 
 @dataclass(frozen=True)
 class ActiveDiscoveryMetadata:
+    """Public audit metadata for one bounded Nmap host-discovery run."""
+
     requested_networks: tuple[str, ...]
     effective_networks: tuple[str, ...]
     completed: bool
@@ -299,6 +330,8 @@ class TopologySnapshot:
                 raise ModelError("active discovery metadata does not match the fixed command contract")
 
     def to_dict(self) -> dict[str, Any]:
+        """Validate and serialize with deterministic mapping and enum order."""
+
         self.validate()
         payload = _json_value(asdict(self))
         if payload["active_discovery"] is None:
@@ -307,4 +340,6 @@ class TopologySnapshot:
 
 
 def sorted_evidence(items: Iterable[Evidence]) -> tuple[Evidence, ...]:
+    """Return evidence in canonical serialization order."""
+
     return tuple(sorted(items, key=lambda item: (item.source, item.summary, item.observed_at or "")))
