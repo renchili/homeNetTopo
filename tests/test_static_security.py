@@ -60,7 +60,11 @@ class StaticSecurityTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b"Home Net Topology", body)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
-        self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
+        policy = headers["Content-Security-Policy"]
+        self.assertIn("default-src 'self'", policy)
+        self.assertIn("font-src 'self' data:", policy)
+        self.assertNotIn("https:", policy)
+        self.assertNotIn("http:", policy)
         self.assertEqual(headers["Cache-Control"], "no-store")
 
     def test_rejects_traversal_repeated_decoding_and_unknown_files(self):
