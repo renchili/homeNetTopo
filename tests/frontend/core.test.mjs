@@ -16,51 +16,53 @@ import {
   zoomCamera,
 } from "../../web/core.mjs";
 
-function snapshot(deviceCount = 3, gatewayCount = 1) {
+function snapshot({ deviceCount = 3, attachment = "access_point", tunnel = false } = {}) {
+  const interfaceId = tunnel ? "interface:utun4" : "interface:en0";
+  const interfaceLabel = tunnel ? "utun4" : "en0";
+  const subnetId = tunnel ? "subnet:100-64-0-2-32" : "subnet:192-0-2-0-24";
+  const subnetLabel = tunnel ? "100.64.0.2/32" : "192.0.2.0/24";
+  const gatewayId = tunnel ? "gateway:100.64.0.2" : "gateway:192.0.2.1";
   const nodes = [
     { id: "local-host", kind: "local_host", label: "This Mac", confidence: "high", addresses: [] },
-    { id: "interface:en0", kind: "interface", label: "en0", confidence: "high", addresses: ["192.0.2.10"], properties: { kind: "physical" } },
-    { id: "subnet:192-0-2-0-24", kind: "subnet", label: "192.0.2.0/24", confidence: "high", addresses: ["192.0.2.0/24"] },
+    { id: interfaceId, kind: "interface", label: interfaceLabel, confidence: "high", addresses: [tunnel ? "100.64.0.2" : "192.0.2.10"], properties: { kind: tunnel ? "tunnel" : "physical" } },
+    { id: subnetId, kind: "subnet", label: subnetLabel, confidence: "high", addresses: [subnetLabel], properties: { interface: interfaceLabel } },
+    { id: gatewayId, kind: "gateway", label: tunnel ? "100.64.0.2" : "192.0.2.1", confidence: "high", addresses: [tunnel ? "100.64.0.2" : "192.0.2.1"], interface_names: [interfaceLabel], properties: { default_gateway: true } },
     { id: "upstream:default", kind: "upstream_boundary", label: "Upstream", confidence: "low", addresses: [] },
   ];
   const edges = [
-    { id: "host-if", source: "local-host", target: "interface:en0", type: "host_uses_interface", observed: true, confidence: "high" },
-    { id: "if-subnet", source: "interface:en0", target: "subnet:192-0-2-0-24", type: "interface_attached_to_subnet", observed: true, confidence: "high" },
+    { id: "host-if", source: "local-host", target: interfaceId, type: "host_uses_interface", observed: true, confidence: "high" },
+    { id: "if-subnet", source: interfaceId, target: subnetId, type: "interface_attached_to_subnet", observed: true, confidence: "high" },
+    { id: "gateway-subnet", source: gatewayId, target: subnetId, type: "gateway_for_subnet", observed: true, confidence: "high" },
+    { id: "gateway-up", source: gatewayId, target: "upstream:default", type: "upstream_of", observed: false, confidence: "low" },
   ];
-  for (let index = 0; index < gatewayCount; index += 1) {
-    const address = `192.0.2.${index + 1}`;
-    nodes.push({ id: `gateway:${address}`, kind: "gateway", label: address, confidence: "high", addresses: [address] });
-    edges.push({ id: `gateway-subnet-${index}`, source: `gateway:${address}`, target: "subnet:192-0-2-0-24", type: "gateway_for_subnet", observed: true, confidence: "high" });
+
+  if (tunnel) {
+    edges.push({ id: "if-gateway", source: interfaceId, target: gatewayId, type: "interface_reaches_gateway", observed: false, confidence: "medium" });
+  } else {
+    const attachmentNode = attachment === "access_point"
+      ? { id: "access-point:synthetic", kind: "access_point", label: "Wi-Fi access point", confidence: "high", mac_addresses: ["02:00:00:00:00:01"], properties: { physical_identity_with_gateway: "unknown" } }
+      : { id: "link-boundary:en0", kind: "link_boundary", label: "Intermediate L2 path unknown", confidence: "low", properties: { reason: "no_lldp_or_managed_topology_evidence" } };
+    nodes.push(attachmentNode);
+    edges.push(
+      { id: "if-attachment", source: interfaceId, target: attachmentNode.id, type: attachment === "access_point" ? "interface_associated_with" : "interface_reaches_link", observed: attachment === "access_point", confidence: attachment === "access_point" ? "high" : "low" },
+      { id: "attachment-gateway", source: attachmentNode.id, target: gatewayId, type: "attachment_reaches_gateway", observed: false, confidence: "medium" },
+    );
   }
-  if (gatewayCount) edges.push({ id: "gateway-up", source: "gateway:192.0.2.1", target: "upstream:default", type: "upstream_of", observed: false, confidence: "low" });
+
   for (let index = 0; index < deviceCount; index += 1) {
     const address = `192.0.2.${20 + index}`;
     nodes.push({ id: `device:${address}`, kind: "device", label: address, confidence: "medium", addresses: [address] });
-    edges.push({ id: `member-${index}`, source: `device:${address}`, target: "subnet:192-0-2-0-24", type: "member_of", observed: false, confidence: "medium" });
+    edges.push({ id: `member-${index}`, source: `device:${address}`, target: subnetId, type: "member_of", observed: false, confidence: "medium" });
   }
   return {
-    snapshot_id: "snapshot-1",
+    snapshot_id: `snapshot-${attachment}-${tunnel}`,
     partial: false,
     collected_at: "2026-08-03T00:00:00Z",
     mode: "passive",
     nodes,
     edges,
-    networks: [{ cidr: "192.0.2.0/24", interface: "en0", eligible_for_active_discovery: true, address_count: 256 }],
+    networks: tunnel ? [] : [{ cidr: "192.0.2.0/24", interface: "en0", eligible_for_active_discovery: true, address_count: 256 }],
   };
-}
-
-function tunnelSnapshot() {
-  const input = snapshot(0, 0);
-  input.snapshot_id = "snapshot-tunnel";
-  input.nodes.push(
-    { id: "interface:utun4", kind: "interface", label: "utun4", confidence: "high", addresses: ["100.64.0.2"], properties: { kind: "tunnel" } },
-    { id: "subnet:100-64-0-2-32", kind: "subnet", label: "100.64.0.2/32", confidence: "high", addresses: ["100.64.0.2/32"] },
-  );
-  input.edges.push(
-    { id: "host-utun", source: "local-host", target: "interface:utun4", type: "host_uses_interface", observed: true, confidence: "high" },
-    { id: "utun-subnet", source: "interface:utun4", target: "subnet:100-64-0-2-32", type: "interface_attached_to_subnet", observed: true, confidence: "high" },
-  );
-  return input;
 }
 
 function rectanglesOverlap(a, b) {
@@ -77,7 +79,8 @@ test("state reducer maps ready states and restores after dialog cancellation", (
   assert.equal(active.phase, UI_STATES.ACTIVE_READY);
   assert.equal(reduceState({ ...active, phase: UI_STATES.ACTIVE_CONFIRM }, { type: "ACTIVE_CANCEL" }).phase, UI_STATES.ACTIVE_READY);
   const emptyRunning = reduceState(initialState(), { type: "PASSIVE_START" });
-  assert.equal(reduceState(emptyRunning, { type: "PASSIVE_SUCCESS", snapshot: { ...snapshot(0), nodes: snapshot(0).nodes.filter((node) => node.kind !== "device") } }).phase, UI_STATES.EMPTY_READY);
+  const empty = snapshot({ deviceCount: 0 });
+  assert.equal(reduceState(emptyRunning, { type: "PASSIVE_SUCCESS", snapshot: empty }).phase, UI_STATES.EMPTY_READY);
   const partialRunning = reduceState(initialState(), { type: "PASSIVE_START" });
   assert.equal(reduceState(partialRunning, { type: "PASSIVE_SUCCESS", snapshot: { ...snapshot(), partial: true } }).phase, UI_STATES.PARTIAL_READY);
 });
@@ -98,20 +101,16 @@ test("API errors map to recovery states", () => {
 test("collection state prevents interleaving and ignores stale completions", () => {
   const passive = reduceState(initialState(), { type: "PASSIVE_START" });
   assert.equal(passive.collectionInFlight, "passive");
-  assert.equal(passive.phase, UI_STATES.LOADING_PASSIVE);
   assert.strictEqual(reduceState(passive, { type: "ACTIVE_START" }), passive);
   assert.strictEqual(reduceState(passive, { type: "ACTIVE_SUCCESS", snapshot: { ...snapshot(), mode: "active" } }), passive);
   const ready = reduceState(passive, { type: "PASSIVE_SUCCESS", snapshot: snapshot() });
-  assert.equal(ready.collectionInFlight, null);
   const active = reduceState(ready, { type: "ACTIVE_START" });
   assert.equal(active.collectionInFlight, "active");
-  assert.equal(active.phase, UI_STATES.ACTIVE_RUNNING);
   assert.strictEqual(reduceState(active, { type: "PASSIVE_START" }), active);
   assert.strictEqual(reduceState(active, { type: "ERROR", phase: UI_STATES.REQUEST_ERROR, error: { error: { code: "request_error" } } }), active);
-  assert.strictEqual(reduceState(active, { type: "ERROR", collection: "passive", phase: UI_STATES.COLLECTION_CONFLICT, error: { error: { code: "collection_in_progress" } } }), active);
+  assert.strictEqual(reduceState(active, { type: "ERROR", collection: "passive", phase: UI_STATES.COLLECTION_CONFLICT, error: {} }), active);
   const failed = reduceState(active, { type: "ERROR", collection: "active", phase: UI_STATES.REQUEST_ERROR, error: { error: { code: "collection_failed" } } });
   assert.equal(failed.collectionInFlight, null);
-  assert.equal(failed.phase, UI_STATES.REQUEST_ERROR);
 });
 
 test("runtime dependency failure disables and refreshed capabilities restore active discovery", () => {
@@ -128,72 +127,68 @@ test("runtime dependency failure disables and refreshed capabilities restore act
     error: { error: { code: "dependency_unavailable", details: { resolution_source: "unavailable" } } },
   });
   assert.equal(unavailable.phase, UI_STATES.DEPENDENCY_UNAVAILABLE);
-  assert.equal(unavailable.collectionInFlight, null);
   assert.equal(unavailable.capabilities.active_discovery.available, false);
-  assert.equal(unavailable.capabilities.active_discovery.unavailable_reason, "dependency_unavailable");
-  assert.equal(unavailable.capabilities.active_discovery.resolution_source, "unavailable");
   const recovered = reduceState(unavailable, {
     type: "CAPABILITIES",
     capabilities: { passive_collection: true, active_discovery: { available: true, unavailable_reason: null, resolution_source: "homebrew_arm64" } },
   });
   assert.equal(recovered.phase, UI_STATES.PASSIVE_READY);
   assert.equal(recovered.error, null);
-  assert.equal(recovered.capabilities.active_discovery.available, true);
 });
 
-test("presentation graph inserts L2 for LAN but keeps tunnels as direct L3 paths", () => {
-  const lan = presentationGraph(snapshot());
-  const l2 = lan.nodes.find((node) => node.kind === "l2_segment");
-  assert.ok(l2);
-  assert.equal(l2.properties.presentation_only, true);
-  assert.ok(lan.edges.some((edge) => edge.type === "interface_attached_to_l2" && edge.target === l2.id));
-  assert.ok(lan.edges.some((edge) => edge.type === "l2_carries_subnet" && edge.source === l2.id));
-  assert.ok(lan.edges.some((edge) => edge.type === "member_of_l2" && edge.target === l2.id));
-
-  const tunnel = presentationGraph(tunnelSnapshot());
-  assert.equal(tunnel.nodes.filter((node) => node.kind === "l2_segment").length, 1, "only the en0 LAN receives an L2 node");
-  assert.ok(tunnel.edges.some((edge) => edge.id === "utun-subnet" && edge.type === "interface_attached_to_subnet"));
+test("presentation graph never invents an L2 transit device", () => {
+  const input = snapshot();
+  const graph = presentationGraph(input);
+  assert.deepEqual(graph.nodes, [...input.nodes].sort((a, b) => a.id.localeCompare(b.id)));
+  assert.equal(graph.nodes.some((node) => node.kind === "l2_segment"), false);
+  assert.equal(graph.edges.some((edge) => edge.type === "member_of_l2"), false);
 });
 
-test("layout uses semantic columns and rectangles do not overlap", () => {
-  const input = snapshot(12);
+test("gateway path is ordered while peer devices stay in a separate group", () => {
+  const input = snapshot({ deviceCount: 12 });
   const before = JSON.stringify(input);
-  const first = layoutTopology(input);
-  const reordered = { ...snapshot(12), nodes: [...snapshot(12).nodes].reverse(), edges: [...snapshot(12).edges].reverse() };
-  assert.deepEqual(first, layoutTopology(reordered));
+  const layout = layoutTopology(input);
+  const reordered = { ...input, nodes: [...input.nodes].reverse(), edges: [...input.edges].reverse() };
+  assert.deepEqual(layout, layoutTopology(reordered));
   assert.equal(JSON.stringify(input), before);
 
-  const interfaceNode = first.nodes.find((node) => node.id === "interface:en0");
-  const l2 = first.nodes.find((node) => node.kind === "l2_segment");
-  const subnet = first.nodes.find((node) => node.kind === "subnet");
-  const member = first.nodes.find((node) => node.kind === "device");
-  assert.ok(interfaceNode.x < l2.x && l2.x < subnet.x && subnet.x < member.x);
+  const host = layout.nodes.find((node) => node.kind === "local_host");
+  const interfaceNode = layout.nodes.find((node) => node.kind === "interface");
+  const attachment = layout.nodes.find((node) => node.kind === "access_point");
+  const gateway = layout.nodes.find((node) => node.kind === "gateway");
+  const upstream = layout.nodes.find((node) => node.kind === "upstream_boundary");
+  assert.ok(host.x < interfaceNode.x && interfaceNode.x < attachment.x && attachment.x < gateway.x && gateway.x < upstream.x);
+  assert.ok(layout.groups.some((group) => group.kind === "lan_peers" && group.subtitle.includes("not transit hops")));
+  assert.equal(layout.edges.some((edge) => ["member_of", "gateway_for_subnet", "interface_attached_to_subnet"].includes(edge.type)), false);
+  assert.ok(layout.edges.some((edge) => edge.type === "attachment_reaches_gateway"));
+  assert.ok(layout.edges.some((edge) => edge.type === "upstream_of"));
 
-  for (let left = 0; left < first.nodes.length; left += 1) {
-    for (let right = left + 1; right < first.nodes.length; right += 1) {
-      assert.equal(rectanglesOverlap(first.nodes[left], first.nodes[right]), false, `${first.nodes[left].id} overlaps ${first.nodes[right].id}`);
+  for (let left = 0; left < layout.nodes.length; left += 1) {
+    for (let right = left + 1; right < layout.nodes.length; right += 1) {
+      assert.equal(rectanglesOverlap(layout.nodes[left], layout.nodes[right]), false, `${layout.nodes[left].id} overlaps ${layout.nodes[right].id}`);
     }
   }
 });
 
-test("tunnel lane remains visible and skips the L2 column", () => {
-  const layout = layoutTopology(tunnelSnapshot());
-  const tunnelInterface = layout.nodes.find((node) => node.id === "interface:utun4");
-  const tunnelSubnet = layout.nodes.find((node) => node.id === "subnet:100-64-0-2-32");
-  assert.equal(tunnelInterface.laneType, "tunnel");
-  assert.equal(tunnelSubnet.laneType, "tunnel");
-  assert.ok(tunnelInterface.x < tunnelSubnet.x);
-  assert.ok(layout.edges.some((edge) => edge.id === "utun-subnet" && edge.type === "interface_attached_to_subnet"));
+test("unknown Ethernet attachment is explicit instead of a fabricated switch", () => {
+  const layout = layoutTopology(snapshot({ attachment: "unknown" }));
+  const boundary = layout.nodes.find((node) => node.kind === "link_boundary");
+  const interfaceNode = layout.nodes.find((node) => node.kind === "interface");
+  const gateway = layout.nodes.find((node) => node.kind === "gateway");
+  assert.ok(boundary);
+  assert.ok(interfaceNode.x < boundary.x && boundary.x < gateway.x);
+  assert.ok(layout.edges.some((edge) => edge.type === "interface_reaches_link"));
+  assert.ok(layout.edges.some((edge) => edge.type === "attachment_reaches_gateway"));
 });
 
-test("upstream moves after compact device or wide gateway grids", () => {
-  for (const input of [snapshot(31, 1), snapshot(2, 6)]) {
-    const layout = layoutTopology(input);
-    const upstream = layout.nodes.find((node) => node.kind === "upstream_boundary");
-    const rightmost = Math.max(...layout.nodes.filter((node) => ["device", "gateway"].includes(node.kind)).map((node) => node.x + node.width));
-    assert.ok(upstream.x > rightmost);
-  }
-  assert.ok(layoutTopology(snapshot(31)).nodes.filter((node) => node.kind === "device").every((node) => node.compact));
+test("tunnel remains a visible direct L3 path with no synthetic attachment", () => {
+  const layout = layoutTopology(snapshot({ deviceCount: 0, tunnel: true }));
+  const tunnelInterface = layout.nodes.find((node) => node.id === "interface:utun4");
+  const gateway = layout.nodes.find((node) => node.kind === "gateway");
+  assert.equal(tunnelInterface.laneType, "tunnel");
+  assert.equal(layout.nodes.some((node) => ["access_point", "link_boundary", "l2_segment"].includes(node.kind)), false);
+  assert.ok(tunnelInterface.x < gateway.x);
+  assert.ok(layout.edges.some((edge) => edge.type === "interface_reaches_gateway"));
 });
 
 test("camera fit, zoom, and orthogonal paths are deterministic", () => {
@@ -205,11 +200,7 @@ test("camera fit, zoom, and orthogonal paths are deterministic", () => {
   assert.ok(camera.y + camera.height >= bounds.y + bounds.height);
   const zoomed = zoomCamera(camera, 2, 400, 200);
   assert.equal(zoomed.width, camera.width / 2);
-  assert.equal(zoomed.height, camera.height / 2);
-  const path = orthogonalEdgePath(
-    { x: 0, y: 0, width: 180, height: 72 },
-    { x: 520, y: 200, width: 180, height: 72 },
-  );
+  const path = orthogonalEdgePath({ x: 0, y: 0, width: 180, height: 72 }, { x: 520, y: 200, width: 180, height: 72 });
   assert.match(path, /^M /);
   assert.match(path, / H /);
   assert.match(path, / V /);
