@@ -104,16 +104,20 @@ Initial page load sends a protected passive refresh request. Passive collection 
 /sbin/ifconfig -a
 /usr/sbin/netstat -rn -f inet
 /usr/sbin/arp -an
+/usr/sbin/networksetup -listallhardwareports
 /usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType
 ```
 
-The last command is a best-effort Wi-Fi association source. The parser retains only the current interface association and ignores nearby-network scan entries.
+The commands are launched concurrently, so refresh latency is bounded by the slowest source instead of the sum of all source timeouts. `networksetup` quickly identifies which BSD interface is Wi-Fi. `system_profiler` is optional SSID/BSSID enrichment; its timeout or parse failure produces a warning but does not discard the faster Wi-Fi-interface evidence or force a `504` when the material interface, route, or ARP evidence is coherent. Nearby-network scan entries are ignored.
 
 The main graph row describes the path toward the default gateway using explicit evidence:
 
 ```text
 Wi-Fi with BSSID:
 This Mac → interface → associated Wi-Fi AP radio → gateway → upstream
+
+Wi-Fi interface without BSSID details:
+This Mac → interface → Wi-Fi access point (identity unavailable) → gateway → upstream
 
 Non-Wi-Fi without adjacent-device evidence:
 This Mac → interface → Intermediate L2 path unknown → gateway → upstream
@@ -166,11 +170,14 @@ Exact duplicates and contained targets may be removed only within the same most-
 | Unique target addresses | at most 1024 |
 | Total Nmap operation timeout | default 30 seconds; range 5–120 |
 | Nmap per-host timeout | fixed 5 seconds |
-| Interface/route/ARP timeout | 5 seconds |
+| Interface/route/ARP timeout | 5 seconds each, run concurrently |
+| Wi-Fi interface detection timeout | 3 seconds |
 | Wi-Fi profiler process timeout | 8 seconds; profiler internal timeout 5 seconds |
 | Captured stdout | 2 MiB |
 | Captured stderr | 64 KiB |
 | Terminate-to-kill grace | 2 seconds |
+
+If all material passive sources fail, the normalized error includes `failed_sources`; a `504 command_timeout` also includes `timeout_sources`. Optional Wi-Fi profiler failure alone never produces a 504.
 
 ## Local API
 
@@ -201,6 +208,8 @@ The complete contract is in [`docs/api-spec.md`](docs/api-spec.md).
 The browser UI provides passive refresh, explicit active discovery, an evidence-backed gateway path, separately grouped LAN peers, tunnel paths, evidence and confidence details, deterministic SVG layout, full-surface pan, bounded pointer-centered zoom, keyboard selection, warnings, recovery states, and local JSON export.
 
 Specific IPv4 routes are represented as inferred `routes_to` relationships from a gateway to a destination boundary. The graph is a logical view, not proof of physical cabling, switching, VLANs, AP backhaul, isolated devices, or networks hidden behind other routers.
+
+The response policy permits repository fonts and `data:` fonts but still blocks external font origins. This avoids false console noise from local browser-extension font injection without enabling network-hosted assets. Browser-extension `runtime.lastError` messages are outside the page runtime.
 
 ## Code documentation policy
 
@@ -239,7 +248,7 @@ It reports frontend tests as `NOT RUN` and must not be cited as full-regression 
 - Frontend tests: not run.
 - Full regression: not run.
 - macOS startup: not run.
-- Wi-Fi BSSID collection: not run.
+- Wi-Fi interface and BSSID collection: not run.
 - LaunchAgent deployment: not run.
 - Browser interaction: not run.
 - Nmap discovery: not run.
