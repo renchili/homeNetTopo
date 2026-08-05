@@ -21,6 +21,15 @@
     "export": "GET /api/v1/topology/export",
     "custom_header": "X-HomeNetTopo-Request: 1"
   },
+  "passive_evidence": {
+    "interface_command": "/sbin/ifconfig -a",
+    "route_command": "/usr/sbin/netstat -rn -f inet",
+    "neighbor_command": "/usr/sbin/arp -an",
+    "wifi_command": "/usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType",
+    "wifi_current_association_only": true,
+    "nearby_wifi_scan_retained": false,
+    "ethernet_adjacent_device_source": "not_available_without_lldp"
+  },
   "active_discovery": {
     "enabled_by_default": false,
     "method": "nmap -sn -n --max-retries 1 --host-timeout 5s -oX -",
@@ -37,6 +46,7 @@
   },
   "command_limits": {
     "passive_timeout_seconds": 5,
+    "wifi_timeout_seconds": 8,
     "stdout_bytes": 2097152,
     "stderr_bytes": 65536,
     "kill_grace_seconds": 2
@@ -51,15 +61,27 @@
   "capability_disclosure": {
     "nmap_full_path_exposed": false,
     "nmap_resolution_source_exposed": true,
-    "unsupported_platform_reason": "unsupported_platform"
+    "unsupported_platform_reason": "unsupported_platform",
+    "nmap_state_visible_in_ui": true,
+    "nmap_recheck_action_when_unavailable": true
+  },
+  "gateway_path": {
+    "wifi_attachment": "current BSSID identifies associated AP radio when exposed",
+    "ethernet_attachment_without_lldp": "Intermediate L2 path unknown",
+    "different_ap_and_gateway_macs": "unknown physical identity relation",
+    "same_ap_and_gateway_mac": "same_mac positive relation",
+    "subnet_devices_are_transit_hops": false,
+    "tunnels_remain_visible": true
   },
   "graph_layout": {
     "coordinate_convention": "top-left-world-coordinates",
     "node_width": 180,
     "node_height": 72,
-    "minimum_horizontal_gap": 48,
+    "minimum_horizontal_gap": 64,
     "minimum_vertical_gap": 28,
-    "upstream_column": "dynamic-after-device-grid"
+    "main_path": "local-host-interface-attachment-gateway-upstream",
+    "peer_layout": "subnet-context-groups-below-path",
+    "camera": "svg-viewbox"
   },
   "first_release_exclusions": [
     "reverse-dns-enrichment",
@@ -68,13 +90,15 @@
     "persistent-snapshots",
     "lan-bind",
     "active-ipv6-discovery",
-    "port-or-service-scanning"
+    "port-or-service-scanning",
+    "guaranteed-ethernet-switch-enumeration"
   ],
   "verification": {
     "source_generated": true,
     "tests_defined": true,
     "tests_executed": false,
     "browser_executed": false,
+    "wifi_evidence_executed": false,
     "real_network_executed": false,
     "ci_executed": false
   },
@@ -82,6 +106,7 @@
     "cloud_required": false,
     "telemetry_required": false,
     "external_frontend_assets_required": false,
-    "automatic_persistence": false
+    "automatic_persistence": false,
+    "commit_real_ssid_or_bssid": false
   }
 }
