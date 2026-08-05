@@ -1,9 +1,4 @@
-"""Define validated topology models and deterministic JSON serialization.
-
-Model validation is the final schema boundary before data is returned by the
-HTTP service or written to an export.  Constructors stay lightweight; the
-snapshot validates the complete graph and all nested values together.
-"""
+"""Validated topology models and deterministic JSON serialization."""
 
 from __future__ import annotations
 
@@ -22,18 +17,18 @@ class ModelError(ValueError):
 
 
 class Confidence(str, Enum):
-    """Evidence-strength labels exposed by the public snapshot schema."""
-
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
 
 
 class NodeKind(str, Enum):
-    """Closed set of node kinds rendered by the browser."""
+    """Node roles exposed by the snapshot schema."""
 
     LOCAL_HOST = "local_host"
     INTERFACE = "interface"
+    ACCESS_POINT = "access_point"
+    LINK_BOUNDARY = "link_boundary"
     SUBNET = "subnet"
     GATEWAY = "gateway"
     DEVICE = "device"
@@ -41,9 +36,13 @@ class NodeKind(str, Enum):
 
 
 class EdgeType(str, Enum):
-    """Closed set of observed and inferred topology relationships."""
+    """Observed and inferred relationships exposed by the snapshot schema."""
 
     HOST_USES_INTERFACE = "host_uses_interface"
+    INTERFACE_ASSOCIATED_WITH = "interface_associated_with"
+    INTERFACE_REACHES_LINK = "interface_reaches_link"
+    ATTACHMENT_REACHES_GATEWAY = "attachment_reaches_gateway"
+    INTERFACE_REACHES_GATEWAY = "interface_reaches_gateway"
     INTERFACE_ATTACHED_TO_SUBNET = "interface_attached_to_subnet"
     GATEWAY_FOR_SUBNET = "gateway_for_subnet"
     MEMBER_OF = "member_of"
@@ -52,8 +51,6 @@ class EdgeType(str, Enum):
 
 
 class SourceStatusValue(str, Enum):
-    """Collection or inference status for one named evidence source."""
-
     OK = "ok"
     WARNING = "warning"
     FAILED = "failed"
@@ -67,8 +64,6 @@ def utc_now() -> str:
 
 
 def _parse_utc(value: str) -> None:
-    """Require the exact UTC timestamp form used by snapshot serialization."""
-
     if not isinstance(value, str) or not value.endswith("Z"):
         raise ModelError("timestamp must be RFC 3339 UTC")
     try:
@@ -80,8 +75,6 @@ def _parse_utc(value: str) -> None:
 
 
 def _json_value(value: Any) -> Any:
-    """Convert enums and immutable containers to stable JSON-compatible data."""
-
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, (list, tuple)):
@@ -91,59 +84,42 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def _validate_json_value(value: Any) -> None:
-    """Reject properties that cannot be represented by the public JSON API."""
-
+def _validate_json(value: Any) -> None:
     if value is None or isinstance(value, (str, int, float, bool)):
         return
     if isinstance(value, (list, tuple)):
         for item in value:
-            _validate_json_value(item)
+            _validate_json(item)
         return
-    if isinstance(value, dict):
-        if not all(isinstance(key, str) for key in value):
-            raise ModelError("property keys must be strings")
+    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
         for item in value.values():
-            _validate_json_value(item)
+            _validate_json(item)
         return
     raise ModelError("properties must contain JSON-compatible values")
 
 
 def _validate_address(value: str) -> None:
-    """Require canonical IPv4 host or network notation."""
-
-    if not isinstance(value, str):
-        raise ModelError("addresses must be strings")
     try:
-        if "/" in value:
-            ipaddress.IPv4Network(value, strict=True)
-        else:
-            ipaddress.IPv4Address(value)
-    except ValueError as exc:
+        ipaddress.IPv4Network(value, strict=True) if "/" in value else ipaddress.IPv4Address(value)
+    except (TypeError, ValueError) as exc:
         raise ModelError(f"invalid IPv4 address or network: {value}") from exc
 
 
-def _validate_evidence(evidence: Evidence) -> None:
-    """Validate one provenance record and its JSON properties."""
-
-    if not evidence.source or not evidence.summary:
+def _validate_evidence(item: Evidence) -> None:
+    if not item.source or not item.summary:
         raise ModelError("evidence source and summary must be nonempty")
-    if evidence.observed_at is not None:
-        _parse_utc(evidence.observed_at)
-    _validate_json_value(evidence.properties)
+    if item.observed_at is not None:
+        _parse_utc(item.observed_at)
+    _validate_json(item.properties)
 
 
-def _nonnegative_integer(value: Any, label: str) -> None:
-    """Reject booleans and negative values where counters are required."""
-
+def _nonnegative(value: Any, label: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ModelError(f"{label} must be a nonnegative integer")
 
 
 @dataclass(frozen=True)
 class Evidence:
-    """Provenance attached to a node or edge."""
-
     source: str
     summary: str
     observed_at: str | None = None
@@ -152,8 +128,6 @@ class Evidence:
 
 @dataclass(frozen=True)
 class SourceStatus:
-    """Outcome and duration for one command or derived evidence source."""
-
     type: str
     status: SourceStatusValue
     message: str | None = None
@@ -162,8 +136,6 @@ class SourceStatus:
 
 @dataclass(frozen=True)
 class NetworkDescriptor:
-    """Interface-owned network and its active-discovery eligibility."""
-
     cidr: str
     interface: str
     interface_kind: str
@@ -174,8 +146,6 @@ class NetworkDescriptor:
 
 @dataclass(frozen=True)
 class WarningItem:
-    """User-visible nonfatal uncertainty or partial-collection warning."""
-
     code: str
     message: str
     source: str | None = None
@@ -183,7 +153,7 @@ class WarningItem:
 
 @dataclass(frozen=True)
 class Node:
-    """Validated logical topology node with evidence and confidence."""
+    """Logical topology object with explicit evidence and confidence."""
 
     id: str
     kind: NodeKind
@@ -199,7 +169,7 @@ class Node:
 
 @dataclass(frozen=True)
 class Edge:
-    """Directed observed or inferred relationship between known nodes."""
+    """Directed relationship between known topology nodes."""
 
     id: str
     source: str
@@ -213,8 +183,6 @@ class Edge:
 
 @dataclass(frozen=True)
 class ActiveDiscoveryMetadata:
-    """Public audit metadata for one completed bounded active operation."""
-
     requested_networks: tuple[str, ...]
     effective_networks: tuple[str, ...]
     completed: bool
@@ -227,7 +195,7 @@ class ActiveDiscoveryMetadata:
 
 @dataclass(frozen=True)
 class TopologySnapshot:
-    """Complete immutable API snapshot and graph integrity boundary."""
+    """Complete immutable API snapshot and graph-integrity boundary."""
 
     schema_version: str
     snapshot_id: str
@@ -243,47 +211,40 @@ class TopologySnapshot:
     active_discovery: ActiveDiscoveryMetadata | None = None
 
     def validate(self) -> None:
-        """Validate nested values, graph endpoints, and mode-specific metadata."""
+        """Validate nested values, graph endpoints, and mode metadata."""
 
-        if self.schema_version != "1":
-            raise ModelError("unsupported schema version")
-        if not isinstance(self.snapshot_id, str) or not self.snapshot_id:
-            raise ModelError("snapshot id must be nonempty")
-        if not isinstance(self.platform, str) or not self.platform:
-            raise ModelError("platform must be nonempty")
+        if self.schema_version != "1" or not self.snapshot_id or not self.platform:
+            raise ModelError("invalid snapshot identity")
         if not isinstance(self.partial, bool):
             raise ModelError("partial must be boolean")
         _parse_utc(self.collected_at)
-
         for warning in self.warnings:
             if not warning.code or not warning.message:
                 raise ModelError("warning code and message must be nonempty")
 
         source_types: set[str] = set()
         for source in self.sources:
-            if not source.type or source.type in source_types:
+            if not source.type or source.type in source_types or not isinstance(source.status, SourceStatusValue):
                 raise ModelError("source types must be nonempty and unique")
             source_types.add(source.type)
-            if not isinstance(source.status, SourceStatusValue):
-                raise ModelError("invalid source status")
             if source.duration_ms is not None:
-                _nonnegative_integer(source.duration_ms, "source duration")
+                _nonnegative(source.duration_ms, "source duration")
 
         network_keys: set[tuple[str, str]] = set()
-        for network in self.networks:
+        for descriptor in self.networks:
             try:
-                parsed_network = ipaddress.IPv4Network(network.cidr, strict=True)
+                network = ipaddress.IPv4Network(descriptor.cidr, strict=True)
             except ValueError as exc:
                 raise ModelError("network CIDR must be canonical IPv4") from exc
-            key = (network.cidr, network.interface)
-            if key in network_keys or not network.interface:
+            key = (descriptor.cidr, descriptor.interface)
+            if key in network_keys or not descriptor.interface:
                 raise ModelError("network descriptors must have unique CIDR/interface keys")
             network_keys.add(key)
-            if network.interface_kind not in {"physical", "virtual", "tunnel"}:
+            if descriptor.interface_kind not in {"physical", "virtual", "tunnel"}:
                 raise ModelError("invalid interface kind")
-            if not isinstance(network.eligible_for_active_discovery, bool) or not network.eligibility_reason:
+            if not isinstance(descriptor.eligible_for_active_discovery, bool) or not descriptor.eligibility_reason:
                 raise ModelError("invalid active-discovery eligibility")
-            if network.address_count != parsed_network.num_addresses:
+            if descriptor.address_count != network.num_addresses:
                 raise ModelError("network address count does not match CIDR")
 
         node_ids = [node.id for node in self.nodes]
@@ -291,10 +252,8 @@ class TopologySnapshot:
             raise ModelError("node ids must be nonempty and unique")
         known = set(node_ids)
         for node in self.nodes:
-            if not isinstance(node.kind, NodeKind) or not isinstance(node.confidence, Confidence):
-                raise ModelError("invalid node enum value")
-            if not node.label:
-                raise ModelError("node labels must be nonempty")
+            if not isinstance(node.kind, NodeKind) or not isinstance(node.confidence, Confidence) or not node.label:
+                raise ModelError("invalid node")
             for address in node.addresses:
                 _validate_address(address)
             if any(not isinstance(mac, str) or not _MAC_RE.fullmatch(mac) for mac in node.mac_addresses):
@@ -303,7 +262,7 @@ class TopologySnapshot:
                 raise ModelError("interface names must be nonempty")
             if node.observed_at is not None:
                 _parse_utc(node.observed_at)
-            _validate_json_value(node.properties)
+            _validate_json(node.properties)
             for evidence in node.evidence:
                 _validate_evidence(evidence)
 
@@ -313,20 +272,16 @@ class TopologySnapshot:
         for edge in self.edges:
             if edge.source not in known or edge.target not in known:
                 raise ModelError(f"edge endpoint missing: {edge.id}")
-            if not isinstance(edge.type, EdgeType) or not isinstance(edge.confidence, Confidence):
-                raise ModelError("invalid edge enum value")
-            if not isinstance(edge.observed, bool):
-                raise ModelError("edge observed flag must be boolean")
-            _validate_json_value(edge.properties)
+            if not isinstance(edge.type, EdgeType) or not isinstance(edge.confidence, Confidence) or not isinstance(edge.observed, bool):
+                raise ModelError("invalid edge")
+            _validate_json(edge.properties)
             for evidence in edge.evidence:
                 _validate_evidence(evidence)
 
         if self.mode not in {"passive", "active"}:
             raise ModelError("invalid snapshot mode")
-        if self.mode == "active" and self.active_discovery is None:
-            raise ModelError("active snapshot requires active metadata")
-        if self.mode == "passive" and self.active_discovery is not None:
-            raise ModelError("passive snapshot cannot contain active metadata")
+        if (self.mode == "active") != (self.active_discovery is not None):
+            raise ModelError("snapshot mode does not match active metadata")
         if self.active_discovery is not None:
             metadata = self.active_discovery
             for value in (*metadata.requested_networks, *metadata.effective_networks):
@@ -336,20 +291,14 @@ class TopologySnapshot:
                     raise ModelError("active discovery networks must be canonical IPv4") from exc
             if not isinstance(metadata.completed, bool):
                 raise ModelError("active discovery completion must be boolean")
-            _nonnegative_integer(metadata.duration_ms, "active discovery duration")
-            _nonnegative_integer(metadata.hosts_reported_up, "active discovery host count")
-            if (
-                isinstance(metadata.operation_timeout_seconds, bool)
-                or not isinstance(metadata.operation_timeout_seconds, int)
-                or not 5 <= metadata.operation_timeout_seconds <= 120
-            ):
+            _nonnegative(metadata.duration_ms, "active discovery duration")
+            _nonnegative(metadata.hosts_reported_up, "active discovery host count")
+            if isinstance(metadata.operation_timeout_seconds, bool) or not isinstance(metadata.operation_timeout_seconds, int) or not 5 <= metadata.operation_timeout_seconds <= 120:
                 raise ModelError("active discovery timeout is outside the allowed range")
             if metadata.host_timeout_seconds != 5 or metadata.output_format != "xml":
                 raise ModelError("active discovery metadata does not match the fixed command contract")
 
     def to_dict(self) -> dict[str, Any]:
-        """Validate and serialize with deterministic mapping and enum ordering."""
-
         self.validate()
         payload = _json_value(asdict(self))
         if payload["active_discovery"] is None:
@@ -358,6 +307,4 @@ class TopologySnapshot:
 
 
 def sorted_evidence(items: Iterable[Evidence]) -> tuple[Evidence, ...]:
-    """Return evidence in the canonical serialization order."""
-
     return tuple(sorted(items, key=lambda item: (item.source, item.summary, item.observed_at or "")))
