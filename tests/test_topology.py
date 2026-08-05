@@ -78,7 +78,8 @@ class TopologyTests(unittest.TestCase):
         )
         access_point = next(node for node in snapshot.nodes if node.kind.value == "access_point")
         self.assertEqual(access_point.mac_addresses, ())
-        self.assertEqual(access_point.properties["identity_source"], "redacted_or_unavailable")
+        self.assertEqual(access_point.properties["identity_source"], "association_without_bssid")
+        self.assertTrue(access_point.properties["association_observed"])
         self.assertIn("identity unavailable", access_point.label)
 
     def test_wifi_media_only_evidence_does_not_fall_back_to_unknown_l2_transit(self):
@@ -88,11 +89,17 @@ class TopologyTests(unittest.TestCase):
             routes=routes,
             neighbors=neighbors,
             wireless_attachments=(WirelessAttachmentFact("en0", None, None, associated=False),),
-            sources=(*sources, SourceStatus("wifi", SourceStatusValue.OK)),
+            sources=(*sources, SourceStatus("wifi_interfaces", SourceStatusValue.OK)),
             collected_at="2026-08-03T00:00:00Z",
         )
         access_point = next(node for node in snapshot.nodes if node.kind.value == "access_point")
+        associated = next(edge for edge in snapshot.edges if edge.type.value == "interface_associated_with")
         self.assertEqual(access_point.interface_names, ("en0",))
+        self.assertEqual(access_point.properties["identity_source"], "wifi_interface_and_default_route")
+        self.assertFalse(access_point.properties["association_observed"])
+        self.assertFalse(associated.observed)
+        self.assertEqual(associated.evidence[0].source, "wifi_interfaces")
+        self.assertEqual(associated.properties["inference"], "wifi_interface_plus_default_route")
         self.assertFalse(any(node.kind.value == "link_boundary" for node in snapshot.nodes))
         self.assertNotEqual(access_point.label, "Intermediate L2 path unknown")
 
