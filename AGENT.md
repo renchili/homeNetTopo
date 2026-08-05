@@ -38,6 +38,7 @@ HTTP and browser callers never provide executable names or arbitrary arguments. 
 /sbin/ifconfig -a
 /usr/sbin/netstat -rn -f inet
 /usr/sbin/arp -an
+/usr/sbin/networksetup -listallhardwareports
 /usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType
 <canonical-nmap-path> -sn -n --max-retries 1 --host-timeout 5s -oX - <validated-targets...>
 ```
@@ -46,9 +47,13 @@ Requirements:
 
 - never invoke a shell;
 - use absolute macOS system-tool paths;
+- launch independent passive sources concurrently so refresh duration is bounded by the slowest source rather than cumulative deadlines;
 - apply a 5-second process deadline to interface, route, and ARP commands;
+- apply a 3-second deadline to Wi-Fi hardware-port detection;
 - apply an 8-second process deadline to Wi-Fi profiling, which also has the fixed 5-second profiler timeout;
+- use `networksetup` to identify Wi-Fi BSD interfaces even when profiler details are unavailable;
 - retain only current Wi-Fi association data, not nearby-network scan entries;
+- treat `system_profiler` as optional enrichment: timeout or parse failure may mark a snapshot partial but cannot by itself cause `504`;
 - resolve Nmap in this order: explicit option, `/opt/homebrew/bin/nmap`, `/usr/local/bin/nmap`, then `shutil.which("nmap")`;
 - canonicalize Nmap and require an executable regular file;
 - expose only the Nmap resolution source, never its path;
@@ -65,8 +70,9 @@ Fixed limits:
 | Active-operation timeout default | 30 seconds |
 | Active-operation timeout range | 5–120 seconds |
 | Nmap per-host timeout | 5 seconds |
-| Interface/route/ARP timeout | 5 seconds |
-| Wi-Fi process timeout | 8 seconds |
+| Interface/route/ARP timeout | 5 seconds each, concurrent |
+| Wi-Fi interface detection timeout | 3 seconds |
+| Wi-Fi profiler process timeout | 8 seconds |
 | Captured stdout | 2 MiB |
 | Captured stderr | 64 KiB |
 | Timed-out process kill grace | 2 seconds |
@@ -86,6 +92,8 @@ This Mac → Wi-Fi interface → associated AP radio → gateway → upstream
 The BSSID identifies the associated radio, not necessarily the complete appliance. A matching AP BSSID and gateway ARP MAC may be recorded as `same_mac`. Different MAC addresses remain `unknown`; they do not prove separate boxes because one appliance may use multiple interface MACs.
 
 When macOS exposes the association but redacts or omits BSSID, retain an `access_point` node whose identity is unavailable. Never guess the BSSID or collapse it into the gateway.
+
+When only `networksetup` identifies the default-route interface as Wi-Fi, infer a Wi-Fi access-point boundary with unavailable identity. Mark the interface-to-AP edge inferred and cite the Wi-Fi-interface plus default-route evidence. Do not fall back to the generic Ethernet `Intermediate L2 path unknown` node.
 
 ### Ethernet and other non-tunnel links
 
@@ -159,6 +167,8 @@ X-HomeNetTopo-Request: 1
 
 When present, Origin must exactly match an accepted loopback origin and `Sec-Fetch-Site` must be `same-origin` or `none`. Do not emit permissive CORS. API OPTIONS is not authorization. Read-only GET routes never start commands.
 
+The CSP may allow repository fonts and `data:` fonts but must not allow external font origins. Extension-injected runtime messages are outside application ownership.
+
 ## Snapshot and concurrency lifecycle
 
 Read-only routes:
@@ -173,6 +183,7 @@ GET /api/v1/topology/export
 Rules:
 
 - at most one passive or active collection runs at a time;
+- independent fixed passive commands may run concurrently inside that one collection;
 - the browser uses one shared collection-in-flight owner;
 - another client receives `409 collection_in_progress` immediately;
 - successful passive, coherent partial, and successful active results replace the snapshot atomically;
@@ -180,7 +191,7 @@ Rules:
 - intermediate passive data from a failed active operation is not published;
 - snapshots are in-memory and have no TTL.
 
-Wi-Fi profiling is best-effort. Failure produces a warning and partial snapshot when interface, route, or ARP evidence remains coherent. It does not block Phase B if interface evidence itself is usable.
+Wi-Fi profiling is best-effort. Failure produces a warning and partial snapshot when interface, route, or ARP evidence remains coherent. Fast Wi-Fi interface evidence remains available. A `504 command_timeout` requires all material passive evidence to be incoherent and must identify `timeout_sources`; optional Wi-Fi-detail timeout alone is never sufficient.
 
 ## Capability and UI behavior
 
@@ -227,9 +238,9 @@ It must:
 ## Current ownership
 
 ```text
-server.py                         HTTP boundary, source orchestration, lock, snapshots, static delivery
+server.py                         HTTP boundary, concurrent source orchestration, lock, snapshots, static delivery
 homenettopo/commands.py           typed command allowlist and bounded subprocess execution
-homenettopo/interfaces.py         ifconfig and current Wi-Fi-association parsers
+homenettopo/interfaces.py         ifconfig, Wi-Fi hardware-port, and association parsers/merge
 homenettopo/routes.py             IPv4 route parser
 homenettopo/neighbors.py          ARP parser
 homenettopo/discovery.py          Phase A/B and Nmap evidence validation
