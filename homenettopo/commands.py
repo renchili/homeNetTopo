@@ -1,8 +1,8 @@
 """Construct approved commands and execute them without a shell.
 
-This module is the final process-execution boundary.  Callers may select a
-known command family and validated data, but they cannot supply arbitrary
-executables, flags, environment variables, or shell syntax.
+This module is the final process-execution boundary. Callers may select a known
+command family and validated data, but they cannot supply arbitrary executables,
+flags, environment variables, or shell syntax.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Iterable
 
 PASSIVE_TIMEOUT_SECONDS = 5
+WIFI_TIMEOUT_SECONDS = 8
 STDOUT_LIMIT = 2 * 1024 * 1024
 STDERR_LIMIT = 64 * 1024
 KILL_GRACE_SECONDS = 2
@@ -50,6 +51,7 @@ class CommandKind(str, Enum):
     INTERFACES = "interfaces"
     ROUTES = "routes"
     NEIGHBORS = "neighbors"
+    WIFI = "wifi"
     NMAP = "nmap"
 
 
@@ -96,6 +98,29 @@ def neighbors_spec() -> CommandSpec:
     """Return the fixed macOS ARP-cache collection command."""
 
     return CommandSpec(CommandKind.NEIGHBORS, ("/usr/sbin/arp", "-an"), PASSIVE_TIMEOUT_SECONDS)
+
+
+def wifi_spec() -> CommandSpec:
+    """Return bounded JSON collection for the current Wi-Fi association.
+
+    ``system_profiler`` is used only for the current AirPort interface state.
+    Nearby scan results are ignored by the parser, and redacted BSSID values are
+    treated as unavailable rather than guessed.
+    """
+
+    return CommandSpec(
+        CommandKind.WIFI,
+        (
+            "/usr/sbin/system_profiler",
+            "-json",
+            "-detailLevel",
+            "basic",
+            "-timeout",
+            "5",
+            "SPAirPortDataType",
+        ),
+        WIFI_TIMEOUT_SECONDS,
+    )
 
 
 def _verified_executable(candidate: str | None) -> str | None:
@@ -146,7 +171,7 @@ def _target_is_eligible(network: ipaddress.IPv4Network) -> bool:
 def _canonical_targets(networks: Iterable[str]) -> tuple[str, ...]:
     """Revalidate and deterministically order the Phase B target set.
 
-    Only exact duplicates are removed here.  Contained targets may belong to
+    Only exact duplicates are removed here. Contained targets may belong to
     different most-specific local owners, so collapsing them again would undo
     the Phase B authorization decision.
     """
@@ -202,6 +227,7 @@ def _validate_spec(spec: CommandSpec) -> None:
         CommandKind.INTERFACES: interfaces_spec(),
         CommandKind.ROUTES: routes_spec(),
         CommandKind.NEIGHBORS: neighbors_spec(),
+        CommandKind.WIFI: wifi_spec(),
     }
     if spec.kind in expected:
         if spec != expected[spec.kind]:
@@ -235,7 +261,7 @@ def _stop_process(process: subprocess.Popen[bytes]) -> None:
 def run_command(spec: CommandSpec) -> CommandResult:
     """Execute one approved command with total deadline and output limits.
 
-    stdout and stderr are drained concurrently to avoid pipe deadlocks.  The
+    stdout and stderr are drained concurrently to avoid pipe deadlocks. The
     environment is deliberately minimal and ``shell=False`` is non-negotiable.
     """
 
@@ -268,8 +294,6 @@ def run_command(spec: CommandSpec) -> CommandResult:
                 _stop_process(process)
                 raise CommandError("command_timeout", "The collection command timed out.")
             events = selector.select(timeout=min(remaining, 0.2))
-            # Once the child exits, force a final read from every registered
-            # stream so buffered output is not lost before wait().
             if not events and process.poll() is not None:
                 events = [(key, selectors.EVENT_READ) for key in list(selector.get_map().values())]
             for key, _ in events:
