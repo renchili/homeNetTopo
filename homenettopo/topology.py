@@ -38,10 +38,14 @@ from .routes import RouteFact
 
 
 def _slug(value: str) -> str:
+    """Convert an address-like value into a stable identifier fragment."""
+
     return value.replace("/", "-").replace(":", "-").replace(".", "-")
 
 
 def _content_fingerprint(snapshot: TopologySnapshot) -> str:
+    """Create a stable snapshot id from all serialized content except the id."""
+
     payload = snapshot.to_dict()
     payload.pop("snapshot_id", None)
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -89,6 +93,8 @@ def build_snapshot(
     attachment_gateway_pairs: list[tuple[str, str, str]] = []
 
     def add_derived_source(source_type: str) -> None:
+        """Record one deterministic inference source at most once."""
+
         if not any(source.type == source_type for source in source_items):
             source_items.append(SourceStatus(source_type, SourceStatusValue.OK))
 
@@ -146,6 +152,8 @@ def build_snapshot(
             edges[edge_id] = Edge(edge_id, interface_id, subnet_id, EdgeType.INTERFACE_ATTACHED_TO_SUBNET, True, Confidence.HIGH, (evidence,))
 
     def matching_subnet(address: str) -> str | None:
+        """Return the most-specific observed subnet containing an address."""
+
         ip = ipaddress.IPv4Address(address)
         candidates = [(node_id, network) for node_id, network in subnet_networks.items() if ip in network]
         return max(candidates, key=lambda item: item[1].prefixlen)[0] if candidates else None
@@ -273,13 +281,19 @@ def build_snapshot(
             {"destination": route.destination, "interface": route.interface, "flags": list(route.flags)},
         )
         existing = nodes.get(gateway_id)
+        interface_names = tuple(sorted(set(existing.interface_names if existing else ()) | {route.interface}))
+        properties = {
+            **(existing.properties if existing else {}),
+            "default_gateway": route.is_default or bool(existing and existing.properties.get("default_gateway")),
+        }
         nodes[gateway_id] = Node(
             gateway_id,
             NodeKind.GATEWAY,
-            address,
+            existing.label if existing else address,
             addresses=(address,),
-            interface_names=(route.interface,),
-            properties={"default_gateway": route.is_default},
+            mac_addresses=existing.mac_addresses if existing else (),
+            interface_names=interface_names,
+            properties=properties,
             evidence=(*existing.evidence, route_evidence) if existing else (route_evidence,),
             confidence=Confidence.HIGH,
             observed_at=timestamp,
