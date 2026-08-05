@@ -67,6 +67,7 @@ h1 { margin-bottom: 6px; font-size: clamp(1.6rem, 3vw, 2.3rem); }
 
 .node, .edge, .network-group { cursor: pointer; }
 .network-group > rect { fill: color-mix(in srgb, var(--accent) 4%, var(--surface)); stroke: var(--border); stroke-width: 2; stroke-dasharray: 8 6; }
+.group-lan_peers > rect { fill: color-mix(in srgb, var(--attachment) 4%, var(--surface)); stroke: color-mix(in srgb, var(--attachment) 55%, var(--border)); }
 .group-tunnel_network > rect { fill: color-mix(in srgb, var(--tunnel) 7%, var(--surface)); stroke: var(--tunnel); }
 .group-title { fill: var(--text); font-size: 15px; font-weight: 800; pointer-events: none; }
 .group-subtitle { fill: var(--text-muted); font-size: 12px; pointer-events: none; }
