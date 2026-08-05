@@ -1,14 +1,22 @@
-"""Parse the IPv4 facts used from macOS ``ifconfig -a`` output.
+"""Parse local interface and Wi-Fi attachment evidence on macOS.
 
-The parser intentionally ignores unrelated protocol families and preserves only
-facts needed for topology construction and active-target containment.
+``ifconfig`` owns IPv4 assignments used for routing and active-target safety.
+``system_profiler SPAirPortDataType -json`` is a separate, best-effort source
+for the currently associated Wi-Fi access point. A missing or redacted BSSID is
+preserved as an unidentified association; it is never replaced with a guessed
+router, switch, or access-point identity.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 from dataclasses import dataclass
+from typing import Any
+
+_MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
+_REDACTED = {"", "<redacted>", "redacted", "(null)", "null", "none"}
 
 
 @dataclass(frozen=True)
@@ -29,6 +37,26 @@ class InterfaceFact:
     flags: tuple[str, ...]
     kind: str
     addresses: tuple[InterfaceAddress, ...]
+
+
+@dataclass(frozen=True)
+class WirelessAttachmentFact:
+    """Current Wi-Fi association for one BSD interface.
+
+    ``bssid`` identifies the directly associated AP radio when macOS exposes it.
+    It does not prove that the AP and IPv4 gateway are the same physical box.
+    ``ssid`` is optional runtime-only context and may be absent or redacted.
+    """
+
+    interface: str
+    bssid: str | None
+    ssid: str | None = None
+
+    @property
+    def identified(self) -> bool:
+        """Return whether the AP radio has an observed canonical BSSID."""
+
+        return self.bssid is not None
 
 
 def _prefix_from_mask(mask: str) -> int:
@@ -52,7 +80,7 @@ def parse_ifconfig(text: str) -> tuple[InterfaceFact, ...]:
     """Return deterministic IPv4 interface facts from macOS ``ifconfig`` text.
 
     Individual malformed ``inet`` rows are ignored because other addresses on
-    the same interface may still be coherent.  Nonempty text with no interface
+    the same interface may still be coherent. Nonempty text with no interface
     blocks is rejected so command-format drift cannot look like an empty host.
     """
 
@@ -60,7 +88,6 @@ def parse_ifconfig(text: str) -> tuple[InterfaceFact, ...]:
     current_name: str | None = None
     current_lines: list[str] = []
     for raw_line in text.splitlines():
-        # A non-indented ``name: flags=`` line starts a new macOS interface block.
         if raw_line and not raw_line[0].isspace() and ": flags=" in raw_line:
             if current_name is not None:
                 blocks.append((current_name, current_lines))
@@ -99,3 +126,78 @@ def parse_ifconfig(text: str) -> tuple[InterfaceFact, ...]:
             addresses.append(InterfaceAddress(address, prefix, str(interface.network), peer))
         result.append(InterfaceFact(name, flags, _kind(name, flags), tuple(sorted(addresses, key=lambda item: item.address))))
     return tuple(sorted(result, key=lambda item: item.name))
+
+
+def _clean_text(value: Any) -> str | None:
+    """Return useful profiler text while rejecting redaction placeholders."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return None if cleaned.lower() in _REDACTED else cleaned
+
+
+def _find_bssid(value: Any) -> str | None:
+    """Find and normalize a BSSID in one current-network object."""
+
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if "bssid" in str(key).lower():
+                candidate = _clean_text(item)
+                if candidate:
+                    normalized = candidate.lower().replace("-", ":")
+                    if _MAC_RE.fullmatch(normalized):
+                        return normalized
+        for item in value.values():
+            found = _find_bssid(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_bssid(item)
+            if found:
+                return found
+    return None
+
+
+def _airport_interfaces(value: Any) -> list[dict[str, Any]]:
+    """Collect interface dictionaries across profiler wrapper variations."""
+
+    result: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        interfaces = value.get("spairport_airport_interfaces")
+        if isinstance(interfaces, list):
+            result.extend(item for item in interfaces if isinstance(item, dict))
+        for item in value.values():
+            result.extend(_airport_interfaces(item))
+    elif isinstance(value, list):
+        for item in value:
+            result.extend(_airport_interfaces(item))
+    return result
+
+
+def parse_airport_json(text: str) -> tuple[WirelessAttachmentFact, ...]:
+    """Parse current Wi-Fi association evidence from ``system_profiler`` JSON.
+
+    An associated interface is retained even when macOS redacts the BSSID. That
+    lets the topology show an unidentified AP boundary instead of inventing a
+    direct cable or silently omitting the wireless hop. No nearby-network scan
+    results are retained.
+    """
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("AirPort profiler output was not valid JSON") from exc
+    if not isinstance(payload, dict) or "SPAirPortDataType" not in payload:
+        raise ValueError("AirPort profiler output did not contain SPAirPortDataType")
+
+    facts: dict[str, WirelessAttachmentFact] = {}
+    for item in _airport_interfaces(payload["SPAirPortDataType"]):
+        interface = _clean_text(item.get("_name"))
+        current = item.get("spairport_current_network_information")
+        if not interface or not isinstance(current, dict):
+            continue
+        ssid = _clean_text(current.get("_name"))
+        facts[interface] = WirelessAttachmentFact(interface, _find_bssid(current), ssid)
+    return tuple(facts[name] for name in sorted(facts))
