@@ -36,8 +36,8 @@ It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, 
 | Active validation and Nmap evidence boundary | `homenettopo/discovery.py` | `tests/test_discovery.py` | `docs/api-spec.md`, `docs/design.md` |
 | Models and deterministic serialization | `homenettopo/models.py` | `tests/test_models.py` | `docs/api-spec.md` |
 | Topology construction | `homenettopo/topology.py` | `tests/test_topology.py` | `docs/design.md` |
-| Browser state, coordination, recovery, and layout | `web/core.mjs` | `tests/frontend/core.test.mjs` | `docs/design.md` |
-| Browser fetch, DOM/SVG, interaction, focus, and export | `web/app.js`, `web/index.html`, `web/styles.css` | `tests/test_web_contract.py` | `docs/design.md` |
+| Browser state, L2 presentation expansion, tunnel lanes, camera math, and layout | `web/core.mjs` | `tests/frontend/core.test.mjs` | `docs/design.md` |
+| Browser fetch, DOM/SVG, full-surface pan, viewBox zoom/fit, focus, and export | `web/app.js`, `web/index.html`, `web/styles.css` | `tests/test_web_contract.py` | `docs/design.md` |
 | Current-user LaunchAgent deployment and rollback | `scripts/deploy.py` | `tests/test_static_security.py` | `README.md`, `AGENT.md`, `docs/design.md` |
 | Full regression and documentation enforcement | `scripts/check.py` | self-checking stages | `README.md`, `AGENT.md`, `docs/design.md` |
 
@@ -61,6 +61,14 @@ It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, 
 - Static files come from a fixed allowlist with traversal and symlink protection.
 - The browser uses one shared collection-in-flight owner and ignores stale completion actions.
 - A successful passive refresh rechecks capabilities so restored Nmap availability can recover without a page reload.
+- Non-tunnel, non-loopback interface-to-subnet evidence is expanded in the browser into an explicitly inferred `l2_segment` presentation node.
+- Devices and gateways are presented as members of that L2 broadcast domain; gateway-to-upstream route edges remain separate L3 relationships.
+- Tunnel interfaces and tunnel subnets remain visible as direct L3 paths and never receive a fabricated L2 segment.
+- Loopback remains visible as a separate system path rather than being mixed into the primary LAN lane.
+- Layout columns are host, interface, inferred L2, IPv4 subnet, then gateway/device members; upstream boundaries are placed after the rightmost member column.
+- Edges render as orthogonal SVG paths instead of long diagonal lines.
+- The canvas uses a viewBox camera, automatically fits each new snapshot, pans from nodes, edges, or blank space, and zooms around the pointer.
+- A drag suppresses the resulting click so panning does not accidentally change selection.
 - Keyboard operation, focus return, reduced motion, pan, zoom, fit, reset, selection, details, and export remain part of the interface contract.
 
 ### Local deployment
@@ -80,7 +88,7 @@ It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, 
 
 - Comments explain non-obvious contracts and rationale, not obvious syntax.
 - Critical Python models, parsers, security boundaries, orchestration functions, deployment actions, and regression stages have concise docstrings.
-- Frontend comments cover reducer ownership, stale responses, focus recovery, safe DOM/SVG construction, address-union arithmetic, and deterministic layout.
+- Frontend comments cover reducer ownership, stale responses, focus recovery, safe DOM/SVG construction, address-union arithmetic, L2 presentation inference, viewBox camera behavior, and deterministic layout.
 - `scripts/check.py` enforces documentation for critical symbols without requiring comments on trivial assignments.
 
 ## Verification definitions
