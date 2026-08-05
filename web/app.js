@@ -1,25 +1,26 @@
 /*
  * Browser adapter for HomeNetTopo.
  *
- * Pure state and layout decisions live in core.mjs.  This file owns fetch,
- * focus recovery, safe DOM/SVG construction, pointer input, and downloads.
- * User-controlled values are assigned through textContent or attributes; HTML
- * strings are never injected into the document.
+ * Pure state and layout decisions live in core.mjs. This file owns fetch,
+ * focus recovery, safe DOM/SVG construction, the viewBox camera, pointer input,
+ * and downloads. User-controlled values are assigned through textContent or
+ * attributes; HTML strings are never injected into the document.
  */
 
 import {
   UI_STATES,
   eligibleNetworks,
   exportFilename,
+  fitCamera,
   initialState,
   layoutTopology,
   mapApiError,
+  orthogonalEdgePath,
   reduceState,
   selectedAddressCount,
+  zoomCamera,
 } from "/core.mjs";
 
-// Resolve the fixed document contract once. Missing hooks should fail loudly
-// during development instead of producing alternate hidden UI ownership.
 const elements = Object.fromEntries([
   "snapshot-meta", "refresh-button", "discover-button", "export-button", "status-heading", "status-text", "discover-reason",
   "warning-list", "graph-viewport", "topology-svg", "graph-scene", "details-content", "zoom-out", "zoom-in",
@@ -28,8 +29,12 @@ const elements = Object.fromEntries([
 ].map((id) => [id, document.getElementById(id)]));
 
 let state = initialState();
-let view = { x: 24, y: 24, scale: 1 };
+let camera = null;
+let layoutBounds = null;
+let currentLayout = { nodes: [], edges: [], bounds: null };
+let renderedSnapshotKey = null;
 let drag = null;
+let suppressGraphClick = false;
 let dialogReturnFocus = null;
 
 /** Apply one reducer action, then render the resulting single source of truth. */
@@ -60,10 +65,7 @@ function focusDialogValidation(message, field) {
   elements["dialog-error"].textContent = message;
   if (field) field.setAttribute("aria-invalid", "true");
   focusElement(elements["dialog-error"]);
-  if (field) {
-    // Two frames let assistive technology announce the alert before editing.
-    requestAnimationFrame(() => requestAnimationFrame(() => field.focus({ preventScroll: true })));
-  }
+  if (field) requestAnimationFrame(() => requestAnimationFrame(() => field.focus({ preventScroll: true })));
 }
 
 /** Fetch one JSON API response and preserve the public error envelope. */
@@ -105,8 +107,6 @@ async function refreshPassive(event = null) {
   dispatch({ type: "PASSIVE_START" });
   try {
     const snapshot = await api("/api/v1/topology/refresh", collectionOptions({}));
-    // Capability recovery must finish before PASSIVE_SUCCESS releases the
-    // shared collection owner; otherwise active discovery could use stale data.
     await loadCapabilities({ reportError: false });
     dispatch({ type: "PASSIVE_SUCCESS", snapshot });
     focusStatus = state.phase === UI_STATES.EMPTY_READY;
@@ -194,10 +194,7 @@ async function runActiveDiscovery(event) {
   const networks = [...new Set(selected.map((network) => network.cidr))];
   const timeout = Number(elements["operation-timeout"].value);
   if (!networks.length) {
-    focusDialogValidation(
-      "Select at least one eligible local network.",
-      elements["network-options"].querySelector("input"),
-    );
+    focusDialogValidation("Select at least one eligible local network.", elements["network-options"].querySelector("input"));
     return;
   }
   if (!Number.isInteger(timeout) || timeout < 5 || timeout > 120) {
@@ -216,7 +213,6 @@ async function runActiveDiscovery(event) {
     const phase = mapApiError(error);
     dispatch({ type: "ERROR", phase, error, collection: "active" });
     if (phase === UI_STATES.VALIDATION_ERROR) {
-      // Reopen the same form values so server-side validation is recoverable.
       dialogReturnFocus = returnFocus;
       renderNetworkOptions(selectedKeys);
       elements["operation-timeout"].value = String(timeout);
@@ -281,52 +277,80 @@ function truncate(label, compact) {
   return label.length > limit ? `${label.slice(0, limit - 1)}…` : label;
 }
 
-/** Render accessible selectable SVG nodes and edges from pure layout output. */
+function nodeSubtitle(node) {
+  if (node.kind === "l2_segment") return "L2 broadcast domain";
+  if (node.kind === "gateway") return "router / gateway";
+  if (node.kind === "interface" && node.properties?.kind === "tunnel") return "L3 tunnel interface";
+  if (node.kind === "subnet" && node.laneType === "tunnel") return "tunnel network";
+  if (node.kind === "subnet" && node.laneType === "system") return "system network";
+  return node.kind.replaceAll("_", " ");
+}
+
+function nodeClass(node) {
+  const classes = ["node", `node-${node.kind}`, `lane-${node.laneType ?? "unknown"}`];
+  if (node.kind === "interface" && node.properties?.kind) classes.push(`interface-kind-${node.properties.kind}`);
+  if (state.selectedId === node.id) classes.push("selected");
+  return classes.join(" ");
+}
+
+/** Render accessible SVG nodes and orthogonal edges from pure layout output. */
 function renderGraph() {
   elements["graph-scene"].replaceChildren();
-  if (!state.snapshot) return;
+  if (!state.snapshot) {
+    currentLayout = { nodes: [], edges: [], bounds: null };
+    layoutBounds = null;
+    camera = null;
+    renderedSnapshotKey = null;
+    return;
+  }
   const layout = layoutTopology(state.snapshot);
+  currentLayout = layout;
+  layoutBounds = layout.bounds;
   const byId = new Map(layout.nodes.map((node) => [node.id, node]));
   for (const edge of layout.edges) {
     const source = byId.get(edge.source);
     const target = byId.get(edge.target);
     if (!source || !target) continue;
-    const line = svgElement("line", {
-      x1: source.x + source.width,
-      y1: source.y + source.height / 2,
-      x2: target.x,
-      y2: target.y + target.height / 2,
-      class: `edge ${edge.observed ? "observed" : "inferred"} ${state.selectedId === edge.id ? "selected" : ""}`,
+    const path = svgElement("path", {
+      d: orthogonalEdgePath(source, target),
+      class: `edge edge-${edge.type} ${edge.observed ? "observed" : "inferred"} ${state.selectedId === edge.id ? "selected" : ""}`,
       tabindex: "0",
       role: "button",
-      "aria-label": `${edge.type.replaceAll("_", " ")} link, ${edge.observed ? "observed" : "inferred"}, ${edge.confidence} confidence`,
+      "aria-label": `${edge.type.replaceAll("_", " ")} link, ${edge.observed ? "observed" : "inferred"}, ${edge.confidence ?? "medium"} confidence`,
       "data-id": edge.id,
+      "vector-effect": "non-scaling-stroke",
     });
-    line.addEventListener("click", () => dispatch({ type: "SELECT", id: edge.id }));
-    line.addEventListener("keydown", selectableKeyHandler);
-    elements["graph-scene"].append(line);
+    path.addEventListener("click", () => dispatch({ type: "SELECT", id: edge.id }));
+    path.addEventListener("keydown", selectableKeyHandler);
+    elements["graph-scene"].append(path);
   }
   for (const node of layout.nodes) {
     const group = svgElement("g", {
-      class: `node node-${node.kind} ${state.selectedId === node.id ? "selected" : ""}`,
+      class: nodeClass(node),
       transform: `translate(${node.x} ${node.y})`,
       tabindex: "0",
       role: "button",
-      "aria-label": `${node.kind.replaceAll("_", " ")}: ${node.label}, ${node.confidence} confidence`,
+      "aria-label": `${nodeSubtitle(node)}: ${node.label}, ${node.confidence ?? "medium"} confidence`,
       "data-id": node.id,
     });
     group.append(svgElement("rect", { width: node.width, height: node.height, rx: 10 }));
     const title = svgElement("text", { x: 12, y: 27, class: "node-title" });
     title.textContent = truncate(node.label, node.compact);
     const subtitle = svgElement("text", { x: 12, y: 51, class: "node-subtitle" });
-    subtitle.textContent = node.kind.replaceAll("_", " ");
+    subtitle.textContent = nodeSubtitle(node);
     group.append(title, subtitle);
     group.addEventListener("click", () => dispatch({ type: "SELECT", id: node.id }));
     group.addEventListener("keydown", selectableKeyHandler);
     elements["graph-scene"].append(group);
   }
-  elements["topology-svg"].setAttribute("viewBox", `${layout.bounds.x} ${layout.bounds.y} ${layout.bounds.width} ${layout.bounds.height}`);
-  applyView();
+
+  const snapshotKey = state.snapshot.snapshot_id ?? state.snapshot.collected_at;
+  if (!camera || snapshotKey !== renderedSnapshotKey) {
+    renderedSnapshotKey = snapshotKey;
+    fitView();
+  } else {
+    applyView();
+  }
 }
 
 function selectableKeyHandler(event) {
@@ -336,24 +360,35 @@ function selectableKeyHandler(event) {
   }
 }
 
-/** Rebuild the details panel from text nodes and definition-list elements. */
+function layerLabel(item) {
+  if (item.kind === "l2_segment" || ["interface_attached_to_l2", "l2_carries_subnet", "member_of_l2"].includes(item.type)) return "Layer 2";
+  if (item.kind === "interface" && item.properties?.kind === "tunnel") return "Layer 3 tunnel";
+  if (item.kind || item.type) return "Layer 3 / logical";
+  return "Unknown";
+}
+
+/** Rebuild the details panel from snapshot or presentation-only layout items. */
 function renderDetails() {
   const id = state.selectedId;
   if (!id || !state.snapshot) {
     const message = document.createElement("p");
     message.className = "muted";
-    message.textContent = "Select a node or edge to inspect evidence and confidence.";
+    message.textContent = "Select a node or edge to inspect evidence, layer, and confidence.";
     elements["details-content"].replaceChildren(message);
     return;
   }
-  const item = state.snapshot.nodes.find((node) => node.id === id) ?? state.snapshot.edges.find((edge) => edge.id === id);
+  const item = state.snapshot.nodes.find((node) => node.id === id)
+    ?? state.snapshot.edges.find((edge) => edge.id === id)
+    ?? currentLayout.nodes.find((node) => node.id === id)
+    ?? currentLayout.edges.find((edge) => edge.id === id);
   if (!item) return;
   const heading = document.createElement("h3");
   heading.textContent = item.label ?? item.type.replaceAll("_", " ");
   const dl = document.createElement("dl");
   const rows = [
     ["Identifier", item.id],
-    ["Confidence", item.confidence],
+    ["Layer", layerLabel(item)],
+    ["Confidence", item.confidence ?? "medium"],
     ["Relationship", item.observed === undefined ? "Node" : item.observed ? "Observed" : "Inferred"],
     ["Addresses", (item.addresses ?? []).join(", ") || "None"],
     ["MAC addresses", (item.mac_addresses ?? []).join(", ") || "None"],
@@ -388,8 +423,6 @@ function render() {
   elements["snapshot-meta"].textContent = snapshot ? `${snapshot.mode} · ${new Date(snapshot.collected_at).toLocaleString()}` : "No snapshot loaded.";
   elements["export-button"].disabled = !snapshot;
   if (collectionBusy) {
-    // aria-disabled keeps the refresh trigger focusable while the reducer guard
-    // prevents a duplicate request.
     elements["refresh-button"].setAttribute("aria-disabled", "true");
     elements["refresh-button"].setAttribute("aria-busy", "true");
   } else {
@@ -410,24 +443,32 @@ function render() {
   renderDetails();
 }
 
+/** Apply the camera rectangle directly to the SVG viewBox. */
 function applyView() {
-  elements["graph-scene"].setAttribute("transform", `translate(${view.x} ${view.y}) scale(${view.scale})`);
+  if (!camera) return;
+  elements["topology-svg"].setAttribute("viewBox", `${camera.x} ${camera.y} ${camera.width} ${camera.height}`);
 }
 
-/** Apply bounded pointer-centered zoom in SVG world coordinates. */
-function changeZoom(factor, origin = null) {
-  const oldScale = view.scale;
-  const newScale = Math.min(4, Math.max(0.2, oldScale * factor));
-  if (origin) {
-    view.x = origin.x - ((origin.x - view.x) / oldScale) * newScale;
-    view.y = origin.y - ((origin.y - view.y) / oldScale) * newScale;
-  }
-  view.scale = newScale;
+/** Fit all layout content into the current viewport. */
+function fitView() {
+  if (!layoutBounds) return;
+  const rect = elements["graph-viewport"].getBoundingClientRect();
+  camera = fitCamera(layoutBounds, rect.width, rect.height, 24);
   applyView();
 }
 
-function fitView() {
-  view = { x: 0, y: 0, scale: 1 };
+/** Apply bounded pointer-centered zoom in world coordinates. */
+function changeZoom(factor, clientOrigin = null) {
+  if (!camera) return;
+  const rect = elements["topology-svg"].getBoundingClientRect();
+  const clientX = clientOrigin?.x ?? rect.left + rect.width / 2;
+  const clientY = clientOrigin?.y ?? rect.top + rect.height / 2;
+  const ratioX = rect.width ? (clientX - rect.left) / rect.width : 0.5;
+  const ratioY = rect.height ? (clientY - rect.top) / rect.height : 0.5;
+  const worldX = camera.x + ratioX * camera.width;
+  const worldY = camera.y + ratioY * camera.height;
+  const maxWidth = Math.max(20000, (layoutBounds?.width ?? camera.width) * 8);
+  camera = zoomCamera(camera, factor, worldX, worldY, 220, maxWidth);
   applyView();
 }
 
@@ -453,8 +494,6 @@ async function exportSnapshot() {
   }
 }
 
-// Event wiring remains at the module edge; all resulting state changes still
-// pass through dispatch/reduceState.
 elements["refresh-button"].addEventListener("click", refreshPassive);
 elements["discover-button"].addEventListener("click", openDiscoverDialog);
 elements["export-button"].addEventListener("click", exportSnapshot);
@@ -462,28 +501,64 @@ elements["discover-form"].addEventListener("submit", runActiveDiscovery);
 elements["dialog-close"].addEventListener("click", () => closeDiscoverDialog());
 elements["dialog-cancel"].addEventListener("click", () => closeDiscoverDialog());
 elements["discover-dialog"].addEventListener("cancel", (event) => { event.preventDefault(); closeDiscoverDialog(); });
-elements["zoom-in"].addEventListener("click", () => changeZoom(1.2));
-elements["zoom-out"].addEventListener("click", () => changeZoom(1 / 1.2));
+elements["zoom-in"].addEventListener("click", () => changeZoom(1.25));
+elements["zoom-out"].addEventListener("click", () => changeZoom(1 / 1.25));
 elements["fit-view"].addEventListener("click", fitView);
-elements["reset-view"].addEventListener("click", () => { view = { x: 24, y: 24, scale: 1 }; applyView(); });
+elements["reset-view"].addEventListener("click", fitView);
 
 elements["graph-viewport"].addEventListener("wheel", (event) => {
   event.preventDefault();
-  const rect = elements["graph-viewport"].getBoundingClientRect();
-  changeZoom(event.deltaY < 0 ? 1.1 : 1 / 1.1, { x: event.clientX - rect.left, y: event.clientY - rect.top });
+  changeZoom(event.deltaY < 0 ? 1.12 : 1 / 1.12, { x: event.clientX, y: event.clientY });
 }, { passive: false });
+
+// Panning starts anywhere in the canvas, including on nodes and edges. A small
+// movement threshold distinguishes a click-to-select from a drag-to-pan.
 elements["graph-viewport"].addEventListener("pointerdown", (event) => {
-  if (event.target.closest(".node, .edge")) return;
-  drag = { x: event.clientX, y: event.clientY, viewX: view.x, viewY: view.y };
+  if (event.button !== 0 || !camera) return;
+  drag = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    camera: { ...camera },
+    moved: false,
+  };
+  elements["graph-viewport"].classList.add("is-panning");
   elements["graph-viewport"].setPointerCapture(event.pointerId);
 });
+
 elements["graph-viewport"].addEventListener("pointermove", (event) => {
-  if (!drag) return;
-  view.x = drag.viewX + event.clientX - drag.x;
-  view.y = drag.viewY + event.clientY - drag.y;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  const rect = elements["graph-viewport"].getBoundingClientRect();
+  const deltaX = event.clientX - drag.x;
+  const deltaY = event.clientY - drag.y;
+  if (Math.hypot(deltaX, deltaY) > 3) drag.moved = true;
+  camera = {
+    ...drag.camera,
+    x: drag.camera.x - deltaX * (drag.camera.width / Math.max(1, rect.width)),
+    y: drag.camera.y - deltaY * (drag.camera.height / Math.max(1, rect.height)),
+  };
   applyView();
 });
-elements["graph-viewport"].addEventListener("pointerup", () => { drag = null; });
+
+function endPan(event) {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  suppressGraphClick = drag.moved;
+  if (suppressGraphClick) setTimeout(() => { suppressGraphClick = false; }, 0);
+  if (elements["graph-viewport"].hasPointerCapture(event.pointerId)) elements["graph-viewport"].releasePointerCapture(event.pointerId);
+  drag = null;
+  elements["graph-viewport"].classList.remove("is-panning");
+}
+
+elements["graph-viewport"].addEventListener("pointerup", endPan);
+elements["graph-viewport"].addEventListener("pointercancel", endPan);
+elements["graph-viewport"].addEventListener("click", (event) => {
+  if (!suppressGraphClick) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  suppressGraphClick = false;
+}, true);
+
+window.addEventListener("resize", () => requestAnimationFrame(fitView));
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !elements["discover-dialog"].open) dispatch({ type: "CLEAR_SELECTION" });
@@ -495,7 +570,5 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-// Startup performs passive collection only. Nmap still requires a later,
-// explicit dialog confirmation.
 await loadCapabilities();
 await refreshPassive();
