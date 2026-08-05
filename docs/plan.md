@@ -15,38 +15,52 @@ This document records implementation ownership. It is not runtime evidence, an a
 
 The first release is a local macOS topology viewer with a Python 3.10+ loopback service, approved passive evidence, optional bounded Nmap host discovery, a local browser interface, JSON export, in-memory snapshots, and a current-user LaunchAgent deployment path.
 
-It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, active IPv6, port/service/OS scanning, containers, cloud deployment, and system-wide installation.
+The principal graph must distinguish the evidence-backed path toward a gateway from devices that merely share an IPv4 subnet. Wi-Fi association may identify the directly associated AP radio through BSSID. Transparent Ethernet switches are not named without LLDP or managed-topology evidence. Unknown intermediate Layer-2 transit remains explicitly unknown. Tunnel paths remain visible as Layer 3.
+
+It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, active IPv6, port/service/OS scanning, packet capture, guaranteed switch enumeration, containers, cloud deployment, and system-wide installation.
 
 ## Artifact policy
 
 - Short single-use test inputs remain inline in their owning tests.
 - No fixtures, samples, demos, reports, or generated-data directory is required.
-- Local runtime data, deployment logs, topology exports, packet captures, and scan output do not enter source control.
+- Local runtime data, SSIDs, BSSIDs, deployment logs, topology exports, packet captures, and scan output do not enter source control.
 - `scripts/deploy.py` is the only deployment script. It does not authorize a package manager, container manifest, system installer, or parallel deployment directory.
 
 ## Current owners
 
 | Concern | Production owner | Test owner | Documentation owner |
 |---|---|---|---|
-| Service, request security, collection lock, active orchestration, snapshot publication | `server.py` | `tests/test_server.py`, `tests/test_static_security.py` | `docs/api-spec.md`, `README.md` |
-| Approved commands, Nmap resolution, bounded execution | `homenettopo/commands.py` | `tests/test_commands.py` | `docs/design.md` |
-| Interface parsing | `homenettopo/interfaces.py` | `tests/test_interfaces.py` | `docs/design.md` |
+| Service, request security, collection lock, passive-source degradation, active orchestration, snapshot publication | `server.py` | `tests/test_server.py`, `tests/test_static_security.py` | `docs/api-spec.md`, `README.md` |
+| Approved interface, route, ARP, Wi-Fi profiler, and Nmap commands; bounded execution | `homenettopo/commands.py` | `tests/test_commands.py` | `AGENT.md`, `docs/design.md` |
+| Interface and current Wi-Fi-association parsing | `homenettopo/interfaces.py` | `tests/test_interfaces.py` | `docs/design.md` |
 | Route parsing | `homenettopo/routes.py` | `tests/test_routes.py` | `docs/design.md` |
 | Neighbor parsing | `homenettopo/neighbors.py` | `tests/test_neighbors.py` | `docs/design.md` |
 | Active validation and Nmap evidence boundary | `homenettopo/discovery.py` | `tests/test_discovery.py` | `docs/api-spec.md`, `docs/design.md` |
-| Models and deterministic serialization | `homenettopo/models.py` | `tests/test_models.py` | `docs/api-spec.md` |
-| Topology construction | `homenettopo/topology.py` | `tests/test_topology.py` | `docs/design.md` |
-| Browser state, L2 presentation expansion, tunnel lanes, camera math, and layout | `web/core.mjs` | `tests/frontend/core.test.mjs` | `docs/design.md` |
-| Browser fetch, DOM/SVG, full-surface pan, viewBox zoom/fit, focus, and export | `web/app.js`, `web/index.html`, `web/styles.css` | `tests/test_web_contract.py` | `docs/design.md` |
+| Models, path node/edge enums, deterministic serialization | `homenettopo/models.py` | `tests/test_models.py` | `docs/api-spec.md` |
+| Gateway-path construction, peer membership, identity correlation | `homenettopo/topology.py` | `tests/test_topology.py` | `docs/design.md` |
+| Browser state, path/peer layout, camera math | `web/core.mjs` | `tests/frontend/core.test.mjs` | `docs/design.md` |
+| Browser fetch, capability status, DOM/SVG, full-surface pan, viewBox zoom/fit, focus, export | `web/app.js`, `web/index.html`, `web/styles.css` | `tests/test_web_contract.py` | `docs/design.md` |
 | Current-user LaunchAgent deployment and rollback | `scripts/deploy.py` | `tests/test_static_security.py` | `README.md`, `AGENT.md`, `docs/design.md` |
 | Full regression and documentation enforcement | `scripts/check.py` | self-checking stages | `README.md`, `AGENT.md`, `docs/design.md` |
 
 ## Required contracts
 
+### Passive evidence and path inference
+
+- Fixed passive commands collect interface, route, ARP, and best-effort current Wi-Fi association evidence.
+- Wi-Fi profiling uses `/usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType` under the bounded process runner.
+- The Wi-Fi parser keeps only current association data. Nearby-network entries are ignored.
+- Canonical BSSID identifies an associated AP radio. A missing or redacted BSSID creates an unidentified AP attachment; it is never guessed.
+- ARP maps an IP neighbor to a link-layer address but does not enumerate transparent switches.
+- Ordinary route information does not expose Layer-2 forwarding devices.
+- Without LLDP or managed-topology evidence, a non-Wi-Fi intermediate path is represented by `link_boundary` with low-confidence `link_path_inference` evidence.
+- Exact AP BSSID and gateway ARP MAC equality may mark `same_mac`. Different MACs remain `unknown`; they do not prove different physical appliances.
+- Devices connected by `member_of` are LAN peers, not transit hops.
+- Wi-Fi source failure is nonfatal when interface, route, or ARP evidence still forms a coherent snapshot. The snapshot is partial and retains a warning.
+
 ### Collection and active discovery
 
 - Read-only GET routes never start commands.
-- Passive refresh uses only approved commands and may publish a coherent partial snapshot.
 - Active discovery validates request safety before commands, then validates fresh local containment before Nmap.
 - Every target is assigned to its most-specific containing local network.
 - Exact duplicates and contained targets may be removed only inside the same owner group; adjacent sibling targets remain separate.
@@ -61,14 +75,14 @@ It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, 
 - Static files come from a fixed allowlist with traversal and symlink protection.
 - The browser uses one shared collection-in-flight owner and ignores stale completion actions.
 - A successful passive refresh rechecks capabilities so restored Nmap availability can recover without a page reload.
-- Non-tunnel, non-loopback interface-to-subnet evidence is expanded in the browser into an explicitly inferred `l2_segment` presentation node.
-- Devices and gateways are presented as members of that L2 broadcast domain; gateway-to-upstream route edges remain separate L3 relationships.
-- Tunnel interfaces and tunnel subnets remain visible as direct L3 paths and never receive a fabricated L2 segment.
-- Loopback remains visible as a separate system path rather than being mixed into the primary LAN lane.
-- Layout columns are host, interface, inferred L2, IPv4 subnet, then gateway/device members; upstream boundaries are placed after the rightmost member column.
-- Edges render as orthogonal SVG paths instead of long diagonal lines.
-- The canvas uses a viewBox camera, automatically fits each new snapshot, pans from nodes, edges, or blank space, and zooms around the pointer.
+- The main path is `local_host → interface → access_point|link_boundary → gateway → upstream_boundary` when those nodes are supported by evidence.
+- A tunnel may use `interface → gateway` directly and is never hidden or assigned a fabricated Layer-2 attachment.
+- Subnets and peer devices are rendered in context groups below the path. Membership relationships are not rendered as transit lines.
+- Only path relationships are drawn: `host_uses_interface`, `interface_associated_with`, `interface_reaches_link`, `attachment_reaches_gateway`, `interface_reaches_gateway`, `upstream_of`, and `routes_to`.
+- Edges render as orthogonal SVG paths.
+- The canvas uses a viewBox camera, automatically fits each new snapshot, pans from nodes, edges, groups, or blank space, and zooms around the pointer.
 - A drag suppresses the resulting click so panning does not accidentally change selection.
+- Active discovery has a visible Nmap state. Unavailable Nmap exposes `Check Nmap setup`; it is not an unexplained disabled placeholder.
 - Keyboard operation, focus return, reduced motion, pan, zoom, fit, reset, selection, details, and export remain part of the interface contract.
 
 ### Local deployment
@@ -88,7 +102,7 @@ It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, 
 
 - Comments explain non-obvious contracts and rationale, not obvious syntax.
 - Critical Python models, parsers, security boundaries, orchestration functions, deployment actions, and regression stages have concise docstrings.
-- Frontend comments cover reducer ownership, stale responses, focus recovery, safe DOM/SVG construction, address-union arithmetic, L2 presentation inference, viewBox camera behavior, and deterministic layout.
+- Frontend comments cover reducer ownership, stale responses, capability recovery, safe DOM/SVG construction, address-union arithmetic, evidence-backed path layout, peer grouping, and viewBox camera behavior.
 - `scripts/check.py` enforces documentation for critical symbols without requiring comments on trivial assignments.
 
 ## Verification definitions
@@ -105,6 +119,6 @@ A passing or failing status requires executed evidence tied to the exact revisio
 
 ## Acceptance boundary
 
-Formal implementation acceptance must independently recheck the exact revision, repository delta, artifact necessity, source and documentation consistency, test execution, current-user LaunchAgent install/update/status/restart/uninstall and rollback, browser interaction, supported-macOS startup, and real command boundaries.
+Formal implementation acceptance must independently recheck the exact revision, repository delta, artifact necessity, source and documentation consistency, test execution, current-user LaunchAgent install/update/status/restart/uninstall and rollback, browser interaction, supported-macOS startup, real Wi-Fi association output including redaction behavior, and real command boundaries.
 
 The implementation and deployment remain unverified until the independent acceptance workflow produces a verdict from current evidence.
