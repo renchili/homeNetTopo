@@ -87,7 +87,7 @@ def documentation_guards() -> None:
         ),
         "homenettopo/commands.py": (
             "<module>", "CommandError", "CommandKind", "CommandSpec", "CommandResult",
-            "NmapResolution", "wifi_spec", "resolve_nmap", "nmap_spec", "run_command",
+            "NmapResolution", "wifi_interfaces_spec", "wifi_spec", "resolve_nmap", "nmap_spec", "run_command",
         ),
         "homenettopo/discovery.py": (
             "<module>", "ValidationError", "DiscoveryRequest", "ActiveHost", "validate_phase_a",
@@ -95,7 +95,7 @@ def documentation_guards() -> None:
         ),
         "homenettopo/interfaces.py": (
             "<module>", "InterfaceAddress", "InterfaceFact", "WirelessAttachmentFact",
-            "parse_ifconfig", "parse_airport_json",
+            "parse_ifconfig", "parse_wifi_hardware_ports", "merge_wireless_facts", "parse_airport_json",
         ),
         "homenettopo/routes.py": ("<module>", "RouteFact", "parse_routes"),
         "homenettopo/neighbors.py": ("<module>", "NeighborFact", "parse_neighbors"),
@@ -156,7 +156,9 @@ def consistency_guards() -> None:
         InterfaceAddress,
         InterfaceFact,
         WirelessAttachmentFact,
+        merge_wireless_facts,
         parse_airport_json,
+        parse_wifi_hardware_ports,
     )
     from homenettopo.models import SourceStatus, SourceStatusValue
     from homenettopo.topology import build_snapshot
@@ -175,6 +177,7 @@ def consistency_guards() -> None:
         "timeout maximum": (active["operation_timeout_max_seconds"], discovery.MAX_OPERATION_TIMEOUT),
         "host timeout": (active["nmap_host_timeout_seconds"], commands.NMAP_HOST_TIMEOUT_SECONDS),
         "passive timeout": (limits["passive_timeout_seconds"], commands.PASSIVE_TIMEOUT_SECONDS),
+        "wifi interface timeout": (limits["wifi_interface_timeout_seconds"], commands.WIFI_INTERFACES_TIMEOUT_SECONDS),
         "wifi timeout": (limits["wifi_timeout_seconds"], commands.WIFI_TIMEOUT_SECONDS),
         "stdout limit": (limits["stdout_bytes"], commands.STDOUT_LIMIT),
         "stderr limit": (limits["stderr_bytes"], commands.STDERR_LIMIT),
@@ -188,9 +191,23 @@ def consistency_guards() -> None:
     if "RFC 1918" not in metadata["network_scope"]:
         raise RuntimeError("metadata network scope must explicitly identify RFC 1918")
 
+    expected_wifi_interfaces = ("/usr/sbin/networksetup", "-listallhardwareports")
     expected_wifi = ("/usr/sbin/system_profiler", "-json", "-timeout", "5", "SPAirPortDataType")
-    if commands.wifi_spec().argv != expected_wifi or metadata["passive_evidence"]["wifi_command"] != " ".join(expected_wifi):
-        raise RuntimeError("Wi-Fi command contract differs across source and metadata")
+    passive = metadata["passive_evidence"]
+    if commands.wifi_interfaces_spec().argv != expected_wifi_interfaces or passive["wifi_interface_command"] != " ".join(expected_wifi_interfaces):
+        raise RuntimeError("Wi-Fi interface command contract differs across source and metadata")
+    if commands.wifi_spec().argv != expected_wifi or passive["wifi_detail_command"] != " ".join(expected_wifi):
+        raise RuntimeError("Wi-Fi detail command contract differs across source and metadata")
+    if not passive.get("commands_run_concurrently") or not passive.get("wifi_detail_failure_is_optional"):
+        raise RuntimeError("metadata does not preserve concurrent optional Wi-Fi detail semantics")
+
+    synthetic_ports = (
+        "Hardware Port: Ethernet\nDevice: en5\nEthernet Address: 02:00:00:00:00:05\n\n"
+        "Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: 02:00:00:00:00:01\n"
+    )
+    media_facts = parse_wifi_hardware_ports(synthetic_ports)
+    if len(media_facts) != 1 or media_facts[0].interface != "en0" or media_facts[0].associated:
+        raise RuntimeError("fast Wi-Fi hardware-port evidence is not parsed canonically")
     synthetic_airport = json.dumps({
         "SPAirPortDataType": [{"spairport_airport_interfaces": [{
             "_name": "en0",
@@ -207,6 +224,9 @@ def consistency_guards() -> None:
     wifi_facts = parse_airport_json(synthetic_airport)
     if len(wifi_facts) != 1 or wifi_facts[0].bssid != "02:aa:bb:cc:dd:01":
         raise RuntimeError("current Wi-Fi BSSID evidence is not parsed canonically")
+    merged_wifi = merge_wireless_facts(media_facts, wifi_facts)
+    if merged_wifi != wifi_facts:
+        raise RuntimeError("Wi-Fi detail evidence does not deterministically enrich media fallback")
 
     interface = InterfaceFact("en0", ("UP",), "physical", (InterfaceAddress("192.168.1.10", 24, "192.168.1.0/24"),))
     route = routes.RouteFact("0.0.0.0/0", "192.168.1.1", ("U", "G"), "en0", True)
@@ -230,6 +250,21 @@ def consistency_guards() -> None:
         raise RuntimeError("Wi-Fi AP-to-gateway path is not connected")
     if "l2_segment" in wifi_kinds or "member_of_l2" in wifi_edges:
         raise RuntimeError("fabricated presentation L2 topology reappeared")
+
+    media_snapshot = build_snapshot(
+        interfaces=(interface,),
+        routes=(route,),
+        neighbors=(),
+        wireless_attachments=media_facts,
+        sources=(*base_sources[:-1], SourceStatus("wifi_interfaces", SourceStatusValue.OK)),
+        collected_at="2026-08-03T00:00:00Z",
+    )
+    media_ap = next((node for node in media_snapshot.nodes if node.kind.value == "access_point"), None)
+    media_edge = next((edge for edge in media_snapshot.edges if edge.type.value == "interface_associated_with"), None)
+    if media_ap is None or media_edge is None or media_edge.observed or media_ap.properties.get("identity_source") != "wifi_interface_and_default_route":
+        raise RuntimeError("Wi-Fi media fallback is not represented as an inferred unidentified AP")
+    if any(node.kind.value == "link_boundary" for node in media_snapshot.nodes):
+        raise RuntimeError("Wi-Fi media fallback regressed to unknown Ethernet transit")
 
     unknown_snapshot = build_snapshot(
         interfaces=(interface,),
@@ -323,20 +358,31 @@ def consistency_guards() -> None:
         for phrase in ("rfc 1918", "adjacent sibling targets", "collection_failed"):
             if phrase not in lowered:
                 raise RuntimeError(f"active-discovery contract mismatch in {owner}: missing {phrase}")
+    for owner in ("agent", "api", "design", "plan", "readme"):
+        lowered = texts[owner].lower()
+        for phrase in ("networksetup", "concurrent", "timeout_sources"):
+            if phrase not in lowered:
+                raise RuntimeError(f"passive-evidence contract mismatch in {owner}: missing {phrase}")
 
     for marker in (
+        "ThreadPoolExecutor",
         "wireless_attachments",
+        "wifi_interfaces_spec()",
         "wifi_spec()",
+        "merge_wireless_facts",
         "validate_active_hosts",
         "interface_failure",
+        '"wifi_interface_source": "networksetup"',
         '"wifi_bssid_source": "system_profiler"',
+        '"timeout_sources"',
+        "font-src 'self' data:",
     ):
         if marker not in texts["server"]:
             raise RuntimeError(f"server orchestration contract missing: {marker}")
     for marker in ("ACCESS_POINT", "LINK_BOUNDARY", "INTERFACE_ASSOCIATED_WITH", "ATTACHMENT_REACHES_GATEWAY"):
         if marker not in texts["models"]:
             raise RuntimeError(f"path schema marker missing: {marker}")
-    for marker in ("WirelessAttachmentFact", "physical_identity_with_gateway", "link_path_inference", "Intermediate L2 path unknown"):
+    for marker in ("WirelessAttachmentFact", "physical_identity_with_gateway", "wifi_interface_and_default_route", "link_path_inference", "Intermediate L2 path unknown"):
         if marker not in texts["topology"]:
             raise RuntimeError(f"path construction marker missing: {marker}")
     for prohibited in ("l2_segment", "member_of_l2"):
@@ -351,12 +397,17 @@ def consistency_guards() -> None:
             raise RuntimeError(f"active-capability UI contract missing: {marker}")
 
     test_contracts = {
-        "tests/test_commands.py": ("wifi_spec", "test_passive_commands_are_absolute_and_typed"),
-        "tests/test_interfaces.py": ("test_airport_parser_keeps_only_current_association", "test_airport_parser_preserves_redacted_association_without_guessing"),
+        "tests/test_commands.py": ("wifi_interfaces_spec", "test_passive_commands_are_absolute_and_typed"),
+        "tests/test_interfaces.py": (
+            "test_wifi_hardware_ports_identify_only_wifi_bsd_interfaces",
+            "test_media_fallback_survives_profiler_failure_and_details_win_when_available",
+            "test_airport_parser_preserves_redacted_association_without_guessing",
+        ),
         "tests/test_models.py": ("test_serializes_access_attachment_nodes_and_edges",),
         "tests/test_topology.py": (
             "test_wifi_bssid_creates_observed_ap_then_inferred_gateway_path",
             "test_redacted_wifi_identity_is_visible_without_guessing",
+            "test_wifi_media_only_evidence_does_not_fall_back_to_unknown_l2_transit",
             "test_tunnel_default_route_skips_l2_attachment_nodes",
             "test_builds_expected_kinds_and_keeps_peers_out_of_gateway_path",
         ),
@@ -368,7 +419,9 @@ def consistency_guards() -> None:
         "tests/test_server.py": (
             "test_capabilities_explain_link_path_sources",
             "test_real_active_discover_preserves_phase_b_effective_targets_order_and_wifi",
-            "test_malformed_interface_and_wifi_output_can_produce_coherent_partial_routes",
+            "test_malformed_interface_and_wifi_detail_can_produce_coherent_partial_routes",
+            "test_wifi_detail_timeout_degrades_without_failing_passive_collection",
+            "test_material_timeouts_return_source_specific_504_details",
             "test_real_active_discover_rejects_untrusted_nmap_evidence_and_preserves_snapshot",
         ),
         "tests/test_web_contract.py": (
@@ -423,10 +476,13 @@ def asset_guards() -> None:
     app = (ROOT / "web/app.js").read_text(encoding="utf-8")
     core = (ROOT / "web/core.mjs").read_text(encoding="utf-8")
     css = (ROOT / "web/styles.css").read_text(encoding="utf-8")
+    server = (ROOT / "server.py").read_text(encoding="utf-8")
     if re.search(r"<script(?![^>]+src=)[^>]*>", html, re.IGNORECASE):
         raise RuntimeError("inline script violates CSP")
     if re.search(r"<style[^>]*>", html, re.IGNORECASE):
         raise RuntimeError("inline style violates CSP")
+    if "font-src 'self' data:" not in server or "https:" in server.split("Content-Security-Policy", 1)[1].split(")", 1)[0]:
+        raise RuntimeError("font CSP must allow local/data fonts without external origins")
     if "innerHTML" in app or "insertAdjacentHTML" in app:
         raise RuntimeError("HTML string sink is not allowed")
     if 'id="status-heading" tabindex="-1"' not in html:
