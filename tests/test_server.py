@@ -6,7 +6,7 @@ import threading
 import unittest
 from unittest import mock
 
-from homenettopo.commands import CommandError, CommandResult
+from homenettopo.commands import CommandError, CommandKind, CommandResult
 from homenettopo.discovery import ValidationError, validate_phase_a
 from homenettopo.interfaces import InterfaceAddress, InterfaceFact, WirelessAttachmentFact
 from homenettopo.models import ActiveDiscoveryMetadata, SourceStatus, SourceStatusValue, TopologySnapshot
@@ -36,6 +36,7 @@ def passive_parts(*interfaces: InterfaceFact, failures=(), wireless_attachments=
             SourceStatus("interfaces", SourceStatusValue.OK),
             SourceStatus("routes", SourceStatusValue.OK),
             SourceStatus("neighbors", SourceStatusValue.OK),
+            SourceStatus("wifi_interfaces", SourceStatusValue.OK),
             SourceStatus("wifi", SourceStatusValue.OK),
         ),
         warnings=(),
@@ -53,6 +54,7 @@ def failed_interface_parts(code: str) -> PassiveParts:
             SourceStatus("interfaces", SourceStatusValue.FAILED, "Interface evidence failed."),
             SourceStatus("routes", SourceStatusValue.OK),
             SourceStatus("neighbors", SourceStatusValue.OK),
+            SourceStatus("wifi_interfaces", SourceStatusValue.OK),
             SourceStatus("wifi", SourceStatusValue.OK),
         ),
         warnings=(),
@@ -63,6 +65,10 @@ def failed_interface_parts(code: str) -> PassiveParts:
 def nmap_xml(address: str, mac: str | None = None) -> str:
     mac_element = f'<address addr="{mac}" addrtype="mac"/>' if mac else ""
     return f'<nmaprun><host><status state="up"/><address addr="{address}" addrtype="ipv4"/>{mac_element}</host></nmaprun>'
+
+
+def hardware_ports(interface: str = "en0") -> str:
+    return f"Hardware Port: Wi-Fi\nDevice: {interface}\nEthernet Address: 02:00:00:00:00:01\n"
 
 
 class RunningServer:
@@ -137,6 +143,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertFalse(payload["passive_collection"])
             self.assertEqual(payload["active_discovery"]["unavailable_reason"], "unsupported_platform")
+            self.assertEqual(payload["link_path"]["wifi_interface_source"], "networksetup")
             self.assertEqual(payload["link_path"]["wifi_bssid_source"], "system_profiler")
             self.assertIn("lldp", payload["link_path"]["ethernet_adjacent_device_source"])
             resolver.assert_not_called()
@@ -332,31 +339,87 @@ class ServerTests(unittest.TestCase):
     def test_empty_successful_command_outputs_are_not_coherent(self):
         state = AppState(port=8765, nmap_path=None)
         empty = CommandResult("", "", 0, 1)
+
+        def run(spec):
+            if spec.kind is CommandKind.WIFI_INTERFACES:
+                return CommandResult(hardware_ports(), "", 0, 1)
+            if spec.kind is CommandKind.WIFI:
+                return CommandResult('{"SPAirPortDataType": []}', "", 0, 1)
+            return empty
+
         with (
             mock.patch("server.platform.system", return_value="Darwin"),
-            mock.patch("server.run_command", side_effect=[empty, empty, empty, CommandResult('{"SPAirPortDataType": []}', "", 0, 1)]),
+            mock.patch("server.run_command", side_effect=run),
             self.assertRaises(ApiError) as raised,
         ):
             state.collect_passive_parts()
         self.assertEqual(raised.exception.code, "collection_failed")
+        self.assertEqual(raised.exception.details["timeout_sources"], [])
 
-    def test_malformed_interface_and_wifi_output_can_produce_coherent_partial_routes(self):
+    def test_malformed_interface_and_wifi_detail_can_produce_coherent_partial_routes(self):
         state = AppState(port=8765, nmap_path=None)
-        outputs = (
-            CommandResult("not ifconfig output\n", "", 0, 1),
-            CommandResult("Routing tables\n\nInternet:\nDestination Gateway Flags Netif Expire\ndefault 192.0.2.1 UGScg en0\n", "", 0, 1),
-            CommandResult("", "", 0, 1),
-            CommandResult("not json", "", 0, 1),
-        )
-        with mock.patch("server.platform.system", return_value="Darwin"), mock.patch("server.run_command", side_effect=outputs):
+
+        def run(spec):
+            outputs = {
+                CommandKind.INTERFACES: "not ifconfig output\n",
+                CommandKind.ROUTES: "Routing tables\n\nInternet:\nDestination Gateway Flags Netif Expire\ndefault 192.0.2.1 UGScg en0\n",
+                CommandKind.NEIGHBORS: "",
+                CommandKind.WIFI_INTERFACES: hardware_ports(),
+                CommandKind.WIFI: "not json",
+            }
+            return CommandResult(outputs[spec.kind], "", 0, 1)
+
+        with mock.patch("server.platform.system", return_value="Darwin"), mock.patch("server.run_command", side_effect=run):
             parts = state.collect_passive_parts()
         self.assertEqual(len(parts.routes), 1)
+        self.assertEqual(parts.wireless_attachments[0].interface, "en0")
         statuses = {source.type: source.status.value for source in parts.sources}
         self.assertEqual(statuses["interfaces"], "failed")
         self.assertEqual(statuses["routes"], "ok")
+        self.assertEqual(statuses["wifi_interfaces"], "ok")
         self.assertEqual(statuses["wifi"], "failed")
         self.assertEqual(dict(parts.failures)["interfaces"], "collection_failed")
         self.assertEqual(dict(parts.failures)["wifi"], "collection_failed")
+
+    def test_wifi_detail_timeout_degrades_without_failing_passive_collection(self):
+        state = AppState(port=8765, nmap_path=None)
+
+        def run(spec):
+            if spec.kind is CommandKind.INTERFACES:
+                return CommandResult("en0: flags=8863<UP,RUNNING> mtu 1500\n    inet 192.168.1.10 netmask 0xffffff00\n", "", 0, 1)
+            if spec.kind is CommandKind.ROUTES:
+                return CommandResult("Routing tables\n\nInternet:\nDestination Gateway Flags Netif\ndefault 192.168.1.1 UGScg en0\n", "", 0, 1)
+            if spec.kind is CommandKind.NEIGHBORS:
+                return CommandResult("", "", 0, 1)
+            if spec.kind is CommandKind.WIFI_INTERFACES:
+                return CommandResult(hardware_ports(), "", 0, 1)
+            raise CommandError("command_timeout", "Synthetic profiler timeout.")
+
+        with mock.patch("server.platform.system", return_value="Darwin"), mock.patch("server.run_command", side_effect=run):
+            parts = state.collect_passive_parts()
+        self.assertEqual(parts.wireless_attachments[0].interface, "en0")
+        self.assertFalse(parts.wireless_attachments[0].associated)
+        self.assertEqual(dict(parts.failures)["wifi"], "command_timeout")
+
+    def test_material_timeouts_return_source_specific_504_details(self):
+        state = AppState(port=8765, nmap_path=None)
+
+        def run(spec):
+            if spec.kind in {CommandKind.INTERFACES, CommandKind.ROUTES, CommandKind.NEIGHBORS}:
+                raise CommandError("command_timeout", "Synthetic timeout.")
+            if spec.kind is CommandKind.WIFI_INTERFACES:
+                return CommandResult(hardware_ports(), "", 0, 1)
+            return CommandResult('{"SPAirPortDataType": []}', "", 0, 1)
+
+        with (
+            mock.patch("server.platform.system", return_value="Darwin"),
+            mock.patch("server.run_command", side_effect=run),
+            self.assertRaises(ApiError) as raised,
+        ):
+            state.collect_passive_parts()
+        self.assertEqual((raised.exception.status, raised.exception.code), (504, "command_timeout"))
+        self.assertEqual(raised.exception.details["timeout_sources"], ["interfaces", "neighbors", "routes"])
+        self.assertIn("interfaces", str(raised.exception))
 
 
 if __name__ == "__main__":
