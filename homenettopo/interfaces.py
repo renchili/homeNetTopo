@@ -2,9 +2,8 @@
 
 ``ifconfig`` owns IPv4 assignments used for routing and active-target safety.
 ``system_profiler SPAirPortDataType -json`` is a separate, best-effort source
-for the currently associated Wi-Fi access point. A missing or redacted BSSID is
-preserved as an unidentified association; it is never replaced with a guessed
-router, switch, or access-point identity.
+for Wi-Fi media and the current access point. A missing, redacted, or differently
+shaped current-network object must not make a Wi-Fi interface look like Ethernet.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 _MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
-_REDACTED = {"", "<redacted>", "redacted", "(null)", "null", "none"}
+_REDACTED = {"", "<redacted>", "redacted", "<hidden>", "hidden", "(null)", "null", "none"}
 
 
 @dataclass(frozen=True)
@@ -41,16 +40,19 @@ class InterfaceFact:
 
 @dataclass(frozen=True)
 class WirelessAttachmentFact:
-    """Current Wi-Fi association for one BSD interface.
+    """Wi-Fi media and optional current-association evidence for one interface.
 
     ``bssid`` identifies the directly associated AP radio when macOS exposes it.
-    It does not prove that the AP and IPv4 gateway are the same physical box.
-    ``ssid`` is optional runtime-only context and may be absent or redacted.
+    ``associated`` distinguishes an observed current-network object from the
+    weaker case where System Information only confirms that the BSD interface is
+    Wi-Fi. The latter remains useful when a default route proves that interface
+    currently carries traffic.
     """
 
     interface: str
     bssid: str | None
     ssid: str | None = None
+    associated: bool = True
 
     @property
     def identified(self) -> bool:
@@ -137,6 +139,27 @@ def _clean_text(value: Any) -> str | None:
     return None if cleaned.lower() in _REDACTED else cleaned
 
 
+def _decode_profiler_json(text: str) -> dict[str, Any]:
+    """Decode one profiler JSON object with a narrowly tolerated prompt suffix.
+
+    Some macOS releases or wrappers have emitted a trailing ``%`` after the JSON
+    object. Raw decoding accepts only that marker and whitespace after the first
+    complete object; arbitrary trailing output remains a parse failure.
+    """
+
+    source = text.lstrip("\ufeff \t\r\n")
+    try:
+        payload, end = json.JSONDecoder().raw_decode(source)
+    except json.JSONDecodeError as exc:
+        raise ValueError("AirPort profiler output was not valid JSON") from exc
+    trailing = source[end:].strip()
+    if trailing and set(trailing) != {"%"}:
+        raise ValueError("AirPort profiler output contained unexpected trailing data")
+    if not isinstance(payload, dict):
+        raise ValueError("AirPort profiler output was not a JSON object")
+    return payload
+
+
 def _find_bssid(value: Any) -> str | None:
     """Find and normalize a BSSID in one current-network object."""
 
@@ -165,39 +188,55 @@ def _airport_interfaces(value: Any) -> list[dict[str, Any]]:
 
     result: list[dict[str, Any]] = []
     if isinstance(value, dict):
-        interfaces = value.get("spairport_airport_interfaces")
-        if isinstance(interfaces, list):
-            result.extend(item for item in interfaces if isinstance(item, dict))
-        for item in value.values():
-            result.extend(_airport_interfaces(item))
+        for key, item in value.items():
+            if key == "spairport_airport_interfaces" and isinstance(item, list):
+                result.extend(candidate for candidate in item if isinstance(candidate, dict))
+            else:
+                result.extend(_airport_interfaces(item))
     elif isinstance(value, list):
         for item in value:
             result.extend(_airport_interfaces(item))
     return result
 
 
-def parse_airport_json(text: str) -> tuple[WirelessAttachmentFact, ...]:
-    """Parse current Wi-Fi association evidence from ``system_profiler`` JSON.
+def _current_network(value: Any) -> tuple[bool, str | None, str | None]:
+    """Normalize dict and string forms of current-network profiler data."""
 
-    An associated interface is retained even when macOS redacts the BSSID. That
-    lets the topology show an unidentified AP boundary instead of inventing a
-    direct cable or silently omitting the wireless hop. No nearby-network scan
-    results are retained.
+    if isinstance(value, dict):
+        if not value:
+            return False, None, None
+        return True, _clean_text(value.get("_name")), _find_bssid(value)
+    text = _clean_text(value)
+    return (text is not None), text, None
+
+
+def _fact_rank(fact: WirelessAttachmentFact) -> tuple[int, int, int]:
+    """Prefer identified and associated duplicates for one BSD interface."""
+
+    return (int(fact.identified), int(fact.associated), int(fact.ssid is not None))
+
+
+def parse_airport_json(text: str) -> tuple[WirelessAttachmentFact, ...]:
+    """Parse Wi-Fi media and current association from ``system_profiler`` JSON.
+
+    Every valid AirPort interface is retained, even when current-network details
+    are absent, string-shaped, empty, or redacted. This prevents a Wi-Fi default
+    route from being mislabeled as an unknown Ethernet transit path. Nearby scan
+    results are ignored.
     """
 
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError("AirPort profiler output was not valid JSON") from exc
-    if not isinstance(payload, dict) or "SPAirPortDataType" not in payload:
+    payload = _decode_profiler_json(text)
+    if "SPAirPortDataType" not in payload:
         raise ValueError("AirPort profiler output did not contain SPAirPortDataType")
 
     facts: dict[str, WirelessAttachmentFact] = {}
     for item in _airport_interfaces(payload["SPAirPortDataType"]):
         interface = _clean_text(item.get("_name"))
-        current = item.get("spairport_current_network_information")
-        if not interface or not isinstance(current, dict):
+        if not interface:
             continue
-        ssid = _clean_text(current.get("_name"))
-        facts[interface] = WirelessAttachmentFact(interface, _find_bssid(current), ssid)
+        associated, ssid, bssid = _current_network(item.get("spairport_current_network_information"))
+        candidate = WirelessAttachmentFact(interface, bssid, ssid, associated)
+        existing = facts.get(interface)
+        if existing is None or _fact_rank(candidate) > _fact_rank(existing):
+            facts[interface] = candidate
     return tuple(facts[name] for name in sorted(facts))
