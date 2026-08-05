@@ -2,231 +2,171 @@
 
 ## Status
 
-This document defines the intended first runnable implementation. It is a design contract, not evidence that the application already runs or deploys successfully.
+This document defines the intended first implementation. It is not evidence that the application, tests, deployment, Wi-Fi profiler, browser interaction, or Nmap path has run successfully.
 
 ## Goals
 
-- Discover IPv4 network facts visible from the current macOS host.
-- Build a best-effort logical topology with explicit provenance and confidence.
-- Serve an interactive loopback-only web page.
-- Keep topology data on the Mac and in process memory.
-- Avoid mandatory third-party production dependencies and external frontend assets.
-- Keep passive collection separate from optional bounded active discovery.
-- Provide a repeatable current-user macOS deployment and removal path.
-- Define deterministic implementation, UI, deployment, documentation, and test ownership.
+- Collect IPv4, route, ARP, and current Wi-Fi association evidence visible from the Mac.
+- Show an evidence-backed path toward the default gateway.
+- Keep same-subnet peers separate from transit-path nodes.
+- Preserve tunnel interfaces as explicit Layer-3 paths.
+- Represent unavailable intermediate Layer-2 evidence as unknown instead of inventing switches.
+- Keep active discovery bounded to validated local RFC 1918 targets.
+- Serve a secure, accessible, loopback-only interface.
+- Provide deterministic state, layout, tests, and current-user deployment ownership.
 
 ## Non-goals
 
 - Proving complete physical topology from one endpoint.
-- Identifying hidden switching, VLAN, controller, or firewall-internal structure.
-- Public, internet-wide, port, service, vulnerability, credential, or OS scanning.
-- Reverse-DNS, online hostname, or MAC-vendor enrichment.
-- User annotations or persistent device naming.
-- Persistent snapshots, active IPv6 discovery, LAN bind, or multi-user hosting.
-- System-wide daemons, administrator-level installation, containers, cloud deployment, or remote-host deployment.
+- Discovering every transparent switch, bridge, mesh backhaul, VLAN, controller, or firewall-internal segment.
+- Treating ARP peers as transit devices.
+- Port, service, vulnerability, credential, OS, public, or internet-wide scanning.
+- Reverse DNS, online enrichment, persistent inventory, LAN bind, active IPv6, packet capture, cloud deployment, containers, or system-wide installation.
 
-## Runtime and development environment
+## Runtime and owners
 
-Production:
-
-- macOS;
-- Python 3.10 or newer;
-- Python standard library;
-- repository-owned HTML, CSS, JavaScript, ES modules, and SVG;
-- optional Nmap executable for active discovery.
-
-Development-only frontend tests use Node.js 20+ and the built-in test runner without npm packages. Production startup and deployment do not require Node.
-
-## Module ownership
+Production uses macOS, Python 3.10+, the Python standard library, repository-owned browser assets, and optional Nmap. Node.js 20+ is development-only.
 
 ```text
-server.py
-  Loopback HTTP server, Host/origin checks, routes, response serialization,
-  static-file containment, collection lock, active orchestration, and latest-snapshot state.
-
-homenettopo/commands.py
-  Typed approved commands, Nmap executable resolution, shell-free subprocesses,
-  total deadlines, output limits, terminate/kill cleanup, normalized results.
-
-homenettopo/interfaces.py
-  Parser for `/sbin/ifconfig -a`.
-
-homenettopo/routes.py
-  Strict parser for `/usr/sbin/netstat -rn -f inet`, including macOS
-  abbreviated destinations, IPv4, link, and MAC gateway forms.
-
-homenettopo/neighbors.py
-  Parser for `/usr/sbin/arp -an`, including incomplete records.
-
-homenettopo/discovery.py
-  Phase A and Phase B target validation, Nmap XML host-up parsing,
-  IPv4/MAC normalization, and effective-target evidence validation.
-
-homenettopo/models.py
-  Validated JSON-serializable evidence, source, network, node, edge, warning,
-  active-discovery, and snapshot structures.
-
-homenettopo/topology.py
-  Deterministic topology construction, conservative merge, warnings,
-  confidence, and output ordering.
-
-web/index.html
-  Accessible document, controls, status regions, graph, details, and dialog.
-
-web/core.mjs
-  Pure UI state, shared collection-in-flight coordination, API/error mapping,
-  capability recovery, target presentation, layout, selection, and export naming.
-
-web/app.js
-  Fetch, capability recheck, DOM/SVG, pointer and keyboard input, focus,
-  dialog, collection guards, and download adapter.
-
-web/styles.css
-  Visual tokens, responsive layout, graph states, focus, and reduced motion.
-
-scripts/deploy.py
-  Current-user macOS LaunchAgent installation, exact runtime file allowlist,
-  rollback, loopback health verification, status, restart, and uninstall.
-
-scripts/check.py
-  Repository-relative full regression entrypoint, including documentation,
-  deployment, contract, asset, test, and hygiene guards.
+server.py                  loopback HTTP, security boundary, source orchestration, lock, snapshots
+homenettopo/commands.py    exact command allowlist, Nmap resolution, bounded subprocess runner
+homenettopo/interfaces.py  ifconfig and current Wi-Fi association parsers
+homenettopo/routes.py      IPv4 route parser
+homenettopo/neighbors.py   ARP parser
+homenettopo/discovery.py   Phase A/B and Nmap evidence validation
+homenettopo/models.py      validated public topology schema
+homenettopo/topology.py    evidence merge, gateway path, peer membership, confidence
+web/core.mjs               reducer, path/peer layout, address arithmetic, camera math
+web/app.js                 fetch, capability status, safe DOM/SVG, input/focus/export
+web/index.html             accessible page and explanatory copy
+web/styles.css             visual tokens and path/peer/tunnel presentation
+scripts/deploy.py          current-user LaunchAgent lifecycle and rollback
+scripts/check.py           full regression and cross-owner guards
 ```
 
-## Approved command model
+## Approved commands
 
-The service never accepts an executable or argument list from HTTP input.
+The browser and HTTP body cannot supply executable names or arguments.
 
 ```text
 INTERFACES  /sbin/ifconfig -a
 ROUTES      /usr/sbin/netstat -rn -f inet
 NEIGHBORS   /usr/sbin/arp -an
+WIFI        /usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType
 DISCOVERY   <canonical-nmap-path> -sn -n --max-retries 1
             --host-timeout 5s -oX - <validated-targets...>
 ```
 
-Nmap resolution order:
+Commands run with `shell=False`, a minimal environment, bounded output, total deadlines, and terminate/kill cleanup. Interface, route, and ARP commands use five seconds. Wi-Fi profiling uses an eight-second process deadline around the profiler’s fixed five-second timeout.
 
-1. explicit startup option;
-2. `/opt/homebrew/bin/nmap`;
-3. `/usr/local/bin/nmap`;
-4. `shutil.which("nmap")`.
+Nmap resolution order is explicit path, Apple Silicon Homebrew, Intel Homebrew, then `PATH`. The public API exposes only the resolution source.
 
-The selected path is canonicalized with `realpath` and must reference an executable regular file. The public API reports only the resolution source: `explicit`, `homebrew_arm64`, `homebrew_intel`, `path`, or `unavailable`.
+## Passive collection
 
-### Command limits
+1. Validate Host and protected POST headers.
+2. Require an empty JSON object.
+3. Acquire the single collection lock.
+4. Require macOS.
+5. Run interface, route, ARP, and Wi-Fi commands independently.
+6. Parse each source with explicit failure semantics.
+7. Construct a complete or coherent partial snapshot.
+8. Publish atomically and release the lock.
+9. Re-read capabilities before the browser releases its passive collection owner.
 
-| Limit | Value |
-|---|---:|
-| Passive command timeout | 5 seconds |
-| Active-operation timeout default | 30 seconds |
-| Active-operation timeout range | 5–120 seconds |
-| Nmap per-host timeout | 5 seconds |
-| Child-process kill grace | 2 seconds |
-| Captured stdout | 2 MiB |
-| Captured stderr | 64 KiB |
+Interface, route, and ARP are the material coherence sources. Wi-Fi association is additional path evidence: its failure creates a warning and partial snapshot but does not erase otherwise coherent topology.
 
-`operation_timeout_seconds` is the total Nmap subprocess deadline. `--host-timeout 5s` is a separate fixed per-host Nmap limit.
+## Determining the path to the gateway
 
-On timeout, terminate the process, wait up to two seconds, then kill if needed. Truncated output is a normalized failure unless a parser contract explicitly defines a safe warning-only case.
+The topology builder uses the default route’s interface and gateway.
 
-## Passive collection flow
+### Wi-Fi association evidence
 
-1. validate Host and protected request headers;
-2. validate empty JSON request body;
-3. acquire the single collection lock or return `409`;
-4. confirm the platform is macOS;
-5. run interfaces, routes, and ARP commands;
-6. parse each source independently and treat nonempty unrecognized output as a source failure;
-7. construct a complete or coherent partial passive snapshot;
-8. atomically replace the latest snapshot;
-9. release the lock;
-10. in the browser, re-read capabilities after success so restored Nmap availability can be detected.
+`system_profiler` JSON is searched only for current interface association objects. Nearby-network scan lists are ignored.
 
-One source may fail while the other evidence remains coherent. Failure of all material passive sources returns `collection_failed` and preserves the prior snapshot.
-
-The route parser requires the IPv4 routing-table header and reads destination, gateway, flags, and interface from the first four route columns. It accepts `default`, full or abbreviated IPv4 destinations, IPv4 gateways, `link#N`, and colon-delimited MAC gateways. Optional Expire data is ignored after the interface column. A nonempty table with no recognizable route rows is a parse failure.
-
-No separate hostname, DNS, vendor, or online lookup occurs.
-
-## Active discovery flow
-
-### Phase A: request and absolute safety validation
-
-Before acquiring the collection lock or running commands:
-
-1. validate Host;
-2. validate custom header, Origin, and Fetch Metadata;
-3. enforce 16 KiB body limit;
-4. parse JSON object;
-5. require 1–32 network strings;
-6. canonicalize IPv4 networks;
-7. require every target to be within RFC 1918 space—`10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`—and reject public or special address classes;
-8. reject an absolute unique-address union above 1024;
-9. validate `operation_timeout_seconds` from 5 through 120.
-
-### Phase B: current local-network containment
-
-After Phase A succeeds:
-
-1. acquire the collection lock or return `409`;
-2. run fresh passive collection;
-3. require usable interface evidence before active containment evaluation;
-4. derive eligible RFC 1918 networks assigned to non-tunnel interfaces;
-5. require every requested target to be equal to or a subnet of one eligible local network;
-6. assign every target to its most-specific containing local network;
-7. reject supernets, partial overlaps, adjacent networks, unrelated RFC 1918 networks, non-RFC1918 networks, and tunnel-only networks;
-8. remove exact duplicates and contained targets only within the same owner group; adjacent sibling targets remain separate and are never widened;
-9. recalculate the final unique-address union and require at most 1024.
-
-Interface evidence failure is not a target validation error:
-
-- interface command timeout returns `504 command_timeout`;
-- unavailable or unparseable interface evidence returns `500 collection_failed`;
-- successful interface collection with no eligible local RFC 1918 network returns `400 invalid_target`.
-
-Only after both phases pass:
-
-1. resolve Nmap;
-2. pass the Phase B effective target set to the fixed command adapter without cross-owner containment reduction;
-3. run the fixed XML-output command with the requested total operation deadline;
-4. require an `nmaprun` XML root and consider only hosts whose status is `up`;
-5. validate each reported IPv4 address and normalize each optional MAC to six lowercase hexadecimal octets;
-6. require every accepted IPv4 address to belong to at least one Phase B effective target network;
-7. reject malformed or out-of-range Nmap evidence as `500 collection_failed`;
-8. merge only validated active evidence into the fresh passive snapshot;
-9. atomically replace the latest snapshot;
-10. release the lock.
-
-Duplicate reported IPv4 hosts are reduced deterministically. A failed active operation preserves the previous snapshot. Intermediate passive data is not published.
-
-## Target-containment rules
-
-For each requested target `T`, at least one eligible local RFC 1918 network `L` must satisfy:
+When a canonical BSSID is present:
 
 ```text
-T == L or T.subnet_of(L)
+local_host
+  → host_uses_interface
+interface
+  → interface_associated_with       observed
+access_point
+  → attachment_reaches_gateway      inferred
+ gateway
+  → upstream_of                     inferred
+upstream_boundary
 ```
 
-When more than one local network contains `T`, the most-specific containing local network owns that target for Phase B reduction.
+The BSSID identifies an associated AP radio. It does not prove the physical identity of the router appliance. Exact AP BSSID and gateway ARP MAC equality is positive `same_mac` evidence. Different MACs remain `unknown` because one device may expose different radio and routed-interface MAC addresses.
 
-These are rejected:
+When the current association is visible but BSSID is redacted or missing, the graph keeps an `access_point` node labelled as identity unavailable. It never guesses or silently merges it with the gateway.
 
-- `T` is a supernet of `L`;
-- `T` only partially overlaps `L`;
-- `T` is adjacent to `L` but outside it;
-- `T` is RFC 1918 but unrelated;
-- `T` is outside `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`;
-- `T` is available only through a tunnel interface;
-- `T` is loopback, link-local, multicast, unspecified, public, or reserved-only documentation space.
+### Ethernet and unclassified non-tunnel links
 
-Exact duplicates and contained targets may be removed only when they share the same Phase B owner. Adjacent sibling targets and targets owned by different overlapping local networks remain distinct in the Nmap argument list.
+ARP resolves an IP neighbor to a link-layer address. It does not enumerate transparent switching infrastructure. An IP route or traceroute-style hop sequence also does not reveal a device that forwards only Layer-2 frames.
 
-Tests must cover equal, contained, duplicate, supernet, partial-overlap, adjacent, unrelated, tunnel-only, overlapping local owners, 1024-address, 1025-address, 32-network, and 33-network cases.
+A directly adjacent switch can be identified only when an adjacent-device or managed-topology source such as LLDP/CDP is actually available. This first release has no such source. It therefore creates:
 
-## Snapshot lifecycle and API ownership
+```text
+interface
+  → interface_reaches_link          inferred, low confidence
+link_boundary "Intermediate L2 path unknown"
+  → attachment_reaches_gateway      inferred, low confidence
+gateway
+```
 
-Read-only endpoints never run commands:
+The boundary properties state that it may represent a direct link, switch, bridge, or mesh backhaul. It is uncertainty, not an invented device.
+
+### Tunnel paths
+
+A default route through a tunnel uses:
+
+```text
+interface → interface_reaches_gateway → gateway → upstream
+```
+
+No access point, switch, or Layer-2 broadcast-domain node is inserted.
+
+### LAN peers
+
+`member_of` and `gateway_for_subnet` express address/subnet context. They do not express forwarding order. The browser groups subnets and peer devices below the main path and does not render membership edges as transit lines.
+
+## Active discovery
+
+### Phase A
+
+Before lock acquisition or commands:
+
+- validate Host, content type, custom header, Origin, and Fetch Metadata;
+- enforce 16 KiB JSON limit;
+- require 1–32 canonical IPv4 networks;
+- require RFC 1918 membership;
+- reject loopback, link-local, multicast, unspecified, public, documentation, reserved, or tunnel-only targets;
+- enforce at most 1024 unique addresses;
+- validate total timeout from 5 through 120 seconds.
+
+### Phase B
+
+After fresh passive collection:
+
+- require usable interface evidence;
+- derive eligible non-tunnel RFC 1918 networks;
+- require every target to equal or be contained by one eligible network;
+- assign the target to its most-specific containing local network;
+- reject supernets, partial overlaps, adjacent networks outside the owner, unrelated networks, and tunnel-only networks;
+- reduce exact duplicates and contained targets only inside the same owner group;
+- preserve adjacent sibling targets and distinct overlapping-owner targets;
+- recalculate the address union.
+
+Interface timeout is `504 command_timeout`. Missing or unparseable interface evidence is `500 collection_failed`. Successful interface evidence without an eligible network is `400 invalid_target`.
+
+Only after both phases pass may Nmap run. Nmap XML must have an `nmaprun` root. Only `up` hosts are accepted. IPv4 and optional MAC values are validated, and every accepted address must belong to at least one effective target. Malformed or out-of-effective-target evidence is `500 collection_failed`. Failed operations preserve the prior snapshot and do not publish intermediate passive data.
+
+## API, concurrency, and browser security
+
+Accepted Host values are derived from the configured port and limited to `127.0.0.1` and `localhost`. Collection POSTs require JSON and `X-HomeNetTopo-Request: 1`; optional Origin and Fetch Metadata must be same-origin. No permissive CORS is emitted.
+
+Read-only routes never collect:
 
 ```text
 GET /api/v1/health
@@ -235,357 +175,124 @@ GET /api/v1/topology
 GET /api/v1/topology/export
 ```
 
-Collection endpoints:
+Collection routes are:
 
 ```text
 POST /api/v1/topology/refresh
 POST /api/v1/discover
 ```
 
-Rules:
+One collection runs at a time. Another client gets `409 collection_in_progress`. The browser uses one `collectionInFlight` owner and ignores stale completions.
 
-- GET topology returns the latest snapshot or `404`.
-- Export downloads the latest snapshot or returns `404`.
-- One passive or active collection may run at a time.
-- The browser uses a single collection-in-flight field and refuses a second passive or active start until the current operation resolves.
-- Stale success or error actions whose operation kind does not match the active collection are ignored.
-- A second collection from another client returns `409` immediately.
-- Successful and coherent partial passive refreshes replace the snapshot atomically.
-- Successful active discovery replaces the snapshot atomically.
-- Failed operations preserve the previous snapshot.
-- Snapshots have no automatic TTL.
-
-## Browser request boundary
-
-Every request validates Host against the configured port:
-
-```text
-127.0.0.1:<port>
-localhost:<port>
-```
-
-Collection POST requests require:
-
-```text
-Content-Type: application/json
-X-HomeNetTopo-Request: 1
-```
-
-When present, Origin must match an accepted loopback origin, and `Sec-Fetch-Site` must be `same-origin` or `none`. The server emits no permissive CORS headers and rejects API OPTIONS.
-
-This design prevents simple cross-origin GET requests from launching commands because every command-triggering route is a protected POST.
-
-## Unsupported-platform and optional-tool recovery
-
-- Health may return `200` and report the actual normalized platform.
-- Capabilities report `passive_collection: false` on unsupported platforms.
-- Active discovery reports `available: false` and `unavailable_reason: "unsupported_platform"` when collection is unsupported.
-- Collection endpoints return `501 unsupported_platform` without running commands.
-- A runtime `424 dependency_unavailable` sets the browser's active capability to unavailable while passive topology remains usable.
-- The next successful passive refresh re-reads `/api/v1/capabilities`; if Nmap is restored, active capability and the ready UI state recover without a page reload.
-
-## Current-user macOS deployment
-
-`scripts/deploy.py` installs or updates one current-user LaunchAgent. It is not a system package installer and never requests administrator privileges.
-
-Fixed deployment locations:
-
-```text
-runtime  ~/Library/Application Support/HomeNetTopo
-plist    ~/Library/LaunchAgents/com.homenettopo.local.plist
-logs     ~/Library/Logs/HomeNetTopo
-```
-
-The copied runtime is the exact 15-file `RUNTIME_FILES` allowlist:
-
-```text
-server.py
-metadata.json
-scripts/deploy.py
-homenettopo/__init__.py
-homenettopo/commands.py
-homenettopo/discovery.py
-homenettopo/interfaces.py
-homenettopo/models.py
-homenettopo/neighbors.py
-homenettopo/routes.py
-homenettopo/topology.py
-web/index.html
-web/app.js
-web/core.mjs
-web/styles.css
-```
-
-Directory-recursive copying is not used. Tests, documentation, Git metadata, caches, reports, topology exports, command logs, machine-specific network data, and every unlisted file are excluded.
-
-### Install and update flow
-
-1. require macOS and Python 3.10+;
-2. validate the requested port and optional executable Nmap path;
-3. require each allowlisted source to be a contained regular file, not a symbolic link;
-4. copy each file without following symbolic links into a temporary sibling staging directory;
-5. revalidate the staged file set;
-6. boot out an existing user LaunchAgent when present;
-7. move the existing runtime to a temporary rollback directory;
-8. atomically move the staged runtime into the fixed install path;
-9. atomically write a mode-`0600` LaunchAgent plist;
-10. bootstrap and kickstart `com.homenettopo.local` in `gui/<uid>`;
-11. poll only `http://127.0.0.1:<port>/api/v1/health`, with environment proxies disabled and a bounded response body;
-12. delete the rollback directory only after the health response identifies HomeNetTopo as healthy.
-
-If replacement itself fails, it restores the old runtime before returning the error. If later activation or health verification fails, deployment boots out the failed service, restores the prior runtime and plist, and attempts to bootstrap and kickstart the prior user service.
-
-The generated LaunchAgent always passes `--bind 127.0.0.1`. It may pass a validated port and optional canonical Nmap path. It uses `RunAtLoad`, restarts after unexpected failure, writes stdout/stderr to the user log directory, and does not use a shell.
-
-Supported management actions:
-
-```text
-python3 scripts/deploy.py install [--port PORT] [--nmap-path PATH]
-python3 scripts/deploy.py status
-python3 scripts/deploy.py restart
-python3 scripts/deploy.py uninstall [--purge-logs]
-```
-
-Uninstall removes the current-user LaunchAgent and runtime. Logs remain unless `--purge-logs` is explicitly supplied. The script does not contact remote hosts or change system-wide configuration.
-
-## Topology model
-
-### Snapshot fields
-
-```text
-schema_version
-snapshot_id
-collected_at
-mode
-platform
-partial
-warnings[]
-sources[]
-networks[]
-nodes[]
-edges[]
-active_discovery?
-```
-
-### Node fields
-
-```text
-id
-kind
-label
-addresses[]
-mac_addresses[]
-interface_names[]
-properties{}
-evidence[]
-confidence
-observed_at
-```
-
-### Edge fields
-
-```text
-id
-source
-target
-type
-observed
-confidence
-evidence[]
-properties{}
-```
-
-`observed` means supported by collected local configuration. It does not prove physical cabling or switching.
-
-Confidence:
-
-- `high`: direct configuration or corroborated observations;
-- `medium`: reliable observation plus deterministic route/membership inference;
-- `low`: incomplete or heuristic association retained with warning.
-
-## Graph construction rules
-
-- One local-host node represents the Mac.
-- Interfaces attach the host to subnet nodes.
-- Gateways require route and address evidence.
-- Neighbor and validated active hosts attach to subnets through explicit address-membership inference.
-- Upstream boundaries represent networks beyond local observation.
-- Compatible device evidence merges conservatively.
-- Conflicting names or MACs remain visible as warnings.
-- Active evidence supplements rather than erases passive evidence.
-- Output ordering is deterministic.
-- Inferred links never become observed physical links.
-
-## Static-file boundary
-
-- Serve only canonical regular files under the canonical `web/` root.
-- Decode URL paths exactly once.
-- Reject parent segments, encoded traversal, repeated-decoding tricks, NUL bytes, separator ambiguity, directories, and symlink escapes.
-- Use an explicit MIME map.
-- Disable directory listing.
-- Apply the documented security headers.
-
-## Frontend information architecture
+## Browser information architecture
 
 ```text
 header
-  product title
-  timestamp and mode
+  product and snapshot metadata
   passive refresh
-  active discovery
-  export JSON
-status region
-  platform and capability
-  logical-topology limitation
-  source warnings and errors
-main
-  graph toolbar
-  SVG topology canvas
-  selected-item details
-active discovery dialog
-  eligible target checkboxes
-  unique address total
-  operation timeout
-  confirm/cancel
+  active discovery action plus visible Nmap capability state
+  export
+status
+  progress, errors, source warnings, recovery instructions
+workspace
+  gateway path and LAN peers graph
+  details panel
+dialog
+  eligible targets, address total, timeout, confirmation
 ```
 
-Initial page load calls `POST /api/v1/topology/refresh` with the protected request headers. It does not invoke Nmap. A successful passive refresh also rechecks capabilities.
+The Nmap action is never an unexplained grey placeholder:
 
-## Visual system
+- checking: disabled with `Nmap: checking`;
+- ready: enabled `Discover devices`;
+- missing: enabled `Check Nmap setup` plus `Nmap: unavailable`;
+- no eligible target: disabled `No eligible LAN`;
+- unsupported platform: explicit disabled explanation.
 
-Typography: system UI stack, 16 px base text, supporting text no smaller than 13 px.
-
-Spacing:
-
-```text
-4, 8, 12, 16, 24, 32 px
-```
-
-Core tokens:
-
-```text
---surface: #ffffff
---surface-muted: #f5f7fa
---text: #17202a
---text-muted: #52606d
---border: #cbd2d9
---accent: #155eef
---focus: #7c3aed
---warning: #9a6700
---danger: #b42318
---observed-edge: #344054
---inferred-edge: #667085
-```
-
-Focus uses a visible 3 px outline with 2 px offset. Selection uses outline/shape as well as color. Dark appearance may follow `prefers-color-scheme` while preserving readable contrast and non-color distinctions.
+Checking Nmap only re-reads capabilities; it does not start discovery.
 
 ## Deterministic graph layout
 
-Coordinate convention: each node's `x` and `y` are its top-left world coordinates.
-
-Constants:
+Top-left world coordinates use fixed path columns:
 
 ```text
-node_width = 180
-node_height = 72
-horizontal_gap = 48
-vertical_gap = 28
-column_stride = 228
-host_x = 0
-interface_x = 240
-subnet_x = 520
-device_start_x = 820
-minimum_upstream_x = 1160
+local host       x = 0
+interface        x = 240
+AP/unknown link  x = 500
+gateway          x = 760
+upstream         x = 1040
 ```
 
-Each subnet owns a separate expandable vertical lane. Gateway appears first. Devices use three columns by default and four columns when a subnet has more than 30 devices.
+Each interface owns a vertical lane. The path row is above an optional subnet/peer context group. Peers use up to three columns, or four for more than 30 devices. Membership edges are omitted from rendered path edges.
 
-For `column_count` device columns:
+The layout output contains:
+
+- positioned path and peer nodes;
+- subnet/peer group rectangles;
+- only path edges;
+- hidden relationship count;
+- complete world bounds.
+
+Rendered path edge types are:
 
 ```text
-device_grid_right = device_start_x + (column_count - 1) * column_stride + node_width
-upstream_x = max(minimum_upstream_x, device_grid_right + horizontal_gap)
+host_uses_interface
+interface_associated_with
+interface_reaches_link
+attachment_reaches_gateway
+interface_reaches_gateway
+upstream_of
+routes_to
 ```
 
-Disconnected components receive separate lanes. Fit-to-view adds 48 world units of padding.
+Edges use orthogonal SVG paths. A viewBox camera fits each new snapshot, pans from nodes/edges/groups/blank space, suppresses click after drag, and zooms around the pointer. Layout and camera math are pure and deterministic.
 
-Node tests must compare rectangle bounds and prove:
+## Topology schema additions
 
-- deterministic coordinates;
-- no overlap within a lane;
-- no overlap between adjacent lanes;
-- no device/upstream overlap for three- and four-column grids;
-- stable results under input reordering.
+Node kinds include:
 
-## UI state machine
+```text
+local_host
+interface
+access_point
+link_boundary
+subnet
+gateway
+device
+upstream_boundary
+```
 
-| State | Entry | Visible result | Actions | Focus/recovery |
-|---|---|---|---|---|
-| `BOOT` | script starts | application shell | none | status announced |
-| `LOADING_PASSIVE` | protected passive POST starts | loading or stale graph | no passive or active duplicate start | focus remains on trigger |
-| `PASSIVE_READY` | passive success | graph, timestamp, refreshed capabilities | refresh, discover, export, select | trigger regains focus |
-| `PARTIAL_READY` | coherent partial | graph and warnings | same as ready | warnings announced |
-| `EMPTY_READY` | no neighbor devices | local structure and explanation | refresh, discover, export | empty heading focusable |
-| `ACTIVE_CONFIRM` | discover selected | target and timeout dialog | confirm/cancel | modal focus and return |
-| `ACTIVE_RUNNING` | active POST starts | progress and stale prior graph | no passive or active duplicate start | progress announced once |
-| `ACTIVE_READY` | active success | merged graph | refresh, rediscover, export | active trigger regains focus |
-| `DEPENDENCY_UNAVAILABLE` | Nmap absent or fails at runtime | passive graph and recovery guidance | passive refresh/export | disabled reason visible; refresh rechecks Nmap |
-| `VALIDATION_ERROR` | request invalid | summary and field errors | edit/cancel | summary then invalid field |
-| `COLLECTION_CONFLICT` | server `409` from another client | prior graph and busy message | retry later | message announced |
-| `REQUEST_ERROR` | timeout or request failure | prior graph retained | retry/refresh | recovery reachable |
-| `UNSUPPORTED_PLATFORM` | collection unavailable | explanatory state | health/capability details | heading focused |
+Path edge types add:
 
-Pointer pan, bounded pointer-centered zoom, keyboard-selectable nodes/edges, Escape behavior, zoom/fit/reset buttons, reduced motion, 200% zoom usability, and no page-level horizontal overflow are required.
+```text
+interface_associated_with
+interface_reaches_link
+attachment_reaches_gateway
+interface_reaches_gateway
+```
 
-## Code documentation policy
+Sources add `wifi` and `link_path_inference`. Every inferred path edge remains visibly inferred with confidence and evidence. The schema does not claim physical wiring.
 
-Comments and docstrings explain non-obvious contracts rather than restating syntax. Critical documented boundaries are:
+## Current-user deployment
 
-- approved command shape, environment, deadlines, output limits, and process cleanup;
-- parser input assumptions, partial-row handling, and whole-source failure conditions;
-- Phase A/Phase B ownership and cross-owner target preservation;
-- post-parser Nmap evidence validation;
-- observed versus inferred topology and deterministic snapshot identifiers;
-- HTTP Host/origin protection, collection-lock release, static allowlist, and atomic publication;
-- reducer operation ownership, stale response rejection, focus recovery, safe DOM/SVG creation, address-union arithmetic, and lane layout;
-- deployment allowlist, current-user limits, atomic replacement, rollback, health checks, and log retention.
-
-Public models, parsers, orchestration functions, deployment actions, and regression stages have concise Python docstrings. Frontend pure-state and DOM owners use JSDoc or section comments at the same material boundaries. `scripts/check.py` statically enforces documentation for the critical owners without requiring comments on obvious assignments.
+`scripts/deploy.py` manages one current-user LaunchAgent and never uses `sudo`. It copies only the explicit 15 runtime files, rejects symlinks, stages before replacement, keeps rollback data until loopback health succeeds, disables proxy use for health checks, and retains logs unless purge is requested.
 
 ## Testing design
 
-### Python
+Python tests cover command allowlists, Wi-Fi parser redaction/current-network filtering, route and ARP parsers, active validation, path node/edge schema, Wi-Fi AP path, unknown Ethernet path, tunnel path, AP/gateway MAC relation, source degradation, HTTP security, deployment, and snapshot preservation.
 
-```text
-python3 -m unittest discover -s tests -p 'test_*.py'
-```
+Node tests cover reducer ownership, capability recovery, evidence graph preservation, path order, peer grouping, hidden membership edges, tunnel paths, layout determinism, rectangle overlap, camera fit/zoom, address arithmetic, selection, and export naming.
 
-Coverage includes typed commands, Nmap resolution, XML parsing, IPv4/MAC and effective-target evidence validation, Phase A/B validation, interface-evidence failure classification, exact containment boundaries, overlapping local-owner preservation, strict macOS route parsing, malformed four-column route rejection, topology invariants, protected POST routes, read-only GETs, Host/origin checks, concurrency, snapshot preservation, export, static containment, headers, per-user deployment configuration, exact deployment file allowlisting, symlink rejection, rollback behavior, and repository hygiene.
-
-### Frontend logic
-
-```text
-node --test tests/frontend/core.test.mjs
-```
-
-Coverage includes UI transitions, passive/active interleaving denial, stale completion rejection, dependency unavailable-to-available recovery, API errors, target presentation, deterministic coordinates, rectangle overlap, dynamic upstream position, compact mode, sorting, selection, and export filename.
-
-### Full regression
+Full regression:
 
 ```text
 python3 scripts/check.py
 ```
 
-Full mode requires compile checks, metadata parsing, Python tests, code-documentation guards, contract consistency guards, deployment guards, asset/CSP scans, Node tests, and tracked-path hygiene. Missing Node fails full mode. A Python-only developer mode is not full evidence.
+It includes compile, metadata, Python tests, documentation guards, contract guards, browser asset/CSP checks, Node tests, deployment guards, and tracked-path hygiene.
 
-## Separate runtime acceptance
+## Privacy and acceptance
 
-Formal project acceptance later requires exact-revision evidence from supported macOS for startup, current-user LaunchAgent install/update/status/restart/uninstall and rollback, health/capabilities, protected passive refresh, read-only topology/export, invalid Host/origin rejection, Nmap-unavailable and restored-Nmap recovery, one authorized bounded active discovery, timeout behavior, cross-client collection conflict, browser interactions, keyboard/focus, reduced motion, 200% zoom, and representative tunnel/partial/empty cases.
+Snapshots remain in memory unless exported. Do not commit real SSIDs, BSSIDs, IPs, MACs, hostnames, logs, captures, or scan results.
 
-## Privacy and operational limits
-
-Topology remains in process memory unless downloaded. No upload, automatic persistence, annotation storage, DNS enrichment, or vendor lookup occurs.
-
-LaunchAgent logs remain in the current user's Library unless explicitly purged during uninstall. They are runtime artifacts and must not be committed.
-
-Results depend on current routing, ARP state, response behavior, Wi-Fi isolation, VPNs, sleeping devices, filters, and permissions. The UI and README must keep these limitations visible.
+Formal acceptance still requires exact-revision execution on supported macOS, including real `system_profiler` output and redaction behavior, browser interaction, LaunchAgent lifecycle, Nmap unavailable/recovery, one bounded active discovery, and regression execution.
