@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Serve HomeNetTopo on IPv4 loopback and own snapshot publication.
 
-The handler exposes a small read-only API plus two protected collection POST
-routes. All command execution remains behind typed adapters, and the latest
-snapshot is replaced only after a complete passive or active operation succeeds.
+The handler exposes read-only state plus two protected collection POST routes.
+All commands remain behind typed adapters. A snapshot is published only after a
+complete passive or active operation produces a validated immutable model.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ class ApiError(RuntimeError):
 
 @dataclass(frozen=True)
 class PassiveParts:
-    """Fresh passive evidence plus source status and normalized failure codes."""
+    """Fresh passive evidence plus source status and normalized failures."""
 
     interfaces: tuple[InterfaceFact, ...]
     routes: tuple[RouteFact, ...]
@@ -86,7 +86,7 @@ class PassiveParts:
 
 
 class AppState:
-    """Own collection coordination and the latest immutable topology snapshot."""
+    """Own collection coordination and the latest immutable snapshot."""
 
     def __init__(self, *, port: int, nmap_path: str | None) -> None:
         self.port = port
@@ -96,15 +96,16 @@ class AppState:
 
     @property
     def supported(self) -> bool:
+        """Return whether command collection is supported on this host."""
+
         return platform.system().lower() == "darwin"
 
     def collect_passive_parts(self) -> PassiveParts:
         """Collect approved sources while allowing Wi-Fi evidence to degrade.
 
-        Interface, route, and neighbor evidence establish a coherent topology.
-        Wi-Fi association is optional: a profiler failure becomes a warning and
-        the topology uses an explicit unknown L2 boundary instead of failing or
-        pretending that the interface connects directly to the gateway.
+        Interface, route, and ARP evidence establish snapshot coherence. Wi-Fi
+        association is additional path evidence: failure becomes a warning and
+        an explicit unknown link boundary rather than a fabricated switch.
         """
 
         if not self.supported:
@@ -155,6 +156,8 @@ class AppState:
         )
 
     def passive_refresh(self):
+        """Collect and atomically publish one passive or coherent partial snapshot."""
+
         parts = self.collect_passive_parts()
         snapshot = build_snapshot(
             interfaces=parts.interfaces,
@@ -206,6 +209,8 @@ class AppState:
 
 
 class HomeNetTopoServer(ThreadingHTTPServer):
+    """Threaded loopback server carrying one shared application state."""
+
     daemon_threads = True
 
     def __init__(self, address: tuple[str, int], state: AppState) -> None:
@@ -219,9 +224,13 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
     server: HomeNetTopoServer
 
     def log_message(self, fmt: str, *args: object) -> None:
+        """Write the standard local request log without changing response data."""
+
         print(f"{self.address_string()} - {fmt % args}")
 
     def _security_headers(self) -> None:
+        """Apply the fixed no-store and same-origin browser policy."""
+
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -235,6 +244,8 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
         )
 
     def _send_bytes(self, status: int, body: bytes, content_type: str, *, disposition: str | None = None) -> None:
+        """Send one bounded in-memory response with fixed security headers."""
+
         self.send_response(status)
         self._security_headers()
         self.send_header("Content-Type", content_type)
@@ -246,18 +257,26 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _send_json(self, status: int, payload: Any, *, disposition: str | None = None) -> None:
+        """Serialize deterministic compact JSON and send it without caching."""
+
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
         self._send_bytes(status, body, "application/json; charset=utf-8", disposition=disposition)
 
     def _send_error_payload(self, error: ApiError, request_id: str) -> None:
-        self._send_json(200 if False else error.status, {"error": {"code": error.code, "message": str(error), "details": error.details, "request_id": request_id}})
+        """Return the public error envelope without leaking command internals."""
+
+        self._send_json(error.status, {"error": {"code": error.code, "message": str(error), "details": error.details, "request_id": request_id}})
 
     def _validate_host(self) -> None:
+        """Reject missing, non-loopback, or DNS-rebinding-style Host values."""
+
         accepted = {f"127.0.0.1:{self.server.state.port}", f"localhost:{self.server.state.port}"}
         if self.headers.get("Host") not in accepted:
             raise ApiError(400, "invalid_host", "The request Host is not accepted.")
 
     def _validate_collection_headers(self) -> None:
+        """Require JSON and same-origin signals before any command-triggering POST."""
+
         content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
             raise ApiError(415, "bad_request", "Content-Type must be application/json.")
@@ -272,6 +291,8 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
             raise ApiError(403, "cross_origin_request", "Cross-site collection requests are not accepted.")
 
     def _read_json(self) -> Any:
+        """Read one size-limited UTF-8 JSON body."""
+
         raw_length = self.headers.get("Content-Length")
         if raw_length is None:
             raise ApiError(400, "bad_request", "Content-Length is required.")
@@ -290,15 +311,21 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
             raise ApiError(400, "invalid_json", "The request body is not valid JSON.") from exc
 
     def _acquire_collection(self) -> None:
+        """Acquire the single collection owner without queuing another client."""
+
         if not self.server.state.collection_lock.acquire(blocking=False):
             raise ApiError(409, "collection_in_progress", "Another collection is already running.")
 
     @staticmethod
     def _command_error(exc: CommandError) -> ApiError:
+        """Map normalized command failures to their fixed HTTP status."""
+
         statuses = {"command_timeout": 504, "dependency_unavailable": 424, "invalid_target": 400, "collection_failed": 500}
         return ApiError(statuses.get(exc.code, 500), exc.code, str(exc))
 
     def _handle_api(self, split: urllib.parse.SplitResult) -> bool:
+        """Handle a fixed API route or return false for static delivery."""
+
         path = split.path
         if not path.startswith("/api/"):
             return False
@@ -377,6 +404,8 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
         raise ApiError(405, "method_not_allowed", "The method is not allowed for this API route.")
 
     def _serve_static(self, split: urllib.parse.SplitResult) -> None:
+        """Serve only canonical regular files from the fixed web allowlist."""
+
         try:
             decoded = urllib.parse.unquote(split.path, errors="strict")
             decoded_twice = urllib.parse.unquote(decoded, errors="strict")
@@ -394,6 +423,8 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
         self._send_bytes(200, candidate.read_bytes(), MIME_TYPES[candidate.suffix])
 
     def _dispatch(self) -> None:
+        """Apply Host validation, route the request, and normalize all errors."""
+
         request_id = uuid.uuid4().hex[:16]
         try:
             self._validate_host()
@@ -427,6 +458,8 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse the fixed loopback service options."""
+
     parser = argparse.ArgumentParser(description="Serve a local HomeNetTopo web application.")
     parser.add_argument("--bind", default=BIND_ADDRESS)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -435,6 +468,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Validate startup options and serve until interrupted."""
+
     args = parse_args()
     if args.bind != BIND_ADDRESS:
         raise SystemExit("HomeNetTopo first release binds only to 127.0.0.1")
