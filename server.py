@@ -14,6 +14,7 @@ import platform
 import threading
 import urllib.parse
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,6 +29,7 @@ from homenettopo.commands import (
     resolve_nmap,
     routes_spec,
     run_command,
+    wifi_interfaces_spec,
     wifi_spec,
 )
 from homenettopo.discovery import (
@@ -38,7 +40,14 @@ from homenettopo.discovery import (
     validate_phase_a,
     validate_phase_b,
 )
-from homenettopo.interfaces import InterfaceFact, WirelessAttachmentFact, parse_airport_json, parse_ifconfig
+from homenettopo.interfaces import (
+    InterfaceFact,
+    WirelessAttachmentFact,
+    merge_wireless_facts,
+    parse_airport_json,
+    parse_ifconfig,
+    parse_wifi_hardware_ports,
+)
 from homenettopo.models import ActiveDiscoveryMetadata, SourceStatus, SourceStatusValue, WarningItem
 from homenettopo.neighbors import NeighborFact, parse_neighbors
 from homenettopo.routes import RouteFact, parse_routes
@@ -101,11 +110,12 @@ class AppState:
         return platform.system().lower() == "darwin"
 
     def collect_passive_parts(self) -> PassiveParts:
-        """Collect approved sources while allowing Wi-Fi evidence to degrade.
+        """Collect independent evidence concurrently and degrade optional Wi-Fi detail.
 
-        Interface, route, and ARP evidence establish snapshot coherence. Wi-Fi
-        association is additional path evidence: failure becomes a warning and
-        an explicit unknown link boundary rather than a fabricated switch.
+        Fixed commands are launched together so refresh latency is bounded by the
+        slowest source rather than the sum of every timeout. Interface, route, and
+        ARP evidence establish snapshot coherence. Fast ``networksetup`` media
+        detection survives a slow or unavailable ``system_profiler`` enrichment.
         """
 
         if not self.supported:
@@ -119,37 +129,49 @@ class AppState:
             ("interfaces", interfaces_spec(), parse_ifconfig),
             ("routes", routes_spec(), parse_routes),
             ("neighbors", neighbors_spec(), parse_neighbors),
+            ("wifi_interfaces", wifi_interfaces_spec(), parse_wifi_hardware_ports),
             ("wifi", wifi_spec(), parse_airport_json),
         )
 
-        for name, spec, parser in collectors:
-            try:
-                result = run_command(spec)
-                parsed = parser(result.stdout)
-                if name == "interfaces" and not parsed:
-                    raise ValueError("No interface facts were parsed.")
-                values[name] = parsed
-            except CommandError as exc:
-                failures.append((name, exc.code))
-                sources.append(SourceStatus(name, SourceStatusValue.FAILED, "Collection command failed."))
-                warnings.append(WarningItem(f"{name}_collection_failed", f"{name.title()} evidence could not be collected.", name))
-            except (ValueError, UnicodeError):
-                failures.append((name, "collection_failed"))
-                sources.append(SourceStatus(name, SourceStatusValue.FAILED, "Collected output could not be parsed."))
-                warnings.append(WarningItem(f"{name}_parse_failed", f"{name.title()} evidence could not be parsed.", name))
-            else:
-                sources.append(SourceStatus(name, SourceStatusValue.OK, duration_ms=result.duration_ms))
+        with ThreadPoolExecutor(max_workers=len(collectors), thread_name_prefix="homenettopo-passive") as executor:
+            futures = {name: executor.submit(run_command, spec) for name, spec, _ in collectors}
+            for name, _, parser in collectors:
+                try:
+                    result = futures[name].result()
+                    parsed = parser(result.stdout)
+                    if name == "interfaces" and not parsed:
+                        raise ValueError("No interface facts were parsed.")
+                    values[name] = parsed
+                except CommandError as exc:
+                    failures.append((name, exc.code))
+                    sources.append(SourceStatus(name, SourceStatusValue.FAILED, "Collection command failed."))
+                    warnings.append(WarningItem(f"{name}_collection_failed", f"{name.replace('_', ' ').title()} evidence could not be collected.", name))
+                except (ValueError, UnicodeError):
+                    failures.append((name, "collection_failed"))
+                    sources.append(SourceStatus(name, SourceStatusValue.FAILED, "Collected output could not be parsed."))
+                    warnings.append(WarningItem(f"{name}_parse_failed", f"{name.replace('_', ' ').title()} evidence could not be parsed.", name))
+                else:
+                    sources.append(SourceStatus(name, SourceStatusValue.OK, duration_ms=result.duration_ms))
 
-        if not any(values.get(name) for name in ("interfaces", "routes", "neighbors")):
-            if any(code == "command_timeout" for _, code in failures):
-                raise ApiError(504, "command_timeout", "Passive collection timed out before a coherent snapshot could be produced.")
-            raise ApiError(500, "collection_failed", "No coherent passive snapshot could be produced.")
+        material_names = ("interfaces", "routes", "neighbors")
+        if not any(values.get(name) for name in material_names):
+            material_failures = [(name, code) for name, code in failures if name in material_names]
+            timeout_sources = sorted(name for name, code in material_failures if code == "command_timeout")
+            details = {
+                "failed_sources": sorted(name for name, _ in material_failures),
+                "timeout_sources": timeout_sources,
+            }
+            if timeout_sources:
+                joined = ", ".join(timeout_sources)
+                raise ApiError(504, "command_timeout", f"Passive collection timed out in: {joined}.", details)
+            raise ApiError(500, "collection_failed", "No coherent passive snapshot could be produced.", details)
 
+        wireless = merge_wireless_facts(values.get("wifi_interfaces", ()), values.get("wifi", ()))
         return PassiveParts(
             interfaces=values.get("interfaces", ()),
             routes=values.get("routes", ()),
             neighbors=values.get("neighbors", ()),
-            wireless_attachments=values.get("wifi", ()),
+            wireless_attachments=wireless,
             sources=tuple(sources),
             warnings=tuple(warnings),
             failures=tuple(failures),
@@ -176,9 +198,9 @@ class AppState:
         parts = self.collect_passive_parts()
         interface_failure = dict(parts.failures).get("interfaces")
         if interface_failure == "command_timeout":
-            raise ApiError(504, "command_timeout", "Interface collection timed out; active target containment could not be verified.")
+            raise ApiError(504, "command_timeout", "Interface collection timed out; active target containment could not be verified.", {"timeout_sources": ["interfaces"]})
         if interface_failure:
-            raise ApiError(500, "collection_failed", "Interface evidence is unavailable; active target containment could not be verified.")
+            raise ApiError(500, "collection_failed", "Interface evidence is unavailable; active target containment could not be verified.", {"failed_sources": ["interfaces"]})
 
         effective = validate_phase_b(request, parts.interfaces)
         resolution = resolve_nmap(self.nmap_path)
@@ -240,7 +262,8 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; "
-            "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+            "font-src 'self' data:; script-src 'self'; object-src 'none'; base-uri 'none'; "
+            "frame-ancestors 'none'; form-action 'self'",
         )
 
     def _send_bytes(self, status: int, body: bytes, content_type: str, *, disposition: str | None = None) -> None:
@@ -357,6 +380,7 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
                     "host_timeout_seconds": 5,
                 },
                 "link_path": {
+                    "wifi_interface_source": "networksetup",
                     "wifi_bssid_source": "system_profiler",
                     "ethernet_adjacent_device_source": "not_available_without_lldp",
                 },
