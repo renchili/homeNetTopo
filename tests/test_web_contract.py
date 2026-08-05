@@ -88,6 +88,51 @@ class WebContractTests(unittest.TestCase):
         self.assertIn("const recovered =", core)
         self.assertIn("if (state.collectionInFlight && !action.collection) return state", core)
 
+    def test_l2_tunnel_and_routing_presentation_contract(self):
+        core = (WEB / "core.mjs").read_text()
+        script = (WEB / "app.js").read_text()
+        css = (WEB / "styles.css").read_text()
+        for marker in (
+            "presentationGraph",
+            'kind: "l2_segment"',
+            'type: "interface_attached_to_l2"',
+            'type: "l2_carries_subnet"',
+            'type: "member_of_l2"',
+            'properties?.kind === "tunnel"',
+            'lane.type === "tunnel"',
+        ):
+            self.assertIn(marker, core)
+        self.assertIn('return "L2 broadcast domain"', script)
+        self.assertIn('return "L3 tunnel interface"', script)
+        self.assertIn('return "router / gateway"', script)
+        self.assertIn("node-l2_segment", css)
+        self.assertIn("interface-kind-tunnel", css)
+        self.assertIn("edge-member_of_l2", css)
+
+    def test_canvas_uses_viewbox_camera_full_surface_pan_and_orthogonal_edges(self):
+        script = (WEB / "app.js").read_text()
+        core = (WEB / "core.mjs").read_text()
+        css = (WEB / "styles.css").read_text()
+        for marker in (
+            "fitCamera",
+            "zoomCamera",
+            "orthogonalEdgePath",
+            'svgElement("path"',
+            'setAttribute("viewBox"',
+            'addEventListener("pointerdown"',
+            'setPointerCapture(event.pointerId)',
+            'classList.add("is-panning")',
+            "suppressGraphClick",
+            "Math.hypot(deltaX, deltaY) > 3",
+        ):
+            self.assertIn(marker, script)
+        self.assertNotIn('event.target.closest(".node, .edge")', script)
+        self.assertIn("export function fitCamera", core)
+        self.assertIn("export function orthogonalEdgePath", core)
+        self.assertIn("cursor: grab", css)
+        self.assertIn("cursor: grabbing", css)
+        self.assertIn("pointer-events: stroke", css)
+
 
 if __name__ == "__main__":
     unittest.main()
