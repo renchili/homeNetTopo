@@ -1,31 +1,17 @@
 # HomeNetTopo Local API Contract
 
-## Status
+## Status and boundary
 
 This document defines local API and topology schema version `1`. It is not evidence that the exact revision has run successfully.
 
-## General boundary
-
 - Base URL: `http://127.0.0.1:8765`
 - Prefix: `/api/v1`
-- JSON: `application/json; charset=utf-8`
 - Bind: IPv4 loopback only
 - State: in-memory; no upload or automatic persistence
-- Timestamps: RFC 3339 UTC
-- GET routes are read-only and never execute collection commands
+- GET routes never execute collection commands
+- One collection runs at a time; successful snapshots publish atomically and failures preserve the previous snapshot
 
-Every request requires Host `127.0.0.1:<port>` or `localhost:<port>`. Missing, malformed, non-loopback, alternate-domain, IPv6-literal, or rebinding-style Host values return `400 invalid_host`.
-
-Collection routes require:
-
-```text
-Content-Type: application/json
-X-HomeNetTopo-Request: 1
-```
-
-When present, Origin must match an accepted loopback origin and `Sec-Fetch-Site` must be `same-origin` or `none`. Cross-origin failures return `403 cross_origin_request`. The service emits no permissive CORS and API OPTIONS returns `405 method_not_allowed`.
-
-Only one collection runs at a time. Another client receives `409 collection_in_progress`; requests are not queued or merged. Independent fixed passive commands may execute concurrently inside that one collection. Successful snapshots replace state atomically. Failures preserve the previous snapshot.
+Every request requires Host `127.0.0.1:<port>` or `localhost:<port>`. Collection routes require JSON, `X-HomeNetTopo-Request: 1`, matching loopback Origin when present, and `Sec-Fetch-Site: same-origin` or `none` when present. No permissive CORS is emitted.
 
 ## Fixed limits
 
@@ -37,124 +23,46 @@ Only one collection runs at a time. Another client receives `409 collection_in_p
 | Active total timeout | default 30; range 5–120 seconds |
 | Nmap host timeout | 5 seconds |
 | Interface/route/ARP timeout | 5 seconds each, concurrent |
-| Wi-Fi interface detection timeout | 3 seconds |
-| Wi-Fi profiler process timeout | 8 seconds |
-| Wi-Fi profiler internal timeout | 5 seconds |
-| Captured stdout | 2 MiB |
-| Captured stderr | 64 KiB |
+| Wi-Fi interface detection | 3 seconds |
+| Wi-Fi profiler process/internal timeout | 8 / 5 seconds |
+| Captured stdout/stderr | 2 MiB / 64 KiB |
 | Kill grace | 2 seconds |
 
-## Error envelope
+Material passive failures expose normalized `failed_sources`; `504 command_timeout` also exposes `timeout_sources`. Optional Wi-Fi detail failure alone does not return 504.
+
+## Routes
+
+```text
+GET  /api/v1/health
+GET  /api/v1/capabilities
+GET  /api/v1/topology
+GET  /api/v1/topology/export
+POST /api/v1/topology/refresh
+POST /api/v1/discover
+```
+
+Read-only routes never collect. No snapshot returns `404 not_found`. Collection conflicts return `409 collection_in_progress`.
+
+## Capabilities
+
+`GET /api/v1/capabilities` includes:
 
 ```json
 {
-  "error": {
-    "code": "command_timeout",
-    "message": "Passive collection timed out in: interfaces, routes.",
-    "details": {
-      "failed_sources": ["interfaces", "routes"],
-      "timeout_sources": ["interfaces", "routes"]
-    },
-    "request_id": "local-request-id"
+  "link_path": {
+    "wifi_interface_source": "networksetup",
+    "wifi_bssid_source": "system_profiler",
+    "wifi_local_fallback_configured": false,
+    "ethernet_adjacent_device_source": "not_available_without_lldp"
   }
 }
 ```
 
-`failed_sources` and `timeout_sources` contain only normalized source identifiers, never raw command lines, stderr, environment values, or filesystem paths. Optional Wi-Fi profiler failure alone does not return `504`; it is represented in snapshot source status and warnings when material evidence is coherent.
+The fallback field is boolean only. The API never returns locally configured SSID/BSSID values through capabilities. Nmap capability exposes only resolution source, not executable path.
 
-Codes:
+## Passive refresh
 
-```text
-bad_request
-invalid_json
-invalid_host
-cross_origin_request
-invalid_target
-target_too_large
-unsupported_platform
-dependency_unavailable
-collection_in_progress
-command_timeout
-collection_failed
-not_found
-method_not_allowed
-internal_error
-```
-
-## `GET /api/v1/health`
-
-Returns service identity without collecting:
-
-```json
-{
-  "status": "ok",
-  "service": "homeNetTopo",
-  "version": "0.1.0",
-  "platform": "darwin"
-}
-```
-
-## `GET /api/v1/capabilities`
-
-Returns capability data without executing interface, route, ARP, Wi-Fi, or Nmap collection:
-
-```json
-{
-  "platform": "darwin",
-  "passive_collection": true,
-  "active_discovery": {
-    "available": true,
-    "unavailable_reason": null,
-    "tool": "nmap",
-    "resolution_source": "homebrew_arm64",
-    "mode": "host-discovery-xml",
-    "max_networks_per_request": 32,
-    "max_addresses_per_request": 1024,
-    "operation_timeout_default_seconds": 30,
-    "operation_timeout_min_seconds": 5,
-    "operation_timeout_max_seconds": 120,
-    "host_timeout_seconds": 5
-  },
-  "link_path": {
-    "wifi_interface_source": "networksetup",
-    "wifi_bssid_source": "system_profiler",
-    "ethernet_adjacent_device_source": "not_available_without_lldp"
-  },
-  "bind": "127.0.0.1",
-  "port": 8765,
-  "external_assets_required": false,
-  "reverse_dns_enabled": false,
-  "annotations_supported": false
-}
-```
-
-Allowed Nmap resolution sources are `explicit`, `homebrew_arm64`, `homebrew_intel`, `path`, and `unavailable`. The full executable path is never returned.
-
-`networksetup` identifies Wi-Fi BSD interfaces. `system_profiler` optionally enriches current SSID/BSSID. `link_path` documents evidence availability, not a claim that LLDP is implemented. The first release cannot guarantee Ethernet adjacent-device identity without LLDP or managed-topology evidence.
-
-When Nmap is unavailable, the browser retains passive use and exposes an explicit capability recheck. A successful passive refresh also re-reads capabilities before releasing the browser collection owner.
-
-## Read-only topology routes
-
-`GET /api/v1/topology` returns the latest snapshot without collecting. No snapshot returns `404 not_found`; query parameters return `400 bad_request`.
-
-`GET /api/v1/topology/export` downloads the latest snapshot without collecting or mutating:
-
-```text
-Content-Type: application/json; charset=utf-8
-Content-Disposition: attachment; filename="home-network-topology.json"
-Cache-Control: no-store
-```
-
-## `POST /api/v1/topology/refresh`
-
-Request:
-
-```json
-{}
-```
-
-Performs passive macOS collection only and never invokes Nmap. Fixed commands are:
+`POST /api/v1/topology/refresh` accepts `{}` and runs the fixed commands concurrently:
 
 ```text
 /sbin/ifconfig -a
@@ -164,22 +72,22 @@ Performs passive macOS collection only and never invokes Nmap. Fixed commands ar
 /usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType
 ```
 
-All five commands start concurrently. The collection still has one server lock owner; concurrency is internal and cannot start a second collection.
+Evidence roles:
 
-Interface, route, and ARP are material coherence sources. `wifi_interfaces` is fast media evidence from `networksetup`; `wifi` is best-effort current-association detail from `system_profiler`.
+| Source | Public meaning |
+|---|---|
+| `ifconfig inet` | local IPv4 addresses |
+| `ifconfig ether` | current interface MAC, potentially a private Wi-Fi MAC |
+| `networksetup Ethernet Address` | adapter hardware MAC |
+| current profiler BSSID | serving Wi-Fi radio |
+| profiler radio fields | SSID, channel, RSSI, noise, PHY, transmit rate |
+| ARP | IP-neighbor evidence excluding local IPs and local MACs |
 
-- If profiler detail succeeds, SSID/BSSID enriches the Wi-Fi attachment.
-- If profiler detail times out or fails to parse, `wifi` is failed with a warning while `wifi_interfaces` may still prevent a Wi-Fi default route from being mislabeled as Ethernet.
-- A coherent material result returns `200`, possibly with `partial: true`.
-- If all material evidence is incoherent, return `500 collection_failed` or `504 command_timeout`; details identify `failed_sources` and `timeout_sources`.
+Nearby-network profiler entries are ignored. A redacted BSSID is never guessed. A configured fallback fills missing current-link identity but automatic BSSID evidence has priority.
 
-The Wi-Fi parsers retain only hardware-port/current-association data and ignore nearby-network lists. A redacted BSSID is unavailable and is never guessed.
+## Active discovery
 
-Expected errors include `400 invalid_json`, `400 bad_request`, `400 invalid_host`, `403 cross_origin_request`, `409 collection_in_progress`, `413 target_too_large`, `415 bad_request`, `500 collection_failed`, `501 unsupported_platform`, and `504 command_timeout`.
-
-## `POST /api/v1/discover`
-
-Request:
+`POST /api/v1/discover` request:
 
 ```json
 {
@@ -188,42 +96,17 @@ Request:
 }
 ```
 
-### Phase A
+Phase A validates request/security/body, canonical IPv4, RFC 1918 membership, 1–32 networks, at most 1024 unique addresses, and timeout before commands.
 
-Before lock acquisition and commands:
+Phase B collects fresh interfaces, requires containment by eligible non-tunnel local RFC 1918 networks, assigns most-specific local owners, deduplicates only inside the same owner, preserves adjacent sibling targets and overlapping-owner targets, and recalculates the union.
 
-1. validate Host and same-origin boundary;
-2. enforce the 16 KiB body limit;
-3. require an object with 1–32 canonical network strings;
-4. require RFC 1918 membership in `10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`;
-5. reject loopback, link-local, multicast, unspecified, public, documentation, reserved, and every non-RFC1918 range;
-6. enforce at most 1024 unique addresses;
-7. validate timeout from 5 through 120 seconds.
-
-### Phase B
-
-After fresh passive collection, under the lock:
-
-1. require usable interface evidence;
-2. derive eligible RFC 1918 networks on non-tunnel interfaces;
-3. require each target to equal or be contained by one eligible network;
-4. assign each target to its most-specific containing local network;
-5. reject supernets, partial overlaps, adjacent networks outside the owner, unrelated RFC 1918 ranges, non-RFC1918 ranges, and tunnel-only ranges;
-6. remove exact duplicates and contained targets only within the same owner group;
-7. preserve adjacent sibling targets and targets owned by different overlapping local networks;
-8. recalculate the final address union.
-
-Interface timeout returns `504 command_timeout`. Unavailable or unparseable interface evidence returns `500 collection_failed`. Successful interface evidence with no eligible network returns `400 invalid_target`.
-
-Only after both phases pass may the service resolve and run:
+Only then may the service run:
 
 ```text
 <canonical-nmap-path> -sn -n --max-retries 1 --host-timeout 5s -oX - <effective-targets...>
 ```
 
-Nmap XML must have an `nmaprun` root. Only `up` hosts are considered. Every accepted IPv4 must be valid and belong to at least one effective target. Optional MAC values normalize to six lowercase hexadecimal octets. Duplicate hosts reduce deterministically. Malformed or out-of-effective-target evidence returns `500 collection_failed` and cannot publish a snapshot.
-
-Expected errors additionally include `424 dependency_unavailable`. A failed active operation preserves the previous snapshot and does not publish fresh intermediate passive data.
+Nmap XML requires `nmaprun`; only `up` hosts are considered; IPv4 and optional MAC must be canonical and inside an effective target. Evidence matching any local IP or local current/hardware MAC is excluded from peer creation and from `hosts_reported_up`. Invalid Nmap evidence is `500 collection_failed`.
 
 ## Snapshot schema
 
@@ -243,9 +126,7 @@ Expected errors additionally include `424 dependency_unavailable`. A failed acti
 }
 ```
 
-Active snapshots additionally contain `active_discovery` with requested/effective networks, completion, duration, validated host count, total timeout, fixed host timeout, and XML output format. `effective_networks` never widens adjacent sibling targets or collapses across owner groups.
-
-### Source types
+Source types include:
 
 ```text
 interfaces
@@ -253,17 +134,12 @@ routes
 neighbors
 wifi_interfaces
 wifi
+local_configuration
 nmap
 address_membership
 route_inference
 link_path_inference
 ```
-
-Source statuses are `ok`, `warning`, `failed`, and `not_run`.
-
-### Network and topology semantics
-
-Network descriptors expose canonical CIDR, interface, interface kind, active eligibility, reason, and address count. Tunnel networks are not active-discovery eligible.
 
 Node kinds:
 
@@ -278,35 +154,93 @@ device
 upstream_boundary
 ```
 
-`access_point` has three evidence levels:
+### Local host and interface identity
 
-- canonical BSSID: observed current AP radio;
-- current association without BSSID: observed AP boundary with unavailable identity;
-- Wi-Fi interface plus default route: inferred AP boundary with unavailable identity.
+The `local_host` node contains local IPv4 addresses, interface names, and all observed local current/hardware MAC addresses.
 
-A non-Wi-Fi path without LLDP/managed evidence uses `link_boundary` labelled `Intermediate L2 path unknown`. Peer `device` nodes remain subnet members, not transit hops.
+An `interface` node can contain:
 
-Edge types:
-
-```text
-host_uses_interface
-interface_associated_with
-interface_reaches_link
-attachment_reaches_gateway
-interface_reaches_gateway
-interface_attached_to_subnet
-gateway_for_subnet
-member_of
-routes_to
-upstream_of
+```json
+{
+  "properties": {
+    "kind": "physical",
+    "current_mac_address": "02:00:00:00:10:01",
+    "hardware_mac_address": "02:00:00:00:20:01",
+    "private_wifi_mac_address": "02:00:00:00:10:01"
+  }
+}
 ```
 
-An `interface_associated_with` edge is observed when association data exists and inferred when only Wi-Fi media plus the default route is known. `member_of` is peer context, never transit order. `routes_to` and `upstream_of` are Layer-3 inference. Every edge exposes observed status, confidence, evidence, and properties; the schema does not claim physical wiring.
+Values are synthetic. `private_wifi_mac_address` appears only when the active Wi-Fi MAC differs from the adapter hardware MAC.
+
+### Connected Wi-Fi node
+
+A serving radio is represented as `access_point` for schema compatibility, but its role is explicitly AP-or-relay unless confirmed:
+
+```json
+{
+  "kind": "access_point",
+  "label": "Synthetic Wi-Fi",
+  "mac_addresses": ["02:aa:bb:cc:dd:55"],
+  "properties": {
+    "connection": "Wi-Fi",
+    "role": "relay",
+    "identity": "BSSID configured locally",
+    "ssid": "Synthetic Wi-Fi",
+    "bssid": "02:aa:bb:cc:dd:55",
+    "channel": "44 (5GHz, 80MHz)",
+    "rssi_dbm": -41,
+    "noise_dbm": -91,
+    "phy_mode": "802.11ax",
+    "transmit_rate_mbps": 1200
+  }
+}
+```
+
+Automatic canonical BSSID uses identity `BSSID observed` and high confidence. A local fallback uses source `local_configuration`, identity `BSSID configured locally`, and medium confidence. BSSID proves the serving radio but not main AP versus relay or physical identity with the gateway.
+
+When no BSSID exists, a connected Wi-Fi node remains with role `access point or relay` and no invented MAC. Non-Wi-Fi links without LLDP/managed evidence use `Intermediate L2 path unknown`. Tunnel paths remain direct Layer-3 interface-to-gateway paths.
+
+Peer `device` nodes remain subnet context, never transit hops. `member_of` is not forwarding order. Path edge types include `interface_associated_with`, `attachment_reaches_gateway`, `interface_reaches_link`, `interface_reaches_gateway`, `routes_to`, and `upstream_of`.
+
+## Local service configuration
+
+The service accepts these startup-only fallback arguments:
+
+```text
+--wifi-interface <bsd-interface>
+--wifi-bssid <canonical-mac>
+--wifi-ssid <1-to-32-byte-ssid>
+--wifi-role access-point|relay
+```
+
+At least one fallback value requires `--wifi-interface`. Deployment writes them only to the current-user LaunchAgent ProgramArguments. They are not HTTP request fields and cannot be changed remotely through the API.
+
+## Errors
+
+Codes include:
+
+```text
+bad_request
+invalid_json
+invalid_host
+cross_origin_request
+invalid_target
+target_too_large
+unsupported_platform
+dependency_unavailable
+collection_in_progress
+command_timeout
+collection_failed
+not_found
+method_not_allowed
+internal_error
+```
 
 ## Browser response policy
 
-The CSP permits repository-owned fonts and `data:` fonts with `font-src 'self' data:`. It does not permit external font origins, external scripts, or external styles.
+The CSP permits repository fonts and `data:` fonts with `font-src 'self' data:` and rejects external script, style, and font origins.
 
 ## Compatibility
 
-Application version and topology schema version are independent. Existing field names and meanings cannot change incompatibly inside schema version `1`. Compatible node, edge, source, capability, and property additions are allowed when documented by this contract.
+Application version and topology schema version are independent. Compatible source, property, capability, node, and edge additions are allowed within schema version `1`; existing meanings cannot change incompatibly.
