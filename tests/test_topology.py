@@ -80,18 +80,20 @@ class TopologyTests(unittest.TestCase):
 
     def test_wifi_bssid_creates_observed_ap_then_inferred_gateway_path(self):
         interfaces, routes, neighbors, sources = self.parts()
+        attachments = (WirelessAttachmentFact("en0", "02:00:00:00:00:01", "Synthetic Wi-Fi"),)
         snapshot = build_snapshot(
             interfaces=interfaces,
             routes=routes,
             neighbors=neighbors,
-            wireless_attachments=(WirelessAttachmentFact("en0", "02:00:00:00:00:01", "Synthetic Wi-Fi"),),
+            wireless_attachments=attachments,
             sources=(*sources, SourceStatus("wifi", SourceStatusValue.OK)),
             collected_at="2026-08-03T00:00:00Z",
         )
         access_point = next(node for node in snapshot.nodes if node.kind.value == "access_point")
-        self.assertEqual(access_point.label, "Synthetic Wi-Fi")
         self.assertEqual(access_point.mac_addresses, ("02:00:00:00:00:01",))
-        self.assertEqual(access_point.properties, {"ssid": "Synthetic Wi-Fi", "identity_source": "bssid"})
+        self.assertEqual(access_point.properties["ssid"], "Synthetic Wi-Fi")
+        self.assertEqual(access_point.properties["role"], "access point or relay")
+        self.assertEqual(access_point.properties["identity"], "BSSID observed")
         associated = next(edge for edge in snapshot.edges if edge.type.value == "interface_associated_with")
         toward_gateway = next(edge for edge in snapshot.edges if edge.type.value == "attachment_reaches_gateway")
         self.assertTrue(associated.observed)
@@ -110,16 +112,21 @@ class TopologyTests(unittest.TestCase):
             sources=(*sources, SourceStatus("wifi", SourceStatusValue.OK)),
             collected_at="2026-08-03T00:00:00Z",
         )
-        self.assertFalse(any(node.kind.value in {"access_point", "link_boundary"} for node in snapshot.nodes))
-        path = next(edge for edge in snapshot.edges if edge.type.value == "interface_reaches_gateway")
-        self.assertEqual(path.source, "interface:en0")
-        self.assertEqual(path.target, "gateway:192.168.1.1")
-        self.assertEqual(path.properties, {
-            "path_kind": "Wi-Fi",
-            "link_evidence": "Wi-Fi interface carries the default route",
-            "access_point_details": "Hidden by macOS Location Services privacy controls",
+        attachment = next(node for node in snapshot.nodes if node.kind.value == "access_point")
+        self.assertEqual(attachment.id, "access-point:wifi-en0")
+        self.assertEqual(attachment.label, "Connected Wi-Fi node")
+        self.assertEqual(attachment.properties, {
+            "connection": "Wi-Fi",
+            "role": "access point or relay",
+            "identity": "Not exposed by macOS",
         })
-        self.assertNotIn("physical_identity_relation", path.properties)
+        self.assertEqual(attachment.mac_addresses, ())
+        associated = next(edge for edge in snapshot.edges if edge.type.value == "interface_associated_with")
+        toward_gateway = next(edge for edge in snapshot.edges if edge.type.value == "attachment_reaches_gateway")
+        self.assertTrue(associated.observed)
+        self.assertEqual(associated.target, attachment.id)
+        self.assertEqual(toward_gateway.source, attachment.id)
+        self.assertFalse(any(node.kind.value == "link_boundary" for node in snapshot.nodes))
 
     def test_wifi_media_only_evidence_does_not_fall_back_to_unknown_l2_transit(self):
         interfaces, routes, neighbors, sources = self.parts()
@@ -131,12 +138,14 @@ class TopologyTests(unittest.TestCase):
             sources=(*sources, SourceStatus("wifi_interfaces", SourceStatusValue.OK)),
             collected_at="2026-08-03T00:00:00Z",
         )
-        self.assertFalse(any(node.kind.value in {"access_point", "link_boundary"} for node in snapshot.nodes))
-        path = next(edge for edge in snapshot.edges if edge.type.value == "interface_reaches_gateway")
-        self.assertFalse(path.observed)
-        self.assertEqual(path.evidence[0].source, "wifi_interfaces")
-        self.assertEqual(path.properties["path_kind"], "Wi-Fi")
-        self.assertIn("Location Services", path.properties["access_point_details"])
+        attachment = next(node for node in snapshot.nodes if node.kind.value == "access_point")
+        associated = next(edge for edge in snapshot.edges if edge.type.value == "interface_associated_with")
+        self.assertEqual(attachment.label, "Connected Wi-Fi node")
+        self.assertEqual(attachment.properties["role"], "access point or relay")
+        self.assertEqual(attachment.properties["identity"], "Not exposed by macOS")
+        self.assertFalse(associated.observed)
+        self.assertEqual(associated.evidence[0].source, "wifi_interfaces")
+        self.assertFalse(any(node.kind.value == "link_boundary" for node in snapshot.nodes))
 
     def test_same_observed_mac_can_link_ap_and_gateway_identity(self):
         interfaces, routes, _, sources = self.parts()
