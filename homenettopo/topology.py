@@ -37,6 +37,9 @@ from .neighbors import NeighborFact
 from .routes import RouteFact
 
 
+_OPTIONAL_WIFI_SOURCES = frozenset({"wifi", "wifi_interfaces"})
+
+
 def _slug(value: str) -> str:
     """Convert an address-like value into a stable identifier fragment."""
 
@@ -50,6 +53,29 @@ def _content_fingerprint(snapshot: TopologySnapshot) -> str:
     payload.pop("snapshot_id", None)
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:20]
+
+
+def _normalize_optional_sources(sources: Iterable[SourceStatus]) -> list[SourceStatus]:
+    """Keep optional Wi-Fi detail failures from making a usable snapshot partial.
+
+    ``networksetup`` and ``system_profiler`` enrich the host-to-gateway path, but
+    neither is required to identify this Mac, its interfaces, routes, neighbors,
+    or eligible active targets. Their failure remains visible in source details as
+    a warning while the graph expresses any remaining path uncertainty directly.
+    """
+
+    normalized: list[SourceStatus] = []
+    for source in sources:
+        if source.type in _OPTIONAL_WIFI_SOURCES and source.status is SourceStatusValue.FAILED:
+            message = (
+                "Wi-Fi access-point identity details are unavailable; the topology remains usable."
+                if source.type == "wifi"
+                else "Wi-Fi interface classification is unavailable; the topology remains usable."
+            )
+            normalized.append(replace(source, status=SourceStatusValue.WARNING, message=message))
+        else:
+            normalized.append(source)
+    return normalized
 
 
 def build_snapshot(
@@ -72,6 +98,10 @@ def build_snapshot(
     without inventing its identity. A non-Wi-Fi path without LLDP or managed
     topology evidence remains an explicit ``link_boundary``. Exact AP/gateway
     MAC equality is recorded, but different MACs do not prove different boxes.
+
+    Interface addresses are authoritative local identity. ARP or Nmap observations
+    that repeat one of those addresses are never emitted as peer devices and never
+    increase the active-discovery host count.
     """
 
     timestamp = collected_at or utc_now()
@@ -79,9 +109,14 @@ def build_snapshot(
     route_items = tuple(routes)
     neighbor_items = tuple(neighbors)
     wireless_items = tuple(wireless_attachments)
-    active_items = tuple(active_hosts)
-    source_items = list(sources)
-    warning_list = list(warnings)
+    local_addresses = frozenset(
+        address.address
+        for interface in interface_items
+        for address in interface.addresses
+    )
+    active_items = tuple(host for host in active_hosts if host.address not in local_addresses)
+    source_items = _normalize_optional_sources(sources)
+    warning_list = [warning for warning in warnings if warning.source not in _OPTIONAL_WIFI_SOURCES]
 
     nodes: dict[str, Node] = {}
     edges: dict[str, Edge] = {}
@@ -99,7 +134,16 @@ def build_snapshot(
             source_items.append(SourceStatus(source_type, SourceStatusValue.OK))
 
     host_id = "local-host"
-    nodes[host_id] = Node(host_id, NodeKind.LOCAL_HOST, "This Mac", confidence=Confidence.HIGH, observed_at=timestamp)
+    nodes[host_id] = Node(
+        host_id,
+        NodeKind.LOCAL_HOST,
+        "This Mac",
+        addresses=tuple(sorted(local_addresses, key=ipaddress.IPv4Address)),
+        interface_names=tuple(sorted(interface_by_name)),
+        properties={"role": "local_endpoint"},
+        confidence=Confidence.HIGH,
+        observed_at=timestamp,
+    )
 
     for interface in interface_items:
         interface_id = f"interface:{interface.name}"
@@ -366,6 +410,8 @@ def build_snapshot(
     names_by_address: dict[str, set[str]] = defaultdict(set)
     evidence_by_address: dict[str, list[Evidence]] = defaultdict(list)
     for neighbor in neighbor_items:
+        if neighbor.address in local_addresses:
+            continue
         if neighbor.mac_address:
             macs_by_address[neighbor.address].add(neighbor.mac_address)
         if neighbor.name:
@@ -426,7 +472,12 @@ def build_snapshot(
         path_edge = edges[path_edge_id]
         edges[path_edge_id] = replace(path_edge, properties={**path_edge.properties, "physical_identity_relation": relation})
 
-    mode = "active" if active_metadata else "passive"
+    normalized_active_metadata = (
+        replace(active_metadata, hosts_reported_up=len(active_items))
+        if active_metadata is not None
+        else None
+    )
+    mode = "active" if normalized_active_metadata else "passive"
     snapshot = TopologySnapshot(
         schema_version="1",
         snapshot_id="pending",
@@ -439,7 +490,7 @@ def build_snapshot(
         networks=tuple(sorted(networks.values(), key=lambda item: (int(ipaddress.IPv4Network(item.cidr).network_address), ipaddress.IPv4Network(item.cidr).prefixlen, item.interface))),
         nodes=tuple(sorted(nodes.values(), key=lambda item: item.id)),
         edges=tuple(sorted(edges.values(), key=lambda item: item.id)),
-        active_discovery=active_metadata,
+        active_discovery=normalized_active_metadata,
     )
     snapshot = replace(snapshot, snapshot_id=_content_fingerprint(snapshot))
     snapshot.validate()
