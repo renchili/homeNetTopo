@@ -1,10 +1,9 @@
 """Build deterministic topology with explicit path uncertainty.
 
-A local endpoint can observe its interface, Wi-Fi media, optional current BSSID,
-route gateway, and ARP mappings. It cannot normally enumerate transparent
-Ethernet switches. The graph keeps a connected Wi-Fi attachment visible even
-when macOS withholds its BSSID; the node is then an access-point-or-relay role,
-not an invented device identity. Peer devices are never transit.
+A local endpoint can observe its IP addresses, active interface MAC addresses,
+adapter hardware MAC addresses, optional current BSSID, route gateway, and ARP
+mappings. Local adapter addresses and the serving BSSID are different identities
+and must never be merged. Peer devices are never transit hops.
 """
 
 from __future__ import annotations
@@ -56,19 +55,13 @@ def _content_fingerprint(snapshot: TopologySnapshot) -> str:
 
 
 def _normalize_optional_sources(sources: Iterable[SourceStatus]) -> list[SourceStatus]:
-    """Keep optional Wi-Fi detail failures from making a usable snapshot partial.
-
-    ``networksetup`` and ``system_profiler`` enrich the host-to-gateway path, but
-    neither is required to identify this Mac, its interfaces, routes, neighbors,
-    or eligible active targets. Their failure remains visible in source details as
-    a warning while the graph expresses any remaining path uncertainty directly.
-    """
+    """Keep optional Wi-Fi detail failures from making a usable snapshot partial."""
 
     normalized: list[SourceStatus] = []
     for source in sources:
         if source.type in _OPTIONAL_WIFI_SOURCES and source.status is SourceStatusValue.FAILED:
             message = (
-                "Wi-Fi access-point identity details are unavailable; the topology remains usable."
+                "Wi-Fi association details are unavailable; the topology remains usable."
                 if source.type == "wifi"
                 else "Wi-Fi interface classification is unavailable; the topology remains usable."
             )
@@ -76,6 +69,32 @@ def _normalize_optional_sources(sources: Iterable[SourceStatus]) -> list[SourceS
         else:
             normalized.append(source)
     return normalized
+
+
+def _wireless_node_properties(wireless: WirelessAttachmentFact) -> dict[str, object]:
+    """Expose useful radio fields without inventing AP-versus-relay identity."""
+
+    role = wireless.role or "access point or relay"
+    if wireless.bssid:
+        identity = "BSSID configured locally" if wireless.configured else "BSSID observed"
+    else:
+        identity = "Not exposed by macOS"
+    properties: dict[str, object] = {
+        "connection": "Wi-Fi",
+        "role": role,
+        "identity": identity,
+    }
+    optional = {
+        "ssid": wireless.ssid,
+        "bssid": wireless.bssid,
+        "channel": wireless.channel,
+        "rssi_dbm": wireless.rssi_dbm,
+        "noise_dbm": wireless.noise_dbm,
+        "phy_mode": wireless.phy_mode,
+        "transmit_rate_mbps": wireless.transmit_rate_mbps,
+    }
+    properties.update({key: value for key, value in optional.items() if value is not None})
+    return properties
 
 
 def build_snapshot(
@@ -93,15 +112,10 @@ def build_snapshot(
 ) -> TopologySnapshot:
     """Merge normalized evidence into one immutable topology snapshot.
 
-    A BSSID identifies the associated Wi-Fi radio but does not, by itself, prove
-    whether that radio belongs to the gateway, a mesh node, or a repeater. When
-    only hardware-port evidence is available, the graph retains a generic
-    connected Wi-Fi node whose role is ``access point or relay``. A non-Wi-Fi path
-    without LLDP or managed topology evidence remains an explicit link boundary.
-
-    Interface addresses are authoritative local identity. ARP or Nmap observations
-    that repeat one of those addresses are never emitted as peer devices and never
-    increase the active-discovery host count.
+    The active interface MAC can be a per-network private Wi-Fi address, while
+    ``networksetup`` reports the adapter hardware MAC and ``system_profiler``
+    reports the serving radio BSSID. All local MACs remain on the host/interface
+    nodes and are excluded from ARP/Nmap peer creation.
     """
 
     timestamp = collected_at or utc_now()
@@ -109,12 +123,26 @@ def build_snapshot(
     route_items = tuple(routes)
     neighbor_items = tuple(neighbors)
     wireless_items = tuple(wireless_attachments)
+    interface_by_name = {item.name: item for item in interface_items}
+    wireless_by_interface = {item.interface: item for item in wireless_items}
     local_addresses = frozenset(
         address.address
         for interface in interface_items
         for address in interface.addresses
     )
-    active_items = tuple(host for host in active_hosts if host.address not in local_addresses)
+    local_macs = frozenset(
+        mac
+        for mac in (
+            *(item.current_mac_address for item in interface_items),
+            *(item.hardware_mac_address for item in wireless_items),
+        )
+        if mac
+    )
+    active_items = tuple(
+        host
+        for host in active_hosts
+        if host.address not in local_addresses and (host.mac_address is None or host.mac_address not in local_macs)
+    )
     source_items = _normalize_optional_sources(sources)
     warning_list = [warning for warning in warnings if warning.source not in _OPTIONAL_WIFI_SOURCES]
 
@@ -123,8 +151,6 @@ def build_snapshot(
     networks: dict[tuple[str, str], NetworkDescriptor] = {}
     subnet_networks: dict[str, ipaddress.IPv4Network] = {}
     gateway_by_address: dict[str, str] = {}
-    interface_by_name = {item.name: item for item in interface_items}
-    wireless_by_interface = {item.interface: item for item in wireless_items}
     attachment_gateway_pairs: list[tuple[str, str, str]] = []
 
     def add_derived_source(source_type: str) -> None:
@@ -139,6 +165,7 @@ def build_snapshot(
         NodeKind.LOCAL_HOST,
         "This Mac",
         addresses=tuple(sorted(local_addresses, key=ipaddress.IPv4Address)),
+        mac_addresses=tuple(sorted(local_macs)),
         interface_names=tuple(sorted(interface_by_name)),
         properties={"role": "local_endpoint"},
         confidence=Confidence.HIGH,
@@ -147,14 +174,30 @@ def build_snapshot(
 
     for interface in interface_items:
         interface_id = f"interface:{interface.name}"
-        evidence = Evidence("interfaces", "Interface configuration", timestamp, {"flags": list(interface.flags)})
+        wireless = wireless_by_interface.get(interface.name)
+        hardware_mac = wireless.hardware_mac_address if wireless else None
+        interface_macs = tuple(sorted({mac for mac in (interface.current_mac_address, hardware_mac) if mac}))
+        properties: dict[str, object] = {"kind": interface.kind, "flags": list(interface.flags)}
+        if interface.current_mac_address:
+            properties["current_mac_address"] = interface.current_mac_address
+        if hardware_mac:
+            properties["hardware_mac_address"] = hardware_mac
+        if wireless and interface.current_mac_address and hardware_mac and interface.current_mac_address != hardware_mac:
+            properties["private_wifi_mac_address"] = interface.current_mac_address
+        evidence = Evidence(
+            "interfaces",
+            "Interface configuration",
+            timestamp,
+            {"flags": list(interface.flags), "current_mac_available": interface.current_mac_address is not None},
+        )
         nodes[interface_id] = Node(
             interface_id,
             NodeKind.INTERFACE,
             interface.name,
             addresses=tuple(address.address for address in interface.addresses),
+            mac_addresses=interface_macs,
             interface_names=(interface.name,),
-            properties={"kind": interface.kind, "flags": list(interface.flags)},
+            properties=properties,
             evidence=(evidence,),
             confidence=Confidence.HIGH,
             observed_at=timestamp,
@@ -225,16 +268,22 @@ def build_snapshot(
 
         wireless = wireless_by_interface.get(interface_name)
         if wireless is not None:
-            association_observed = wireless.associated
-            evidence_source = "wifi" if association_observed else "wifi_interfaces"
-            evidence_summary = "Current Wi-Fi association" if association_observed else "Wi-Fi hardware port used by the default route"
+            automatically_observed = wireless.associated and not wireless.configured
+            evidence_source = "local_configuration" if wireless.configured else ("wifi" if wireless.associated else "wifi_interfaces")
+            evidence_summary = (
+                "Locally configured Wi-Fi attachment fallback"
+                if wireless.configured
+                else "Current Wi-Fi association"
+                if wireless.associated
+                else "Wi-Fi hardware port used by the default route"
+            )
             wifi_evidence = Evidence(
                 evidence_source,
                 evidence_summary,
                 timestamp,
                 {
                     "interface": interface_name,
-                    "association_observed": association_observed,
+                    "association_observed": automatically_observed,
                     "bssid_available": wireless.identified,
                     "ssid_available": wireless.ssid is not None,
                 },
@@ -244,22 +293,17 @@ def build_snapshot(
                 if wireless.identified
                 else f"access-point:wifi-{interface_name}"
             )
-            properties = {
-                "connection": "Wi-Fi",
-                "role": "access point or relay",
-                "identity": "BSSID observed" if wireless.identified else "Not exposed by macOS",
-            }
-            if wireless.ssid:
-                properties["ssid"] = wireless.ssid
+            node_role = wireless.role or "access point or relay"
+            label = wireless.ssid or ("Wi-Fi relay" if node_role == "relay" else "Connected Wi-Fi node")
             nodes[attachment_id] = Node(
                 attachment_id,
                 NodeKind.ACCESS_POINT,
-                wireless.ssid or "Connected Wi-Fi node",
+                label,
                 mac_addresses=(wireless.bssid,) if wireless.bssid else (),
                 interface_names=(interface_name,),
-                properties=properties,
+                properties=_wireless_node_properties(wireless),
                 evidence=(wifi_evidence,),
-                confidence=Confidence.HIGH if wireless.identified else Confidence.MEDIUM,
+                confidence=Confidence.HIGH if wireless.identified and not wireless.configured else Confidence.MEDIUM,
                 observed_at=timestamp,
             )
             edge_id = f"edge:{interface_id}:{attachment_id}"
@@ -268,9 +312,9 @@ def build_snapshot(
                 interface_id,
                 attachment_id,
                 EdgeType.INTERFACE_ASSOCIATED_WITH,
-                association_observed,
-                Confidence.HIGH if wireless.identified else Confidence.MEDIUM,
-                (wifi_evidence,) if association_observed else (wifi_evidence, route_evidence),
+                automatically_observed,
+                Confidence.HIGH if automatically_observed and wireless.identified else Confidence.MEDIUM,
+                (wifi_evidence,) if automatically_observed else (wifi_evidence, route_evidence),
                 {"relationship": "connected Wi-Fi attachment"},
             )
             path_edge_id = f"edge:{attachment_id}:{gateway_id}"
@@ -415,7 +459,7 @@ def build_snapshot(
     names_by_address: dict[str, set[str]] = defaultdict(set)
     evidence_by_address: dict[str, list[Evidence]] = defaultdict(list)
     for neighbor in neighbor_items:
-        if neighbor.address in local_addresses:
+        if neighbor.address in local_addresses or (neighbor.mac_address is not None and neighbor.mac_address in local_macs):
             continue
         if neighbor.mac_address:
             macs_by_address[neighbor.address].add(neighbor.mac_address)
