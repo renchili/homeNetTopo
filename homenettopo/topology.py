@@ -5,6 +5,9 @@ route gateway, and ARP mappings. It cannot normally enumerate transparent
 Ethernet switches. The graph creates an access-point node only when a BSSID
 identifies one; Wi-Fi media without identity is represented on the path edge.
 Peer devices are never transit.
+
+Legacy anonymous-node fields ``physical_identity_with_gateway`` and the identity
+source ``wifi_interface_and_default_route`` are intentionally not emitted.
 """
 
 from __future__ import annotations
@@ -89,9 +92,9 @@ def build_snapshot(
 
     A BSSID identifies an AP radio and is the minimum evidence required to emit
     an access-point node. Interface-only Wi-Fi evidence is represented as a
-    direct interface-to-gateway path with explicit privacy-limited properties;
-    it never creates an anonymous physical device. A non-Wi-Fi path without
-    LLDP or managed topology evidence remains an explicit ``link_boundary``.
+    direct interface-to-gateway path with a concise privacy explanation; it never
+    creates an anonymous physical device. A non-Wi-Fi path without LLDP or managed
+    topology evidence remains an explicit ``link_boundary``.
 
     Interface addresses are authoritative local identity. ARP or Nmap observations
     that repeat one of those addresses are never emitted as peer devices and never
@@ -233,10 +236,9 @@ def build_snapshot(
             if not wireless.identified:
                 edge_id = f"edge:{interface_id}:{gateway_id}:wifi-path"
                 properties = {
-                    "path_kind": "wifi",
-                    "access_point_identity": "unavailable",
-                    "identity_reason": "macos_location_privilege_required",
-                    "intermediate_visibility": "access_point_not_identified",
+                    "path_kind": "Wi-Fi",
+                    "link_evidence": "Wi-Fi interface carries the default route",
+                    "access_point_details": "Hidden by macOS Location Services privacy controls",
                 }
                 if wireless.ssid:
                     properties["ssid"] = wireless.ssid
