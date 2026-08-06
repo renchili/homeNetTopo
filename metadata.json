@@ -31,6 +31,11 @@
     "wifi_current_association_only": true,
     "nearby_wifi_scan_retained": false,
     "wifi_detail_failure_is_optional": true,
+    "wifi_current_mac_source": "ifconfig ether",
+    "wifi_hardware_mac_source": "networksetup Ethernet Address",
+    "wifi_bssid_source": "system_profiler current association",
+    "wifi_local_fallback_supported": true,
+    "automatic_bssid_precedes_fallback": true,
     "ethernet_adjacent_device_source": "not_available_without_lldp"
   },
   "active_discovery": {
@@ -67,35 +72,40 @@
     "nmap_resolution_source_exposed": true,
     "unsupported_platform_reason": "unsupported_platform",
     "nmap_state_visible_in_ui": true,
-    "nmap_recheck_action_when_unavailable": true
+    "nmap_recheck_action_when_unavailable": true,
+    "wifi_fallback_values_exposed": false,
+    "wifi_fallback_presence_exposed": true
   },
   "gateway_path": {
-    "wifi_attachment": "BSSID identifies the associated AP radio when exposed; Wi-Fi interface plus default route infers an unidentified AP boundary otherwise",
+    "wifi_attachment": "BSSID identifies the connected Wi-Fi radio; role remains access point or relay unless an approved local source confirms it",
+    "wifi_without_bssid": "connected Wi-Fi node without invented identity",
+    "wifi_local_identity": "current/private MAC and hardware MAC remain on the local host and interface",
+    "wifi_serving_identity": "BSSID remains on the connected Wi-Fi node",
     "ethernet_attachment_without_lldp": "Intermediate L2 path unknown",
-    "different_ap_and_gateway_macs": "unknown physical identity relation",
+    "different_ap_and_gateway_macs": "not_established physical identity relation",
     "same_ap_and_gateway_mac": "same_mac positive relation",
     "subnet_devices_are_transit_hops": false,
     "tunnels_remain_visible": true
   },
   "graph_layout": {
     "coordinate_convention": "top-left-world-coordinates",
-    "node_width": 180,
-    "node_height": 72,
-    "minimum_horizontal_gap": 64,
-    "minimum_vertical_gap": 28,
-    "main_path": "local-host-interface-attachment-gateway-upstream",
+    "node_width": 156,
+    "node_height": 60,
+    "minimum_horizontal_gap": 38,
+    "minimum_vertical_gap": 20,
+    "main_path": "local-host-interface-wifi-attachment-gateway-upstream",
     "peer_layout": "subnet-context-groups-below-path",
     "camera": "svg-viewbox"
   },
   "first_release_exclusions": [
     "reverse-dns-enrichment",
     "online-hostname-or-vendor-lookup",
-    "user-annotations",
     "persistent-snapshots",
     "lan-bind",
     "active-ipv6-discovery",
     "port-or-service-scanning",
-    "guaranteed-ethernet-switch-enumeration"
+    "guaranteed-ethernet-switch-enumeration",
+    "automatic-proof-of-wifi-relay-role"
   ],
   "verification": {
     "source_generated": true,
@@ -111,6 +121,7 @@
     "telemetry_required": false,
     "external_frontend_assets_required": false,
     "automatic_persistence": false,
-    "commit_real_ssid_or_bssid": false
+    "commit_real_ssid_or_bssid": false,
+    "commit_launch_agent_plist": false
   }
 }
