@@ -100,7 +100,7 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(toward_gateway.source, access_point.id)
         self.assertFalse(any(node.kind.value == "link_boundary" for node in snapshot.nodes))
 
-    def test_redacted_wifi_identity_collapses_to_direct_wifi_path(self):
+    def test_redacted_wifi_identity_is_visible_without_guessing(self):
         interfaces, routes, neighbors, sources = self.parts()
         snapshot = build_snapshot(
             interfaces=interfaces,
@@ -119,7 +119,7 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(path.properties["identity_reason"], "macos_location_privilege_required")
         self.assertNotIn("physical_identity_relation", path.properties)
 
-    def test_wifi_media_only_evidence_does_not_create_anonymous_ap(self):
+    def test_wifi_media_only_evidence_does_not_fall_back_to_unknown_l2_transit(self):
         interfaces, routes, neighbors, sources = self.parts()
         snapshot = build_snapshot(
             interfaces=interfaces,
