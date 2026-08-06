@@ -114,9 +114,11 @@ class TopologyTests(unittest.TestCase):
         path = next(edge for edge in snapshot.edges if edge.type.value == "interface_reaches_gateway")
         self.assertEqual(path.source, "interface:en0")
         self.assertEqual(path.target, "gateway:192.168.1.1")
-        self.assertEqual(path.properties["path_kind"], "wifi")
-        self.assertEqual(path.properties["access_point_identity"], "unavailable")
-        self.assertEqual(path.properties["identity_reason"], "macos_location_privilege_required")
+        self.assertEqual(path.properties, {
+            "path_kind": "Wi-Fi",
+            "link_evidence": "Wi-Fi interface carries the default route",
+            "access_point_details": "Hidden by macOS Location Services privacy controls",
+        })
         self.assertNotIn("physical_identity_relation", path.properties)
 
     def test_wifi_media_only_evidence_does_not_fall_back_to_unknown_l2_transit(self):
@@ -133,8 +135,8 @@ class TopologyTests(unittest.TestCase):
         path = next(edge for edge in snapshot.edges if edge.type.value == "interface_reaches_gateway")
         self.assertFalse(path.observed)
         self.assertEqual(path.evidence[0].source, "wifi_interfaces")
-        self.assertEqual(path.properties["path_kind"], "wifi")
-        self.assertEqual(path.properties["intermediate_visibility"], "access_point_not_identified")
+        self.assertEqual(path.properties["path_kind"], "Wi-Fi")
+        self.assertIn("Location Services", path.properties["access_point_details"])
 
     def test_same_observed_mac_can_link_ap_and_gateway_identity(self):
         interfaces, routes, _, sources = self.parts()
