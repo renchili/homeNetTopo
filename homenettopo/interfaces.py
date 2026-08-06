@@ -43,12 +43,12 @@ class InterfaceFact:
 
 @dataclass(frozen=True)
 class WirelessAttachmentFact:
-    """Wi-Fi media plus optional current-association evidence.
+    """Wi-Fi media, association, radio identity, and optional local fallback.
 
-    ``hardware_mac_address`` belongs to the local Wi-Fi adapter. ``bssid``
-    belongs to the radio currently serving the Mac and may represent a main AP,
-    mesh node, or relay. ``role`` is populated only by explicit local
-    configuration; automatic collection does not guess AP versus relay.
+    ``hardware_mac_address`` belongs to the local adapter. ``bssid`` belongs to
+    the serving radio. ``bssid_observed`` records whether that BSSID came from
+    current-association evidence rather than local configuration. ``configured``
+    records any local fallback such as a user-confirmed relay role.
     """
 
     interface: str
@@ -63,12 +63,22 @@ class WirelessAttachmentFact:
     transmit_rate_mbps: int | None = None
     role: str | None = None
     configured: bool = False
+    bssid_observed: bool = False
 
     @property
     def identified(self) -> bool:
         """Return whether the serving radio has a canonical BSSID."""
 
         return self.bssid is not None
+
+
+def _clean_text(value: Any) -> str | None:
+    """Return useful profiler text while rejecting redaction placeholders."""
+
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return None if cleaned.lower() in _REDACTED else cleaned
 
 
 def _canonical_mac(value: Any) -> str | None:
@@ -99,12 +109,7 @@ def _kind(name: str, flags: tuple[str, ...]) -> str:
 
 
 def parse_ifconfig(text: str) -> tuple[InterfaceFact, ...]:
-    """Return deterministic IPv4 and current-MAC facts from macOS ``ifconfig``.
-
-    The ``ether`` row is the MAC currently active on the interface. On a Wi-Fi
-    network with Private Wi-Fi Address enabled, it can differ from the adapter's
-    hardware address reported by ``networksetup``.
-    """
+    """Return deterministic IPv4 and current-MAC facts from macOS ``ifconfig``."""
 
     blocks: list[tuple[str, list[str]]] = []
     current_name: str | None = None
@@ -150,24 +155,12 @@ def parse_ifconfig(text: str) -> tuple[InterfaceFact, ...]:
                 except IndexError:
                     peer = None
             addresses.append(InterfaceAddress(address, prefix, str(interface.network), peer))
-        result.append(
-            InterfaceFact(
-                name,
-                flags,
-                _kind(name, flags),
-                tuple(sorted(addresses, key=lambda item: item.address)),
-                current_mac_address,
-            )
-        )
+        result.append(InterfaceFact(name, flags, _kind(name, flags), tuple(sorted(addresses, key=lambda item: item.address)), current_mac_address))
     return tuple(sorted(result, key=lambda item: item.name))
 
 
 def parse_wifi_hardware_ports(text: str) -> tuple[WirelessAttachmentFact, ...]:
-    """Return Wi-Fi BSD interfaces and adapter hardware MAC addresses.
-
-    ``Ethernet Address`` in this command identifies the adapter hardware address;
-    it is not the current BSSID and may differ from ``ifconfig``'s active MAC.
-    """
+    """Return Wi-Fi BSD interfaces and adapter hardware MAC addresses."""
 
     facts: dict[str, WirelessAttachmentFact] = {}
     blocks = re.split(r"\n\s*\n", text.strip()) if text.strip() else []
@@ -196,15 +189,6 @@ def parse_wifi_hardware_ports(text: str) -> tuple[WirelessAttachmentFact, ...]:
     if text.strip() and not recognized:
         raise ValueError("networksetup output did not contain hardware-port blocks")
     return tuple(facts[name] for name in sorted(facts))
-
-
-def _clean_text(value: Any) -> str | None:
-    """Return useful profiler text while rejecting redaction placeholders."""
-
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip()
-    return None if cleaned.lower() in _REDACTED else cleaned
 
 
 def _decode_profiler_json(text: str) -> dict[str, Any]:
@@ -243,20 +227,46 @@ def _find_value(value: Any, fragments: tuple[str, ...]) -> Any:
     return None
 
 
+def _find_named(value: Any, names: tuple[str, ...]) -> Any:
+    """Find a nested profiler value by an exact key or exact suffix."""
+
+    if isinstance(value, dict):
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in names or any(lowered.endswith(f"_{name}") for name in names):
+                return item
+        for item in value.values():
+            found = _find_named(item, names)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_named(item, names)
+            if found is not None:
+                return found
+    return None
+
+
 def _find_bssid(value: Any) -> str | None:
     """Find and normalize a BSSID in one current-network object."""
 
     return _canonical_mac(_find_value(value, ("bssid",)))
 
 
-def _parse_signed_int(value: Any) -> int | None:
-    """Extract one signed integer from a profiler measurement string."""
+def _signed_numbers(value: Any) -> tuple[int, ...]:
+    """Extract all signed integers from a profiler measurement string."""
 
     text = _clean_text(value)
     if text is None:
-        return None
-    match = re.search(r"-?\d+", text.replace(",", ""))
-    return int(match.group(0)) if match else None
+        return ()
+    return tuple(int(match) for match in re.findall(r"-?\d+", text.replace(",", "")))
+
+
+def _first_signed(value: Any) -> int | None:
+    """Return the first signed integer in one profiler field."""
+
+    numbers = _signed_numbers(value)
+    return numbers[0] if numbers else None
 
 
 def _airport_interfaces(value: Any) -> list[dict[str, Any]]:
@@ -288,14 +298,21 @@ def _current_network(value: Any) -> tuple[bool, dict[str, Any]]:
                     ssid = _clean_text(key)
                     if ssid:
                         break
+        combined = _signed_numbers(_find_named(value, ("signal_noise",)))
+        rssi = _first_signed(_find_named(value, ("rssi", "signal")))
+        noise = _first_signed(_find_named(value, ("noise",)))
+        if rssi is None and combined:
+            rssi = combined[0]
+        if noise is None and len(combined) > 1:
+            noise = combined[1]
         return True, {
             "ssid": ssid,
             "bssid": _find_bssid(value),
             "channel": _clean_text(_find_value(value, ("channel",))),
-            "rssi_dbm": _parse_signed_int(_find_value(value, ("signal", "rssi"))),
-            "noise_dbm": _parse_signed_int(_find_value(value, ("noise",))),
+            "rssi_dbm": rssi,
+            "noise_dbm": noise,
             "phy_mode": _clean_text(_find_value(value, ("phymode", "phy_mode", "phy mode"))),
-            "transmit_rate_mbps": _parse_signed_int(_find_value(value, ("rate",))),
+            "transmit_rate_mbps": _first_signed(_find_named(value, ("transmit_rate", "rate"))),
         }
     text = _clean_text(value)
     return (text is not None), {"ssid": text}
@@ -308,11 +325,11 @@ def _first(existing: Any, candidate: Any) -> Any:
 
 
 def merge_wireless_facts(*collections: Iterable[WirelessAttachmentFact]) -> tuple[WirelessAttachmentFact, ...]:
-    """Merge hardware, association, metrics, and optional local configuration.
+    """Merge hardware, automatic association, metrics, and local configuration.
 
-    The merge is field-wise. A detailed profiler fact must not erase the hardware
-    MAC from ``networksetup``; likewise a local fallback must not replace a BSSID
-    observed automatically later in the same collection.
+    An automatically observed BSSID always wins over a configured fallback.
+    Configured role/SSID can remain alongside that automatic identity without
+    downgrading its provenance or association state.
     """
 
     facts: dict[str, WirelessAttachmentFact] = {}
@@ -322,8 +339,12 @@ def merge_wireless_facts(*collections: Iterable[WirelessAttachmentFact]) -> tupl
             if existing is None:
                 facts[candidate.interface] = candidate
                 continue
-            observed_candidate = candidate.identified and candidate.associated and not candidate.configured
-            bssid = candidate.bssid if observed_candidate or existing.bssid is None else existing.bssid
+            if candidate.bssid_observed:
+                bssid = candidate.bssid
+            elif existing.bssid is None:
+                bssid = candidate.bssid
+            else:
+                bssid = existing.bssid
             facts[candidate.interface] = WirelessAttachmentFact(
                 interface=candidate.interface,
                 bssid=bssid,
@@ -337,17 +358,13 @@ def merge_wireless_facts(*collections: Iterable[WirelessAttachmentFact]) -> tupl
                 transmit_rate_mbps=_first(existing.transmit_rate_mbps, candidate.transmit_rate_mbps),
                 role=_first(existing.role, candidate.role),
                 configured=existing.configured or candidate.configured,
+                bssid_observed=existing.bssid_observed or candidate.bssid_observed,
             )
     return tuple(facts[name] for name in sorted(facts))
 
 
 def parse_airport_json(text: str) -> tuple[WirelessAttachmentFact, ...]:
-    """Parse current Wi-Fi association details from ``system_profiler`` JSON.
-
-    Nearby-network entries remain ignored. Every valid AirPort interface is kept
-    even when current association details are missing or redacted, so the route
-    still retains a Wi-Fi attachment boundary.
-    """
+    """Parse current Wi-Fi association details from ``system_profiler`` JSON."""
 
     payload = _decode_profiler_json(text)
     if "SPAirPortDataType" not in payload:
@@ -359,9 +376,10 @@ def parse_airport_json(text: str) -> tuple[WirelessAttachmentFact, ...]:
         if not interface:
             continue
         associated, details = _current_network(item.get("spairport_current_network_information"))
+        bssid = details.get("bssid")
         candidate = WirelessAttachmentFact(
             interface=interface,
-            bssid=details.get("bssid"),
+            bssid=bssid,
             ssid=details.get("ssid"),
             associated=associated,
             channel=details.get("channel"),
@@ -369,6 +387,7 @@ def parse_airport_json(text: str) -> tuple[WirelessAttachmentFact, ...]:
             noise_dbm=details.get("noise_dbm"),
             phy_mode=details.get("phy_mode"),
             transmit_rate_mbps=details.get("transmit_rate_mbps"),
+            bssid_observed=bssid is not None,
         )
         existing = facts.get(interface)
         facts[interface] = merge_wireless_facts((existing,) if existing else (), (candidate,))[0]
