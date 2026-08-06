@@ -15,6 +15,7 @@ import os
 import platform
 import plistlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,8 @@ RUNTIME_FILES = (
 DEFAULT_PORT = 8765
 HEALTH_TIMEOUT_SECONDS = 10
 MAX_HEALTH_BYTES = 4096
+MAX_DIAGNOSTIC_BYTES = 8192
+PLUTIL_PATH = "/usr/bin/plutil"
 
 
 class DeploymentError(RuntimeError):
@@ -261,6 +264,130 @@ def plist_port() -> int:
         raise DeploymentError("The installed LaunchAgent does not contain a valid port.") from exc
 
 
+def _run_plutil() -> subprocess.CompletedProcess[str]:
+    """Validate the installed plist with the macOS property-list parser."""
+
+    return subprocess.run(
+        (PLUTIL_PATH, "-lint", str(PLIST_PATH)),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def validate_launch_agent() -> None:
+    """Reject a plist or referenced runtime that launchd cannot safely load."""
+
+    if PLIST_PATH.is_symlink() or not PLIST_PATH.is_file():
+        raise DeploymentError(f"LaunchAgent plist is missing or not a regular file: {PLIST_PATH}")
+    plist_stat = PLIST_PATH.stat()
+    if plist_stat.st_uid != os.getuid():
+        raise DeploymentError("LaunchAgent plist is not owned by the current user.")
+    if stat.S_IMODE(plist_stat.st_mode) & 0o022:
+        raise DeploymentError("LaunchAgent plist must not be writable by group or other users.")
+
+    lint = _run_plutil()
+    if lint.returncode != 0:
+        detail = lint.stderr.strip() or lint.stdout.strip() or "plutil rejected the plist"
+        raise DeploymentError(f"LaunchAgent plist validation failed: {detail}")
+
+    try:
+        with PLIST_PATH.open("rb") as handle:
+            payload = plistlib.load(handle)
+        arguments = payload["ProgramArguments"]
+        python_path = Path(arguments[0])
+        server_path = Path(arguments[1])
+        working_directory = Path(payload["WorkingDirectory"])
+        stdout_parent = Path(payload["StandardOutPath"]).parent
+        stderr_parent = Path(payload["StandardErrorPath"]).parent
+    except (OSError, KeyError, IndexError, TypeError, plistlib.InvalidFileException) as exc:
+        raise DeploymentError("LaunchAgent plist is missing required runtime fields.") from exc
+
+    if payload.get("Label") != LABEL:
+        raise DeploymentError("LaunchAgent label does not match the deployment label.")
+    if not python_path.is_file() or not os.access(python_path, os.X_OK):
+        raise DeploymentError(f"LaunchAgent Python executable is unavailable: {python_path}")
+    if server_path.is_symlink() or not server_path.is_file():
+        raise DeploymentError(f"LaunchAgent server entrypoint is unavailable: {server_path}")
+    if not working_directory.is_dir():
+        raise DeploymentError(f"LaunchAgent working directory is unavailable: {working_directory}")
+    if not stdout_parent.is_dir() or not stderr_parent.is_dir():
+        raise DeploymentError(f"LaunchAgent log directory is unavailable: {LOG_DIR}")
+
+
+def _tail(path: Path) -> str:
+    """Return a bounded UTF-8 tail suitable for local deployment diagnostics."""
+
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - MAX_DIAGNOSTIC_BYTES))
+            return handle.read(MAX_DIAGNOSTIC_BYTES).decode("utf-8", errors="replace").strip()
+    except OSError as exc:
+        return f"unavailable: {exc}"
+
+
+def launchd_diagnostics() -> str:
+    """Collect bounded, non-privileged diagnostics for an activation failure."""
+
+    lines = [
+        "LaunchAgent diagnostics:",
+        f"  domain: {service_domain()}",
+        f"  target: {service_target()}",
+        f"  plist: {PLIST_PATH}",
+        f"  runtime: {INSTALL_DIR}",
+        f"  python: {sys.executable}",
+    ]
+
+    lint = _run_plutil() if PLIST_PATH.exists() else None
+    if lint is None:
+        lines.append("  plutil: plist is absent")
+    else:
+        lint_detail = lint.stdout.strip() or lint.stderr.strip() or f"exit {lint.returncode}"
+        lines.append(f"  plutil: {lint_detail}")
+
+    disabled = run_launchctl("print-disabled", service_domain(), check=False)
+    disabled_detail = disabled.stdout.strip() or disabled.stderr.strip() or f"exit {disabled.returncode}"
+    lines.append(f"  print-disabled: {disabled_detail[:MAX_DIAGNOSTIC_BYTES]}")
+
+    current = run_launchctl("print", service_target(), check=False)
+    current_detail = current.stdout.strip() or current.stderr.strip() or f"exit {current.returncode}"
+    lines.append(f"  service-state: {current_detail[:MAX_DIAGNOSTIC_BYTES]}")
+
+    lines.append(f"  service-error.log: {_tail(LOG_DIR / 'service-error.log')}")
+    lines.append(f"  service.log: {_tail(LOG_DIR / 'service.log')}")
+    return "\n".join(lines)
+
+
+def bootstrap_agent() -> None:
+    """Enable, clean stale registration, validate, and bootstrap the user agent."""
+
+    validate_launch_agent()
+
+    # launchd persists disabled state separately from the plist. Re-enable this
+    # exact user service before bootstrap; using root would target the wrong
+    # bootstrap domain and is neither required nor supported.
+    enabled = run_launchctl("enable", service_target(), check=False)
+    if enabled.returncode != 0:
+        detail = enabled.stderr.strip() or enabled.stdout.strip() or "launchctl enable failed"
+        raise DeploymentError(f"Could not enable the current-user LaunchAgent: {detail}\n{launchd_diagnostics()}")
+
+    # A prior interrupted install can leave a registration that is not returned
+    # by the normal service-target probe. Booting out by plist path is a safe,
+    # idempotent cleanup for this exact label and domain.
+    run_launchctl("bootout", service_domain(), str(PLIST_PATH), check=False)
+
+    loaded = run_launchctl("bootstrap", service_domain(), str(PLIST_PATH), check=False)
+    if loaded.returncode != 0:
+        detail = loaded.stderr.strip() or loaded.stdout.strip() or "launchctl bootstrap failed"
+        raise DeploymentError(
+            f"LaunchAgent bootstrap failed: {detail}\n"
+            "Do not rerun as root; this is a current-user LaunchAgent.\n"
+            f"{launchd_diagnostics()}"
+        )
+
+
 def wait_for_health(port: int, timeout_seconds: int = HEALTH_TIMEOUT_SECONDS) -> dict[str, Any]:
     """Wait for the loopback health endpoint without using environment proxies."""
 
@@ -282,7 +409,8 @@ def wait_for_health(port: int, timeout_seconds: int = HEALTH_TIMEOUT_SECONDS) ->
             last_error = exc
         time.sleep(0.2)
     raise DeploymentError(
-        f"Service did not become healthy at {url}. Check {LOG_DIR}. Last error: {last_error}"
+        f"Service did not become healthy at {url}. Check {LOG_DIR}. Last error: {last_error}\n"
+        f"{launchd_diagnostics()}"
     )
 
 
@@ -307,15 +435,17 @@ def install(port: int, nmap_path: str | None) -> None:
         backup = replace_runtime(staging)
         runtime_replaced = True
         write_plist(payload)
-        run_launchctl("bootstrap", service_domain(), str(PLIST_PATH))
+        bootstrap_agent()
         run_launchctl("kickstart", "-k", service_target())
         health = wait_for_health(port)
     except Exception:
         bootout_if_loaded(check=False)
+        run_launchctl("bootout", service_domain(), str(PLIST_PATH), check=False)
         if runtime_replaced:
             restore_runtime(backup)
         restore_plist(previous_plist)
         if previous_plist is not None and INSTALL_DIR.exists():
+            run_launchctl("enable", service_target(), check=False)
             restored = run_launchctl("bootstrap", service_domain(), str(PLIST_PATH), check=False)
             if restored.returncode == 0:
                 run_launchctl("kickstart", "-k", service_target(), check=False)
@@ -338,7 +468,7 @@ def restart() -> None:
         raise DeploymentError("HomeNetTopo is not installed. Run the install command first.")
     port = plist_port()
     bootout_if_loaded()
-    run_launchctl("bootstrap", service_domain(), str(PLIST_PATH))
+    bootstrap_agent()
     run_launchctl("kickstart", "-k", service_target())
     wait_for_health(port)
     print(f"HomeNetTopo restarted at http://127.0.0.1:{port}")
@@ -350,10 +480,20 @@ def status() -> None:
     require_supported_host()
     completed = run_launchctl("print", service_target(), check=False)
     if completed.returncode != 0:
-        raise DeploymentError("HomeNetTopo is not loaded in the current user launchd domain.")
+        raise DeploymentError(
+            "HomeNetTopo is not loaded in the current user launchd domain.\n"
+            f"{launchd_diagnostics()}"
+        )
     print(completed.stdout.rstrip())
     health = wait_for_health(plist_port(), timeout_seconds=2)
     print(json.dumps(health, indent=2, sort_keys=True))
+
+
+def diagnose() -> None:
+    """Print bounded launchd, plist, path, and service-log diagnostics."""
+
+    require_supported_host()
+    print(launchd_diagnostics())
 
 
 def uninstall(purge_logs: bool) -> None:
@@ -361,6 +501,7 @@ def uninstall(purge_logs: bool) -> None:
 
     require_supported_host()
     bootout_if_loaded()
+    run_launchctl("bootout", service_domain(), str(PLIST_PATH), check=False)
     PLIST_PATH.unlink(missing_ok=True)
     shutil.rmtree(INSTALL_DIR, ignore_errors=True)
     if purge_logs:
@@ -382,6 +523,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     subparsers.add_parser("restart", help="Restart the installed service.")
     subparsers.add_parser("status", help="Show launchd state and the health response.")
+    subparsers.add_parser("diagnose", help="Show plist, launchd, path, and service-log diagnostics.")
 
     uninstall_parser = subparsers.add_parser("uninstall", help="Remove the current user deployment.")
     uninstall_parser.add_argument("--purge-logs", action="store_true")
@@ -399,6 +541,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             restart()
         elif args.action == "status":
             status()
+        elif args.action == "diagnose":
+            diagnose()
         else:
             uninstall(args.purge_logs)
     except (DeploymentError, OSError, subprocess.SubprocessError) as exc:
