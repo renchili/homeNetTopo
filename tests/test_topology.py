@@ -43,6 +43,41 @@ class TopologyTests(unittest.TestCase):
         self.assertIn("route_inference", {source.type for source in snapshot.sources})
         self.assertIn("link_path_inference", {source.type for source in snapshot.sources})
 
+    def test_local_addresses_are_host_identity_not_peer_devices(self):
+        interfaces, routes, _, sources = self.parts()
+        local_address = interfaces[0].addresses[0].address
+        metadata = ActiveDiscoveryMetadata(("192.168.1.0/24",), ("192.168.1.0/24",), True, 10, 2, 30)
+        snapshot = build_snapshot(
+            interfaces=interfaces,
+            routes=routes,
+            neighbors=(
+                NeighborFact(local_address, "02:00:00:00:00:10", "en0", "this-mac.local", True),
+                NeighborFact("192.168.1.20", "02:00:00:00:00:20", "en0", None, True),
+            ),
+            sources=(
+                *sources,
+                SourceStatus("wifi_interfaces", SourceStatusValue.OK),
+                SourceStatus("wifi", SourceStatusValue.FAILED, "Collected output could not be parsed."),
+            ),
+            warnings=(WarningItem("wifi_parse_failed", "Wifi evidence could not be parsed.", "wifi"),),
+            wireless_attachments=(WirelessAttachmentFact("en0", None, None, associated=False),),
+            active_hosts=(ActiveHost(local_address), ActiveHost("192.168.1.30")),
+            active_metadata=metadata,
+            collected_at="2026-08-03T00:00:00Z",
+        )
+
+        local_host = next(node for node in snapshot.nodes if node.kind.value == "local_host")
+        device_ids = {node.id for node in snapshot.nodes if node.kind.value == "device"}
+        source_statuses = {source.type: source.status for source in snapshot.sources}
+
+        self.assertIn(local_address, local_host.addresses)
+        self.assertNotIn(f"device:{local_address}", device_ids)
+        self.assertEqual(device_ids, {"device:192.168.1.20", "device:192.168.1.30"})
+        self.assertEqual(snapshot.active_discovery.hosts_reported_up, 1)
+        self.assertFalse(snapshot.partial)
+        self.assertEqual(source_statuses["wifi"], SourceStatusValue.WARNING)
+        self.assertFalse(any(warning.source in {"wifi", "wifi_interfaces"} for warning in snapshot.warnings))
+
     def test_wifi_bssid_creates_observed_ap_then_inferred_gateway_path(self):
         interfaces, routes, neighbors, sources = self.parts()
         attachments = (WirelessAttachmentFact("en0", "02:00:00:00:00:01", "Synthetic Wi-Fi"),)
