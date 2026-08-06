@@ -149,7 +149,7 @@ class WebContractTests(unittest.TestCase):
         self.assertIn("height: clamp(360px, 52vh, 620px)", css)
         self.assertIn(".node:focus, .edge:focus, .network-group:focus { outline: none; }", css)
 
-    def test_canvas_delays_pointer_capture_until_pan_and_limits_fit_upscale(self):
+    def test_canvas_uses_viewbox_camera_full_surface_pan_and_orthogonal_edges(self):
         script = (WEB / "app.js").read_text()
         core = (WEB / "core.mjs").read_text()
         css = (WEB / "styles.css").read_text()
