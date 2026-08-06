@@ -47,8 +47,8 @@ class WirelessAttachmentFact:
 
     ``hardware_mac_address`` belongs to the local adapter. ``bssid`` belongs to
     the serving radio. ``bssid_observed`` records whether that BSSID came from
-    current-association evidence rather than local configuration. ``configured``
-    records any local fallback such as a user-confirmed relay role.
+    current-association evidence. ``configured`` means the selected BSSID came
+    from a local fallback rather than automatic collection.
     """
 
     interface: str
@@ -228,12 +228,12 @@ def _find_value(value: Any, fragments: tuple[str, ...]) -> Any:
 
 
 def _find_named(value: Any, names: tuple[str, ...]) -> Any:
-    """Find a nested profiler value by an exact key or exact suffix."""
+    """Find a nested profiler value by one exact normalized key name."""
 
+    accepted = set(names) | {f"spairport_{name}" for name in names}
     if isinstance(value, dict):
         for key, item in value.items():
-            lowered = str(key).lower()
-            if lowered in names or any(lowered.endswith(f"_{name}") for name in names):
+            if str(key).lower() in accepted:
                 return item
         for item in value.values():
             found = _find_named(item, names)
@@ -318,9 +318,11 @@ def _current_network(value: Any) -> tuple[bool, dict[str, Any]]:
     return (text is not None), {"ssid": text}
 
 
-def _first(existing: Any, candidate: Any) -> Any:
-    """Prefer a present candidate value while retaining existing evidence."""
+def _choose(existing: Any, candidate: Any, *, configured_candidate: bool) -> Any:
+    """Prefer automatic evidence; let configuration fill only missing values."""
 
+    if configured_candidate:
+        return existing if existing is not None else candidate
     return candidate if candidate is not None else existing
 
 
@@ -328,7 +330,7 @@ def merge_wireless_facts(*collections: Iterable[WirelessAttachmentFact]) -> tupl
     """Merge hardware, automatic association, metrics, and local configuration.
 
     An automatically observed BSSID always wins over a configured fallback.
-    Configured role/SSID can remain alongside that automatic identity without
+    Configured role can remain alongside that automatic identity without
     downgrading its provenance or association state.
     """
 
@@ -345,20 +347,29 @@ def merge_wireless_facts(*collections: Iterable[WirelessAttachmentFact]) -> tupl
                 bssid = candidate.bssid
             else:
                 bssid = existing.bssid
+            bssid_observed = existing.bssid_observed or candidate.bssid_observed
+            configured_bssid_selected = bool(
+                bssid
+                and not bssid_observed
+                and (
+                    (candidate.configured and candidate.bssid == bssid)
+                    or (existing.configured and existing.bssid == bssid)
+                )
+            )
             facts[candidate.interface] = WirelessAttachmentFact(
                 interface=candidate.interface,
                 bssid=bssid,
-                ssid=_first(existing.ssid, candidate.ssid),
+                ssid=_choose(existing.ssid, candidate.ssid, configured_candidate=candidate.configured),
                 associated=existing.associated or candidate.associated,
-                hardware_mac_address=_first(existing.hardware_mac_address, candidate.hardware_mac_address),
-                channel=_first(existing.channel, candidate.channel),
-                rssi_dbm=_first(existing.rssi_dbm, candidate.rssi_dbm),
-                noise_dbm=_first(existing.noise_dbm, candidate.noise_dbm),
-                phy_mode=_first(existing.phy_mode, candidate.phy_mode),
-                transmit_rate_mbps=_first(existing.transmit_rate_mbps, candidate.transmit_rate_mbps),
-                role=_first(existing.role, candidate.role),
-                configured=existing.configured or candidate.configured,
-                bssid_observed=existing.bssid_observed or candidate.bssid_observed,
+                hardware_mac_address=_choose(existing.hardware_mac_address, candidate.hardware_mac_address, configured_candidate=candidate.configured),
+                channel=_choose(existing.channel, candidate.channel, configured_candidate=candidate.configured),
+                rssi_dbm=_choose(existing.rssi_dbm, candidate.rssi_dbm, configured_candidate=candidate.configured),
+                noise_dbm=_choose(existing.noise_dbm, candidate.noise_dbm, configured_candidate=candidate.configured),
+                phy_mode=_choose(existing.phy_mode, candidate.phy_mode, configured_candidate=candidate.configured),
+                transmit_rate_mbps=_choose(existing.transmit_rate_mbps, candidate.transmit_rate_mbps, configured_candidate=candidate.configured),
+                role=candidate.role if candidate.configured and candidate.role is not None else _choose(existing.role, candidate.role, configured_candidate=False),
+                configured=configured_bssid_selected,
+                bssid_observed=bssid_observed,
             )
     return tuple(facts[name] for name in sorted(facts))
 
