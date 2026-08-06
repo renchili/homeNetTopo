@@ -120,7 +120,6 @@ function openDiscoverDialog() {
   focusElement(elements["network-options"].querySelector("input") ?? elements["operation-timeout"]);
 }
 
-/** Recheck Nmap when unavailable; otherwise open the bounded discovery dialog. */
 async function handleDiscoverAction() {
   if (state.collectionInFlight) return;
   const active = state.capabilities?.active_discovery;
@@ -295,7 +294,7 @@ function nodeSubtitle(node) {
   const address = preferredIPv4(node);
   if (node.kind === "local_host") return address ?? "Local host";
   if (node.kind === "interface") return address ?? (node.properties?.kind === "tunnel" ? "L3 tunnel" : "Network interface");
-  if (node.kind === "access_point") return node.mac_addresses?.length ? "Connected Wi-Fi radio" : "Access point or relay";
+  if (node.kind === "access_point") return node.properties?.bssid ?? node.mac_addresses?.[0] ?? "Access point or relay";
   if (node.kind === "link_boundary") return "No adjacent-device evidence";
   if (node.kind === "gateway") return "Gateway";
   if (node.kind === "device") return "LAN peer";
@@ -331,7 +330,6 @@ function renderNetworkGroup(group) {
   return container;
 }
 
-/** Render subnet context first, then path edges and selectable nodes. */
 function renderGraph() {
   elements["graph-scene"].replaceChildren();
   if (!state.snapshot) {
@@ -407,19 +405,43 @@ function layerLabel(item) {
   return "Unknown";
 }
 
-function formatDetailValue(value) {
+const PROPERTY_LABELS = Object.freeze({
+  access_point_details: "Access point details",
+  bssid: "BSSID",
+  channel: "Channel",
+  connection: "Connection",
+  current_mac_address: "Current MAC",
+  default_gateway: "Default gateway",
+  gateway_identity_evidence: "Gateway identity evidence",
+  hardware_mac_address: "Hardware MAC",
+  identity: "Identity",
+  link_evidence: "Link evidence",
+  noise_dbm: "Noise",
+  path_kind: "Path kind",
+  phy_mode: "PHY mode",
+  private_wifi_mac_address: "Private Wi-Fi MAC",
+  role: "Role",
+  rssi_dbm: "RSSI",
+  ssid: "SSID",
+  transmit_rate_mbps: "Transmit rate",
+});
+
+function formatDetailValue(value, key = "") {
   if (value === null || value === undefined || value === "") return "None";
   if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
   if (typeof value === "object") return JSON.stringify(value);
+  if (["rssi_dbm", "noise_dbm"].includes(key)) return `${value} dBm`;
+  if (key === "transmit_rate_mbps") return `${value} Mbps`;
+  if (typeof value === "boolean") return value ? "Yes" : "No";
   return String(value);
 }
 
-function appendDetailRow(list, term, value) {
-  if (value === undefined) return;
+function appendDetailRow(list, term, value, key = "") {
+  if (value === undefined || value === null || value === "") return;
   const dt = document.createElement("dt");
   dt.textContent = term;
   const dd = document.createElement("dd");
-  dd.textContent = formatDetailValue(value);
+  dd.textContent = formatDetailValue(value, key);
   list.append(dt, dd);
 }
 
@@ -447,7 +469,6 @@ function renderDetails() {
   const heading = document.createElement("h3");
   heading.textContent = item.label ?? item.type?.replaceAll("_", " ") ?? item.id;
   const dl = document.createElement("dl");
-  appendDetailRow(dl, "Identifier", item.id);
   appendDetailRow(dl, "Type", item.kind?.replaceAll("_", " ") ?? item.type?.replaceAll("_", " "));
   appendDetailRow(dl, "Layer", layerLabel(item));
   appendDetailRow(dl, "Confidence", item.confidence ?? "medium");
@@ -455,10 +476,28 @@ function renderDetails() {
   appendDetailRow(dl, "From", item.source);
   appendDetailRow(dl, "To", item.target);
   appendDetailRow(dl, "Interfaces", item.interface_names);
-  appendDetailRow(dl, "Addresses", item.addresses);
-  appendDetailRow(dl, "MAC addresses", item.mac_addresses);
+  appendDetailRow(dl, "IP addresses", item.addresses);
+
+  const renderedProperties = new Set();
+  if (item.kind === "interface") {
+    appendDetailRow(dl, "Hardware MAC", item.properties?.hardware_mac_address, "hardware_mac_address");
+    appendDetailRow(dl, "Private Wi-Fi MAC", item.properties?.private_wifi_mac_address, "private_wifi_mac_address");
+    if (!item.properties?.private_wifi_mac_address) appendDetailRow(dl, "Current MAC", item.properties?.current_mac_address, "current_mac_address");
+    renderedProperties.add("hardware_mac_address");
+    renderedProperties.add("private_wifi_mac_address");
+    renderedProperties.add("current_mac_address");
+  } else if (item.kind === "access_point") {
+    for (const key of ["role", "ssid", "bssid", "channel", "rssi_dbm", "noise_dbm", "phy_mode", "transmit_rate_mbps", "identity"]) {
+      appendDetailRow(dl, PROPERTY_LABELS[key], item.properties?.[key], key);
+      renderedProperties.add(key);
+    }
+  } else {
+    appendDetailRow(dl, item.kind === "local_host" ? "Local MAC addresses" : "MAC addresses", item.mac_addresses);
+  }
+
   for (const [key, value] of Object.entries(item.properties ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
-    appendDetailRow(dl, key.replaceAll("_", " "), value);
+    if (renderedProperties.has(key)) continue;
+    appendDetailRow(dl, PROPERTY_LABELS[key] ?? key.replaceAll("_", " "), value, key);
   }
 
   const evidenceTitle = document.createElement("h4");
@@ -625,10 +664,6 @@ elements["graph-viewport"].addEventListener("wheel", (event) => {
   changeZoom(event.deltaY < 0 ? 1.12 : 1 / 1.12, { x: event.clientX, y: event.clientY });
 }, { passive: false });
 
-/*
- * Delay pointer capture until movement proves a pan. Capturing on pointerdown
- * retargets the following click to the viewport and prevents node selection.
- */
 elements["graph-viewport"].addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || !camera) return;
   drag = {
