@@ -60,11 +60,11 @@ class StaticSecurityTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b"Home Net Topology", body)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
-        policy = headers["Content-Security-Policy"]
-        self.assertIn("default-src 'self'", policy)
-        self.assertIn("font-src 'self' data:", policy)
-        self.assertNotIn("https:", policy)
-        self.assertNotIn("http:", policy)
+        csp = headers["Content-Security-Policy"]
+        self.assertIn("default-src 'self'", csp)
+        self.assertIn("font-src 'self' data:", csp)
+        self.assertNotIn("font-src http:", csp)
+        self.assertNotIn("font-src https:", csp)
         self.assertEqual(headers["Cache-Control"], "no-store")
 
     def test_rejects_traversal_repeated_decoding_and_unknown_files(self):
@@ -141,6 +141,10 @@ class DeploymentScriptTests(unittest.TestCase):
         self.assertIn("ProxyHandler({})", source)
         self.assertIn("runtime_replaced", source)
         self.assertIn("follow_symlinks=False", source)
+        self.assertIn('PLUTIL_PATH = "/usr/bin/plutil"', source)
+        self.assertIn('run_launchctl("enable", service_target()', source)
+        self.assertIn('run_launchctl("print-disabled", service_domain()', source)
+        self.assertIn("Do not rerun as root", source)
 
     def test_source_validation_rejects_symbolic_links(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -168,6 +172,37 @@ class DeploymentScriptTests(unittest.TestCase):
                 self.deploy.bootout_if_loaded()
         self.assertEqual(launchctl.call_args_list[0], mock.call("print", self.deploy.service_target(), check=False))
         self.assertEqual(launchctl.call_args_list[1], mock.call("bootout", self.deploy.service_target(), check=True))
+
+    def test_bootstrap_enables_and_cleans_stale_registration_before_loading(self):
+        success = self.deploy.subprocess.CompletedProcess(("launchctl",), 0, "", "")
+        absent = self.deploy.subprocess.CompletedProcess(("launchctl",), 3, "", "not loaded")
+        with (
+            mock.patch.object(self.deploy, "validate_launch_agent"),
+            mock.patch.object(self.deploy, "run_launchctl", side_effect=(success, absent, success)) as launchctl,
+        ):
+            self.deploy.bootstrap_agent()
+        self.assertEqual(
+            launchctl.call_args_list,
+            [
+                mock.call("enable", self.deploy.service_target(), check=False),
+                mock.call("bootout", self.deploy.service_domain(), str(self.deploy.PLIST_PATH), check=False),
+                mock.call("bootstrap", self.deploy.service_domain(), str(self.deploy.PLIST_PATH), check=False),
+            ],
+        )
+
+    def test_bootstrap_failure_reports_non_root_diagnostics(self):
+        success = self.deploy.subprocess.CompletedProcess(("launchctl",), 0, "", "")
+        absent = self.deploy.subprocess.CompletedProcess(("launchctl",), 3, "", "not loaded")
+        failed = self.deploy.subprocess.CompletedProcess(("launchctl",), 5, "", "Bootstrap failed: 5: Input/output error")
+        with (
+            mock.patch.object(self.deploy, "validate_launch_agent"),
+            mock.patch.object(self.deploy, "run_launchctl", side_effect=(success, absent, failed)),
+            mock.patch.object(self.deploy, "launchd_diagnostics", return_value="synthetic diagnostics"),
+            self.assertRaises(self.deploy.DeploymentError) as raised,
+        ):
+            self.deploy.bootstrap_agent()
+        self.assertIn("Do not rerun as root", str(raised.exception))
+        self.assertIn("synthetic diagnostics", str(raised.exception))
 
     def test_replace_failure_restores_previous_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
