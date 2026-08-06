@@ -130,23 +130,29 @@ class WebContractTests(unittest.TestCase):
         self.assertIn("group-lan_peers", css)
         self.assertIn("interface-kind-tunnel", css)
 
-    def test_graph_nodes_show_useful_information_and_details_rows(self):
+    def test_graph_nodes_show_local_ip_bssid_and_semantic_wifi_details(self):
         script = (WEB / "app.js").read_text()
         css = (WEB / "styles.css").read_text()
         for marker in (
             "preferredIPv4",
             'if (node.kind === "local_host") return address',
             'if (node.kind === "interface") return address',
-            'if (node.kind === "access_point") return node.label || "Connected Wi-Fi node"',
-            'return node.mac_addresses?.length ? "Connected Wi-Fi radio" : "Access point or relay"',
-            "appendDetailRow",
-            'appendDetailRow(dl, "Interfaces"',
-            'appendDetailRow(dl, "Addresses"',
+            'node.properties?.bssid ?? node.mac_addresses?.[0]',
+            "PROPERTY_LABELS",
+            'hardware_mac_address: "Hardware MAC"',
+            'private_wifi_mac_address: "Private Wi-Fi MAC"',
+            'bssid: "BSSID"',
+            'rssi_dbm: "RSSI"',
+            'phy_mode: "PHY mode"',
+            'transmit_rate_mbps: "Transmit rate"',
+            'appendDetailRow(dl, "Hardware MAC"',
+            'appendDetailRow(dl, "Private Wi-Fi MAC"',
+            'appendDetailRow(dl, "IP addresses"',
             'appendDetailRow(dl, "From"',
             'appendDetailRow(dl, "To"',
         ):
             self.assertIn(marker, script)
-        self.assertNotIn('return "Identity unavailable"', script)
+        self.assertNotIn('appendDetailRow(dl, "Identifier"', script)
         self.assertIn("height: clamp(360px, 52vh, 620px)", css)
         self.assertIn(".node:focus, .edge:focus, .network-group:focus { outline: none; }", css)
 
