@@ -27,7 +27,6 @@ const elements = Object.fromEntries([
   "address-total", "dialog-error", "dialog-close", "dialog-cancel", "dialog-confirm",
 ].map((id) => [id, document.getElementById(id)]));
 
-const PAN_THRESHOLD = 6;
 let state = initialState();
 let camera = null;
 let layoutBounds = null;
@@ -36,6 +35,7 @@ let renderedSnapshotKey = null;
 let drag = null;
 let suppressGraphClick = false;
 let dialogReturnFocus = null;
+const PAN_THRESHOLD = 6;
 
 function dispatch(action) {
   state = reduceState(state, action);
@@ -285,7 +285,7 @@ function preferredIPv4(node) {
 }
 
 function nodeTitle(node) {
-  if (node.kind === "access_point") return "Wi-Fi access point";
+  if (node.kind === "access_point") return node.label || "Connected Wi-Fi node";
   if (node.kind === "link_boundary") return "L2 path unknown";
   if (node.kind === "local_host") return "This Mac";
   return node.label;
@@ -295,7 +295,7 @@ function nodeSubtitle(node) {
   const address = preferredIPv4(node);
   if (node.kind === "local_host") return address ?? "Local host";
   if (node.kind === "interface") return address ?? (node.properties?.kind === "tunnel" ? "L3 tunnel" : "Network interface");
-  if (node.kind === "access_point") return node.mac_addresses?.length ? "BSSID observed" : "Identity unavailable";
+  if (node.kind === "access_point") return node.mac_addresses?.length ? "Connected Wi-Fi radio" : "Access point or relay";
   if (node.kind === "link_boundary") return "No adjacent-device evidence";
   if (node.kind === "gateway") return "Gateway";
   if (node.kind === "device") return "LAN peer";
