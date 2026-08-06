@@ -22,8 +22,6 @@ def load_deploy_module():
     if spec is None or spec.loader is None:
         raise RuntimeError("deployment module could not be loaded")
     module = importlib.util.module_from_spec(spec)
-    # dataclasses and other runtime introspection resolve the defining module
-    # through sys.modules while decorators execute.
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
@@ -112,6 +110,35 @@ class DeploymentScriptTests(unittest.TestCase):
         self.assertTrue(str(self.deploy.PLIST_PATH).startswith(str(Path.home() / "Library" / "LaunchAgents")))
         self.assertEqual(payload["KeepAlive"], {"SuccessfulExit": False})
 
+    def test_wifi_fallback_is_validated_and_written_only_to_program_arguments(self):
+        bssid = "02:aa:bb:cc:dd:55"
+        payload = self.deploy.build_launch_agent(
+            "/usr/local/bin/python3",
+            8765,
+            None,
+            wifi_interface="en0",
+            wifi_bssid=bssid,
+            wifi_ssid="Synthetic Wi-Fi",
+            wifi_role="relay",
+        )
+        arguments = payload["ProgramArguments"]
+        self.assertEqual(arguments[arguments.index("--wifi-interface") + 1], "en0")
+        self.assertEqual(arguments[arguments.index("--wifi-bssid") + 1], bssid)
+        self.assertEqual(arguments[arguments.index("--wifi-ssid") + 1], "Synthetic Wi-Fi")
+        self.assertEqual(arguments[arguments.index("--wifi-role") + 1], "relay")
+        self.assertNotIn(bssid, payload["EnvironmentVariables"].values())
+        self.assertNotIn(bssid, payload["StandardOutPath"])
+        self.assertEqual(self.deploy.validate_mac("02-AA-BB-CC-DD-55"), bssid)
+        self.assertEqual(self.deploy.validate_interface("en0"), "en0")
+        self.assertEqual(self.deploy.validate_ssid("Synthetic Wi-Fi"), "Synthetic Wi-Fi")
+        for invalid in ("not-a-mac", "00:11:22:33:44"):
+            with self.subTest(invalid=invalid), self.assertRaises(Exception):
+                self.deploy.validate_mac(invalid)
+        with self.assertRaises(Exception):
+            self.deploy.validate_interface("en0;echo")
+        with self.assertRaises(Exception):
+            self.deploy.validate_ssid("")
+
     def test_runtime_copy_is_an_explicit_minimal_allowlist(self):
         self.assertEqual(
             self.deploy.RUNTIME_FILES,
@@ -145,6 +172,8 @@ class DeploymentScriptTests(unittest.TestCase):
         self.assertIn('run_launchctl("enable", service_target()', source)
         self.assertIn('run_launchctl("print-disabled", service_domain()', source)
         self.assertIn("Do not rerun as root", source)
+        for marker in ("--wifi-interface", "--wifi-bssid", "--wifi-ssid", "--wifi-role"):
+            self.assertIn(marker, source)
 
     def test_source_validation_rejects_symbolic_links(self):
         with tempfile.TemporaryDirectory() as directory:
