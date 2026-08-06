@@ -2,9 +2,9 @@
 
 A local endpoint can observe its interface, Wi-Fi media, optional current BSSID,
 route gateway, and ARP mappings. It cannot normally enumerate transparent
-Ethernet switches. The graph creates an access-point boundary for a default route
-on a known Wi-Fi interface and an explicit unknown link boundary only for a
-non-Wi-Fi path without adjacent-device evidence. Peer devices are never transit.
+Ethernet switches. The graph creates an access-point node only when a BSSID
+identifies one; Wi-Fi media without identity is represented on the path edge.
+Peer devices are never transit.
 """
 
 from __future__ import annotations
@@ -56,19 +56,13 @@ def _content_fingerprint(snapshot: TopologySnapshot) -> str:
 
 
 def _normalize_optional_sources(sources: Iterable[SourceStatus]) -> list[SourceStatus]:
-    """Keep optional Wi-Fi detail failures from making a usable snapshot partial.
-
-    ``networksetup`` and ``system_profiler`` enrich the host-to-gateway path, but
-    neither is required to identify this Mac, its interfaces, routes, neighbors,
-    or eligible active targets. Their failure remains visible in source details as
-    a warning while the graph expresses any remaining path uncertainty directly.
-    """
+    """Keep optional Wi-Fi detail failures from making a usable snapshot partial."""
 
     normalized: list[SourceStatus] = []
     for source in sources:
         if source.type in _OPTIONAL_WIFI_SOURCES and source.status is SourceStatusValue.FAILED:
             message = (
-                "Wi-Fi access-point identity details are unavailable; the topology remains usable."
+                "Wi-Fi access-point identity is unavailable; the topology remains usable."
                 if source.type == "wifi"
                 else "Wi-Fi interface classification is unavailable; the topology remains usable."
             )
@@ -93,11 +87,11 @@ def build_snapshot(
 ) -> TopologySnapshot:
     """Merge normalized evidence into one immutable topology snapshot.
 
-    A BSSID identifies the associated AP radio. When only hardware-port evidence
-    identifies the default-route interface as Wi-Fi, the AP boundary is inferred
-    without inventing its identity. A non-Wi-Fi path without LLDP or managed
-    topology evidence remains an explicit ``link_boundary``. Exact AP/gateway
-    MAC equality is recorded, but different MACs do not prove different boxes.
+    A BSSID identifies an AP radio and is the minimum evidence required to emit
+    an access-point node. Interface-only Wi-Fi evidence is represented as a
+    direct interface-to-gateway path with explicit privacy-limited properties;
+    it never creates an anonymous physical device. A non-Wi-Fi path without
+    LLDP or managed topology evidence remains an explicit ``link_boundary``.
 
     Interface addresses are authoritative local identity. ARP or Nmap observations
     that repeat one of those addresses are never emitted as peer devices and never
@@ -109,11 +103,7 @@ def build_snapshot(
     route_items = tuple(routes)
     neighbor_items = tuple(neighbors)
     wireless_items = tuple(wireless_attachments)
-    local_addresses = frozenset(
-        address.address
-        for interface in interface_items
-        for address in interface.addresses
-    )
+    local_addresses = frozenset(address.address for interface in interface_items for address in interface.addresses)
     active_items = tuple(host for host in active_hosts if host.address not in local_addresses)
     source_items = _normalize_optional_sources(sources)
     warning_list = [warning for warning in warnings if warning.source not in _OPTIONAL_WIFI_SOURCES]
@@ -225,8 +215,6 @@ def build_snapshot(
 
         wireless = wireless_by_interface.get(interface_name)
         if wireless is not None:
-            suffix = _slug(wireless.bssid) if wireless.bssid else f"unknown-{interface_name}"
-            attachment_id = f"access-point:{suffix}"
             association_observed = wireless.associated
             evidence_source = "wifi" if association_observed else "wifi_interfaces"
             evidence_summary = "Current Wi-Fi association" if association_observed else "Wi-Fi hardware port used by the default route"
@@ -241,21 +229,39 @@ def build_snapshot(
                     "ssid_available": wireless.ssid is not None,
                 },
             )
-            identity_source = "bssid" if wireless.identified else ("association_without_bssid" if association_observed else "wifi_interface_and_default_route")
+
+            if not wireless.identified:
+                edge_id = f"edge:{interface_id}:{gateway_id}:wifi-path"
+                properties = {
+                    "path_kind": "wifi",
+                    "access_point_identity": "unavailable",
+                    "identity_reason": "macos_location_privilege_required",
+                    "intermediate_visibility": "access_point_not_identified",
+                }
+                if wireless.ssid:
+                    properties["ssid"] = wireless.ssid
+                edges[edge_id] = Edge(
+                    edge_id,
+                    interface_id,
+                    gateway_id,
+                    EdgeType.INTERFACE_REACHES_GATEWAY,
+                    False,
+                    Confidence.MEDIUM,
+                    (wifi_evidence, route_evidence),
+                    properties,
+                )
+                return
+
+            attachment_id = f"access-point:{_slug(wireless.bssid)}"
             nodes[attachment_id] = Node(
                 attachment_id,
                 NodeKind.ACCESS_POINT,
-                "Wi-Fi access point" if wireless.identified else "Wi-Fi access point (identity unavailable)",
-                mac_addresses=(wireless.bssid,) if wireless.bssid else (),
+                wireless.ssid or "Wi-Fi access point",
+                mac_addresses=(wireless.bssid,),
                 interface_names=(interface_name,),
-                properties={
-                    "ssid": wireless.ssid,
-                    "association_observed": association_observed,
-                    "identity_source": identity_source,
-                    "physical_identity_with_gateway": "unknown",
-                },
+                properties={"ssid": wireless.ssid, "identity_source": "bssid"},
                 evidence=(wifi_evidence,),
-                confidence=Confidence.HIGH if wireless.identified else Confidence.MEDIUM,
+                confidence=Confidence.HIGH,
                 observed_at=timestamp,
             )
             edge_id = f"edge:{interface_id}:{attachment_id}"
@@ -265,16 +271,15 @@ def build_snapshot(
                 attachment_id,
                 EdgeType.INTERFACE_ASSOCIATED_WITH,
                 association_observed,
-                Confidence.HIGH if wireless.identified else Confidence.MEDIUM,
-                (wifi_evidence, route_evidence) if not association_observed else (wifi_evidence,),
-                {"inference": None if association_observed else "wifi_interface_plus_default_route"},
+                Confidence.HIGH,
+                (wifi_evidence,),
             )
             path_edge_id = f"edge:{attachment_id}:{gateway_id}"
             path_evidence = Evidence(
                 "link_path_inference",
-                "Gateway is reached beyond the Wi-Fi attachment",
+                "Gateway is reached beyond the observed Wi-Fi access point",
                 timestamp,
-                {"interface": interface_name, "physical_identity_relation": "unknown"},
+                {"interface": interface_name},
             )
             edges[path_edge_id] = Edge(
                 path_edge_id,
@@ -284,7 +289,6 @@ def build_snapshot(
                 False,
                 Confidence.MEDIUM,
                 (path_evidence,),
-                {"physical_identity_relation": "unknown"},
             )
             attachment_gateway_pairs.append((attachment_id, gateway_id, path_edge_id))
             add_derived_source("link_path_inference")
@@ -466,17 +470,18 @@ def build_snapshot(
         gateway = nodes.get(gateway_id)
         if not attachment or not gateway:
             continue
-        same_mac = bool(set(attachment.mac_addresses) & set(gateway.mac_addresses))
-        relation = "same_mac" if same_mac else "unknown"
-        nodes[attachment_id] = replace(attachment, properties={**attachment.properties, "physical_identity_with_gateway": relation})
-        path_edge = edges[path_edge_id]
-        edges[path_edge_id] = replace(path_edge, properties={**path_edge.properties, "physical_identity_relation": relation})
+        if set(attachment.mac_addresses) & set(gateway.mac_addresses):
+            nodes[attachment_id] = replace(
+                attachment,
+                properties={**attachment.properties, "gateway_identity_evidence": "same_mac"},
+            )
+            path_edge = edges[path_edge_id]
+            edges[path_edge_id] = replace(
+                path_edge,
+                properties={**path_edge.properties, "gateway_identity_evidence": "same_mac"},
+            )
 
-    normalized_active_metadata = (
-        replace(active_metadata, hosts_reported_up=len(active_items))
-        if active_metadata is not None
-        else None
-    )
+    normalized_active_metadata = replace(active_metadata, hosts_reported_up=len(active_items)) if active_metadata is not None else None
     mode = "active" if normalized_active_metadata else "passive"
     snapshot = TopologySnapshot(
         schema_version="1",
