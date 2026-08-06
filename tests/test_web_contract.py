@@ -137,8 +137,8 @@ class WebContractTests(unittest.TestCase):
             "preferredIPv4",
             'if (node.kind === "local_host") return address',
             'if (node.kind === "interface") return address',
-            'return "Wi-Fi access point"',
-            'return node.mac_addresses?.length ? "BSSID observed" : "Identity unavailable"',
+            'if (node.kind === "access_point") return node.label || "Connected Wi-Fi node"',
+            'return node.mac_addresses?.length ? "Connected Wi-Fi radio" : "Access point or relay"',
             "appendDetailRow",
             'appendDetailRow(dl, "Interfaces"',
             'appendDetailRow(dl, "Addresses"',
@@ -146,6 +146,7 @@ class WebContractTests(unittest.TestCase):
             'appendDetailRow(dl, "To"',
         ):
             self.assertIn(marker, script)
+        self.assertNotIn('return "Identity unavailable"', script)
         self.assertIn("height: clamp(360px, 52vh, 620px)", css)
         self.assertIn(".node:focus, .edge:focus, .network-group:focus { outline: none; }", css)
 
