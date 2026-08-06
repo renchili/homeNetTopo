@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import re
 import threading
 import urllib.parse
 import uuid
@@ -69,6 +70,8 @@ MIME_TYPES = {
     ".mjs": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
 }
+_MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
+_INTERFACE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class ApiError(RuntimeError):
@@ -94,12 +97,46 @@ class PassiveParts:
     failures: tuple[tuple[str, str], ...] = ()
 
 
+def canonical_mac_argument(value: str) -> str:
+    """Validate a locally configured BSSID without accepting loose notation."""
+
+    normalized = value.strip().lower().replace("-", ":")
+    if not _MAC_RE.fullmatch(normalized):
+        raise argparse.ArgumentTypeError("Wi-Fi BSSID must be a canonical MAC address")
+    return normalized
+
+
+def interface_argument(value: str) -> str:
+    """Validate a BSD interface name supplied through local configuration."""
+
+    cleaned = value.strip()
+    if not _INTERFACE_RE.fullmatch(cleaned):
+        raise argparse.ArgumentTypeError("Wi-Fi interface name is invalid")
+    return cleaned
+
+
+def ssid_argument(value: str) -> str:
+    """Validate a nonempty SSID without logging or persisting it in the repo."""
+
+    cleaned = value.strip()
+    if not cleaned or len(cleaned.encode("utf-8")) > 32:
+        raise argparse.ArgumentTypeError("Wi-Fi SSID must be 1 to 32 UTF-8 bytes")
+    return cleaned
+
+
 class AppState:
     """Own collection coordination and the latest immutable snapshot."""
 
-    def __init__(self, *, port: int, nmap_path: str | None) -> None:
+    def __init__(
+        self,
+        *,
+        port: int,
+        nmap_path: str | None,
+        wifi_override: WirelessAttachmentFact | None = None,
+    ) -> None:
         self.port = port
         self.nmap_path = nmap_path
+        self.wifi_override = wifi_override
         self.snapshot = None
         self.collection_lock = threading.Lock()
 
@@ -166,7 +203,14 @@ class AppState:
                 raise ApiError(504, "command_timeout", f"Passive collection timed out in: {joined}.", details)
             raise ApiError(500, "collection_failed", "No coherent passive snapshot could be produced.", details)
 
-        wireless = merge_wireless_facts(values.get("wifi_interfaces", ()), values.get("wifi", ()))
+        override_collection = (self.wifi_override,) if self.wifi_override else ()
+        wireless = merge_wireless_facts(
+            values.get("wifi_interfaces", ()),
+            values.get("wifi", ()),
+            override_collection,
+        )
+        if self.wifi_override:
+            sources.append(SourceStatus("local_configuration", SourceStatusValue.OK, "Local Wi-Fi fallback is configured."))
         return PassiveParts(
             interfaces=values.get("interfaces", ()),
             routes=values.get("routes", ()),
@@ -382,6 +426,7 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
                 "link_path": {
                     "wifi_interface_source": "networksetup",
                     "wifi_bssid_source": "system_profiler",
+                    "wifi_local_fallback_configured": self.server.state.wifi_override is not None,
                     "ethernet_adjacent_device_source": "not_available_without_lldp",
                 },
                 "bind": BIND_ADDRESS,
@@ -482,12 +527,16 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse the fixed loopback service options."""
+    """Parse fixed service options and optional local Wi-Fi fallback values."""
 
     parser = argparse.ArgumentParser(description="Serve a local HomeNetTopo web application.")
     parser.add_argument("--bind", default=BIND_ADDRESS)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--nmap-path")
+    parser.add_argument("--wifi-interface", type=interface_argument)
+    parser.add_argument("--wifi-bssid", type=canonical_mac_argument)
+    parser.add_argument("--wifi-ssid", type=ssid_argument)
+    parser.add_argument("--wifi-role", choices=("access-point", "relay"))
     return parser.parse_args()
 
 
@@ -499,7 +548,21 @@ def main() -> int:
         raise SystemExit("HomeNetTopo first release binds only to 127.0.0.1")
     if not 1 <= args.port <= 65535:
         raise SystemExit("port must be between 1 and 65535")
-    state = AppState(port=args.port, nmap_path=args.nmap_path)
+    wifi_values_present = any((args.wifi_bssid, args.wifi_ssid, args.wifi_role))
+    if wifi_values_present and not args.wifi_interface:
+        raise SystemExit("--wifi-interface is required with Wi-Fi fallback values")
+    wifi_override = None
+    if wifi_values_present:
+        role = "access point" if args.wifi_role == "access-point" else args.wifi_role
+        wifi_override = WirelessAttachmentFact(
+            interface=args.wifi_interface,
+            bssid=args.wifi_bssid,
+            ssid=args.wifi_ssid,
+            associated=False,
+            role=role,
+            configured=True,
+        )
+    state = AppState(port=args.port, nmap_path=args.nmap_path, wifi_override=wifi_override)
     server = HomeNetTopoServer((args.bind, args.port), state)
     print(f"HomeNetTopo {__version__} listening on http://{args.bind}:{args.port}")
     try:
