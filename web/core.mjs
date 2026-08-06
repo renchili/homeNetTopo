@@ -1,10 +1,10 @@
 /*
- * Pure frontend state, path layout, address arithmetic, and camera helpers.
+ * Pure frontend state, evidence-backed layout, address arithmetic, and camera helpers.
  *
- * The route path is rendered from backend evidence. Peer devices are grouped
- * beside the path and never treated as transit devices between this Mac and
- * the gateway. Transparent switches remain unknown unless a future source
- * supplies adjacent-device evidence.
+ * Peer devices remain beside the gateway path and are never presented as transit.
+ * A Wi-Fi attachment occupies a column only when the backend has an identified
+ * BSSID node; privacy-limited Wi-Fi paths connect the interface directly to the
+ * gateway and do not reserve space for an anonymous device.
  */
 
 export const UI_STATES = Object.freeze({
@@ -23,22 +23,22 @@ export const UI_STATES = Object.freeze({
   UNSUPPORTED_PLATFORM: "UNSUPPORTED_PLATFORM",
 });
 
-export const NODE_WIDTH = 180;
-export const NODE_HEIGHT = 72;
-export const HORIZONTAL_GAP = 64;
-export const VERTICAL_GAP = 28;
+export const NODE_WIDTH = 156;
+export const NODE_HEIGHT = 60;
+export const HORIZONTAL_GAP = 38;
+export const VERTICAL_GAP = 20;
 export const COLUMN_STRIDE = NODE_WIDTH + HORIZONTAL_GAP;
 
 const HOST_X = 0;
-const INTERFACE_X = 240;
-const ATTACHMENT_X = 500;
-const GATEWAY_X = 760;
-const UPSTREAM_X = 1040;
-const PEER_START_X = 760;
-const LANE_PADDING = 44;
-const LANE_GAP = 56;
-const GROUP_HEADER = 42;
-const GRAPH_PADDING = 64;
+const INTERFACE_X = COLUMN_STRIDE;
+const ATTACHMENT_X = COLUMN_STRIDE * 2;
+const GATEWAY_WITH_ATTACHMENT_X = COLUMN_STRIDE * 3;
+const GATEWAY_DIRECT_X = ATTACHMENT_X;
+const ROUTE_STEP = COLUMN_STRIDE;
+const LANE_PADDING = 28;
+const LANE_GAP = 36;
+const GROUP_HEADER = 36;
+const GRAPH_PADDING = 36;
 
 const PATH_EDGE_TYPES = new Set([
   "host_uses_interface",
@@ -182,22 +182,19 @@ function interfaceRank(node) {
 
 function membership(snapshot) {
   const peersBySubnet = new Map();
-  const gatewayBySubnet = new Map();
   const subnetByInterface = new Map();
   for (const edge of snapshot.edges ?? []) {
     if (edge.type === "member_of") {
       const items = peersBySubnet.get(edge.target) ?? [];
       items.push(edge.source);
       peersBySubnet.set(edge.target, items);
-    } else if (edge.type === "gateway_for_subnet") {
-      gatewayBySubnet.set(edge.target, edge.source);
     } else if (edge.type === "interface_attached_to_subnet") {
       const items = subnetByInterface.get(edge.source) ?? [];
       items.push(edge.target);
       subnetByInterface.set(edge.source, items);
     }
   }
-  return { peersBySubnet, gatewayBySubnet, subnetByInterface };
+  return { peersBySubnet, subnetByInterface };
 }
 
 function pathTargets(edges, sourceId, types) {
@@ -207,14 +204,7 @@ function pathTargets(edges, sourceId, types) {
     .sort();
 }
 
-/**
- * Lay out an evidence-backed path and separate LAN peers.
- *
- * Main row: This Mac → interface → AP/unknown link → gateway → upstream.
- * Subnet groups are context panels below that row. Their peer nodes have no
- * transit lines because sharing a subnet does not place them on the gateway
- * forwarding path.
- */
+/** Lay out the gateway path and keep peer devices in compact context groups. */
 export function layoutTopology(snapshot) {
   const graph = presentationGraph(snapshot);
   const byId = new Map(graph.nodes.map((node) => [node.id, node]));
@@ -225,7 +215,7 @@ export function layoutTopology(snapshot) {
   const interfaces = graph.nodes
     .filter((node) => node.kind === "interface")
     .sort((a, b) => interfaceRank(a) - interfaceRank(b) || a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
-  const { peersBySubnet, gatewayBySubnet, subnetByInterface } = membership(snapshot);
+  const { peersBySubnet, subnetByInterface } = membership(snapshot);
 
   let nextY = 0;
   for (const interfaceNode of interfaces) {
@@ -233,9 +223,7 @@ export function layoutTopology(snapshot) {
     const attachmentIds = pathTargets(graph.edges, interfaceId, new Set(["interface_associated_with", "interface_reaches_link"]));
     const directGatewayIds = pathTargets(graph.edges, interfaceId, new Set(["interface_reaches_gateway"]));
     const attachment = byId.get(attachmentIds[0]);
-    const gatewayIds = attachment
-      ? pathTargets(graph.edges, attachment.id, new Set(["attachment_reaches_gateway"]))
-      : directGatewayIds;
+    const gatewayIds = attachment ? pathTargets(graph.edges, attachment.id, new Set(["attachment_reaches_gateway"])) : directGatewayIds;
     const routeGateways = graph.nodes.filter((node) => node.kind === "gateway" && node.interface_names?.includes(interfaceNode.label));
     const gateway = byId.get(gatewayIds[0]) ?? routeGateways.find((node) => node.properties?.default_gateway) ?? routeGateways[0];
     const upstreamIds = gateway ? pathTargets(graph.edges, gateway.id, new Set(["upstream_of", "routes_to"])) : [];
@@ -247,23 +235,25 @@ export function layoutTopology(snapshot) {
       .map((id) => byId.get(id))
       .filter(Boolean)
       .sort((a, b) => nodeAddressKey(a) - nodeAddressKey(b) || a.id.localeCompare(b.id));
-    const columns = peers.length > 30 ? 4 : Math.min(3, Math.max(1, peers.length));
+    const columns = peers.length > 24 ? 4 : Math.min(3, Math.max(1, peers.length));
     const rows = Math.ceil(peers.length / columns);
-    const groupHeight = subnetIds.length ? GROUP_HEADER + 24 + Math.max(1, rows) * (NODE_HEIGHT + VERTICAL_GAP) : 0;
-    const laneHeight = Math.max(180, 120 + groupHeight);
+    const groupHeight = subnetIds.length ? GROUP_HEADER + 16 + Math.max(1, rows) * (NODE_HEIGHT + VERTICAL_GAP) : 0;
+    const laneHeight = Math.max(130, 88 + groupHeight);
     const pathY = nextY + LANE_PADDING;
     const laneType = interfaceNode.properties?.kind ?? "unknown";
+    const gatewayX = attachment ? GATEWAY_WITH_ATTACHMENT_X : GATEWAY_DIRECT_X;
+    const upstreamX = gatewayX + ROUTE_STEP;
 
     positioned.set(interfaceId, { ...interfaceNode, laneType, x: INTERFACE_X, y: pathY, width: NODE_WIDTH, height: NODE_HEIGHT, compact: false });
     if (attachment) positioned.set(attachment.id, { ...attachment, laneType, x: ATTACHMENT_X, y: pathY, width: NODE_WIDTH, height: NODE_HEIGHT, compact: false });
-    if (gateway) positioned.set(gateway.id, { ...gateway, laneType, x: GATEWAY_X, y: pathY, width: NODE_WIDTH, height: NODE_HEIGHT, compact: false });
-    if (upstream) positioned.set(upstream.id, { ...upstream, laneType: "route", x: UPSTREAM_X, y: pathY, width: NODE_WIDTH, height: NODE_HEIGHT, compact: false });
+    if (gateway) positioned.set(gateway.id, { ...gateway, laneType, x: gatewayX, y: pathY, width: NODE_WIDTH, height: NODE_HEIGHT, compact: false });
+    if (upstream) positioned.set(upstream.id, { ...upstream, laneType: "route", x: upstreamX, y: pathY, width: NODE_WIDTH, height: NODE_HEIGHT, compact: false });
 
     if (subnetIds.length) {
       const subnetNodes = subnetIds.map((id) => byId.get(id)).filter(Boolean);
-      const groupWidth = Math.max(520, columns * NODE_WIDTH + (columns - 1) * HORIZONTAL_GAP + 48);
-      const groupX = gateway ? GATEWAY_X - 24 : ATTACHMENT_X;
-      const groupY = pathY + NODE_HEIGHT + 38;
+      const groupWidth = Math.max(400, columns * NODE_WIDTH + (columns - 1) * HORIZONTAL_GAP + 36);
+      const groupX = Math.max(INTERFACE_X, gatewayX - 12);
+      const groupY = pathY + NODE_HEIGHT + 26;
       const groupId = subnetNodes[0]?.id ?? `${interfaceId}:networks`;
       groups.push({
         id: groupId,
@@ -273,7 +263,7 @@ export function layoutTopology(snapshot) {
         x: groupX,
         y: groupY,
         width: groupWidth,
-        height: Math.max(120, groupHeight),
+        height: Math.max(96, groupHeight),
         nodeIds: subnetNodes.map((node) => node.id),
       });
       peers.forEach((peer, index) => {
@@ -282,11 +272,11 @@ export function layoutTopology(snapshot) {
         positioned.set(peer.id, {
           ...peer,
           laneType: "peer",
-          x: groupX + 24 + column * (NODE_WIDTH + HORIZONTAL_GAP),
-          y: groupY + GROUP_HEADER + 18 + row * (NODE_HEIGHT + VERTICAL_GAP),
+          x: groupX + 18 + column * (NODE_WIDTH + HORIZONTAL_GAP),
+          y: groupY + GROUP_HEADER + 12 + row * (NODE_HEIGHT + VERTICAL_GAP),
           width: NODE_WIDTH,
           height: NODE_HEIGHT,
-          compact: peers.length > 30,
+          compact: peers.length > 24,
         });
       });
     }
@@ -298,8 +288,8 @@ export function layoutTopology(snapshot) {
 
   let disconnectedY = nextY + LANE_PADDING;
   for (const node of graph.nodes) {
-    if (["subnet"].includes(node.kind) || positioned.has(node.id)) continue;
-    positioned.set(node.id, { ...node, laneType: "disconnected", x: GATEWAY_X, y: disconnectedY, width: NODE_WIDTH, height: NODE_HEIGHT, compact: false });
+    if (node.kind === "subnet" || positioned.has(node.id)) continue;
+    positioned.set(node.id, { ...node, laneType: "disconnected", x: GATEWAY_DIRECT_X, y: disconnectedY, width: NODE_WIDTH, height: NODE_HEIGHT, compact: false });
     disconnectedY += NODE_HEIGHT + VERTICAL_GAP;
   }
 
@@ -318,7 +308,7 @@ export function layoutTopology(snapshot) {
 }
 
 /** Return a camera rectangle that contains bounds and matches viewport aspect. */
-export function fitCamera(bounds, viewportWidth, viewportHeight, padding = 24) {
+export function fitCamera(bounds, viewportWidth, viewportHeight, padding = 20) {
   const safeWidth = Math.max(1, Number(viewportWidth) || 1);
   const safeHeight = Math.max(1, Number(viewportHeight) || 1);
   const padded = { x: bounds.x - padding, y: bounds.y - padding, width: Math.max(1, bounds.width + padding * 2), height: Math.max(1, bounds.height + padding * 2) };
@@ -331,7 +321,7 @@ export function fitCamera(bounds, viewportWidth, viewportHeight, padding = 24) {
 }
 
 /** Return a bounded zoom camera around one world-coordinate anchor. */
-export function zoomCamera(camera, factor, anchorX, anchorY, minWidth = 220, maxWidth = 20000) {
+export function zoomCamera(camera, factor, anchorX, anchorY, minWidth = 200, maxWidth = 20000) {
   const safeFactor = Number.isFinite(factor) && factor > 0 ? factor : 1;
   const width = Math.min(maxWidth, Math.max(minWidth, camera.width / safeFactor));
   const height = camera.height * (width / camera.width);
