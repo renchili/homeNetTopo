@@ -80,28 +80,27 @@ class TopologyTests(unittest.TestCase):
 
     def test_wifi_bssid_creates_observed_ap_then_inferred_gateway_path(self):
         interfaces, routes, neighbors, sources = self.parts()
-        attachments = (WirelessAttachmentFact("en0", "02:00:00:00:00:01", "Synthetic Wi-Fi"),)
         snapshot = build_snapshot(
             interfaces=interfaces,
             routes=routes,
             neighbors=neighbors,
-            wireless_attachments=attachments,
+            wireless_attachments=(WirelessAttachmentFact("en0", "02:00:00:00:00:01", "Synthetic Wi-Fi"),),
             sources=(*sources, SourceStatus("wifi", SourceStatusValue.OK)),
             collected_at="2026-08-03T00:00:00Z",
         )
         access_point = next(node for node in snapshot.nodes if node.kind.value == "access_point")
+        self.assertEqual(access_point.label, "Synthetic Wi-Fi")
         self.assertEqual(access_point.mac_addresses, ("02:00:00:00:00:01",))
-        self.assertEqual(access_point.properties["ssid"], "Synthetic Wi-Fi")
+        self.assertEqual(access_point.properties, {"ssid": "Synthetic Wi-Fi", "identity_source": "bssid"})
         associated = next(edge for edge in snapshot.edges if edge.type.value == "interface_associated_with")
         toward_gateway = next(edge for edge in snapshot.edges if edge.type.value == "attachment_reaches_gateway")
         self.assertTrue(associated.observed)
         self.assertEqual(associated.target, access_point.id)
         self.assertFalse(toward_gateway.observed)
         self.assertEqual(toward_gateway.source, access_point.id)
-        self.assertEqual(access_point.properties["physical_identity_with_gateway"], "unknown")
         self.assertFalse(any(node.kind.value == "link_boundary" for node in snapshot.nodes))
 
-    def test_redacted_wifi_identity_is_visible_without_guessing(self):
+    def test_redacted_wifi_identity_collapses_to_direct_wifi_path(self):
         interfaces, routes, neighbors, sources = self.parts()
         snapshot = build_snapshot(
             interfaces=interfaces,
@@ -111,13 +110,16 @@ class TopologyTests(unittest.TestCase):
             sources=(*sources, SourceStatus("wifi", SourceStatusValue.OK)),
             collected_at="2026-08-03T00:00:00Z",
         )
-        access_point = next(node for node in snapshot.nodes if node.kind.value == "access_point")
-        self.assertEqual(access_point.mac_addresses, ())
-        self.assertEqual(access_point.properties["identity_source"], "association_without_bssid")
-        self.assertTrue(access_point.properties["association_observed"])
-        self.assertIn("identity unavailable", access_point.label)
+        self.assertFalse(any(node.kind.value in {"access_point", "link_boundary"} for node in snapshot.nodes))
+        path = next(edge for edge in snapshot.edges if edge.type.value == "interface_reaches_gateway")
+        self.assertEqual(path.source, "interface:en0")
+        self.assertEqual(path.target, "gateway:192.168.1.1")
+        self.assertEqual(path.properties["path_kind"], "wifi")
+        self.assertEqual(path.properties["access_point_identity"], "unavailable")
+        self.assertEqual(path.properties["identity_reason"], "macos_location_privilege_required")
+        self.assertNotIn("physical_identity_relation", path.properties)
 
-    def test_wifi_media_only_evidence_does_not_fall_back_to_unknown_l2_transit(self):
+    def test_wifi_media_only_evidence_does_not_create_anonymous_ap(self):
         interfaces, routes, neighbors, sources = self.parts()
         snapshot = build_snapshot(
             interfaces=interfaces,
@@ -127,16 +129,12 @@ class TopologyTests(unittest.TestCase):
             sources=(*sources, SourceStatus("wifi_interfaces", SourceStatusValue.OK)),
             collected_at="2026-08-03T00:00:00Z",
         )
-        access_point = next(node for node in snapshot.nodes if node.kind.value == "access_point")
-        associated = next(edge for edge in snapshot.edges if edge.type.value == "interface_associated_with")
-        self.assertEqual(access_point.interface_names, ("en0",))
-        self.assertEqual(access_point.properties["identity_source"], "wifi_interface_and_default_route")
-        self.assertFalse(access_point.properties["association_observed"])
-        self.assertFalse(associated.observed)
-        self.assertEqual(associated.evidence[0].source, "wifi_interfaces")
-        self.assertEqual(associated.properties["inference"], "wifi_interface_plus_default_route")
-        self.assertFalse(any(node.kind.value == "link_boundary" for node in snapshot.nodes))
-        self.assertNotEqual(access_point.label, "Intermediate L2 path unknown")
+        self.assertFalse(any(node.kind.value in {"access_point", "link_boundary"} for node in snapshot.nodes))
+        path = next(edge for edge in snapshot.edges if edge.type.value == "interface_reaches_gateway")
+        self.assertFalse(path.observed)
+        self.assertEqual(path.evidence[0].source, "wifi_interfaces")
+        self.assertEqual(path.properties["path_kind"], "wifi")
+        self.assertEqual(path.properties["intermediate_visibility"], "access_point_not_identified")
 
     def test_same_observed_mac_can_link_ap_and_gateway_identity(self):
         interfaces, routes, _, sources = self.parts()
@@ -151,8 +149,8 @@ class TopologyTests(unittest.TestCase):
         )
         access_point = next(node for node in snapshot.nodes if node.kind.value == "access_point")
         path_edge = next(edge for edge in snapshot.edges if edge.type.value == "attachment_reaches_gateway")
-        self.assertEqual(access_point.properties["physical_identity_with_gateway"], "same_mac")
-        self.assertEqual(path_edge.properties["physical_identity_relation"], "same_mac")
+        self.assertEqual(access_point.properties["gateway_identity_evidence"], "same_mac")
+        self.assertEqual(path_edge.properties["gateway_identity_evidence"], "same_mac")
 
     def test_tunnel_default_route_skips_l2_attachment_nodes(self):
         interfaces, routes, neighbors, sources = self.parts("100.64.0.2/32", interface_kind="tunnel", interface_name="utun4")
