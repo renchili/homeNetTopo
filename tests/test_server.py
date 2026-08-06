@@ -68,7 +68,21 @@ def nmap_xml(address: str, mac: str | None = None) -> str:
 
 
 def hardware_ports(interface: str = "en0") -> str:
-    return f"Hardware Port: Wi-Fi\nDevice: {interface}\nEthernet Address: 02:00:00:00:00:01\n"
+    return f"Hardware Port: Wi-Fi\nDevice: {interface}\nEthernet Address: 02:00:00:00:20:01\n"
+
+
+def airport_json(*, bssid: str | None) -> str:
+    current = {"_name": "Automatic Wi-Fi"}
+    if bssid is not None:
+        current["spairport_bssid"] = bssid
+    return json.dumps({
+        "SPAirPortDataType": [{
+            "spairport_airport_interfaces": [{
+                "_name": "en0",
+                "spairport_current_network_information": current,
+            }],
+        }],
+    })
 
 
 class RunningServer:
@@ -137,7 +151,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(headers["Content-Disposition"], 'attachment; filename="home-network-topology.json"')
             self.assertEqual(headers["Cache-Control"], "no-store")
 
-    def test_capabilities_explain_link_path_sources(self):
+    def test_capabilities_explain_link_path_sources_without_disclosing_fallback_values(self):
         with RunningServer() as running, mock.patch("server.platform.system", return_value="Linux"), mock.patch("server.resolve_nmap") as resolver, mock.patch("server.run_command") as command:
             status, _, payload = running.request("GET", "/api/v1/capabilities")
             self.assertEqual(status, 200)
@@ -145,7 +159,9 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(payload["active_discovery"]["unavailable_reason"], "unsupported_platform")
             self.assertEqual(payload["link_path"]["wifi_interface_source"], "networksetup")
             self.assertEqual(payload["link_path"]["wifi_bssid_source"], "system_profiler")
+            self.assertFalse(payload["link_path"]["wifi_local_fallback_configured"])
             self.assertIn("lldp", payload["link_path"]["ethernet_adjacent_device_source"])
+            self.assertNotIn("wifi_bssid", payload["link_path"])
             resolver.assert_not_called()
             command.assert_not_called()
 
@@ -400,6 +416,55 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(parts.wireless_attachments[0].interface, "en0")
         self.assertFalse(parts.wireless_attachments[0].associated)
         self.assertEqual(dict(parts.failures)["wifi"], "command_timeout")
+
+    def test_local_wifi_fallback_fills_missing_bssid_and_automatic_identity_wins(self):
+        fallback = WirelessAttachmentFact(
+            "en0",
+            "02:aa:bb:cc:dd:55",
+            "Configured Wi-Fi",
+            associated=False,
+            role="relay",
+            configured=True,
+        )
+
+        def collect_with(profiler_bssid):
+            state = AppState(port=8765, nmap_path=None, wifi_override=fallback)
+
+            def run(spec):
+                if spec.kind is CommandKind.INTERFACES:
+                    return CommandResult(
+                        "en0: flags=8863<UP,RUNNING> mtu 1500\n"
+                        "    ether 02:00:00:00:10:01\n"
+                        "    inet 192.168.1.10 netmask 0xffffff00\n",
+                        "", 0, 1,
+                    )
+                if spec.kind is CommandKind.ROUTES:
+                    return CommandResult("Routing tables\n\nInternet:\nDestination Gateway Flags Netif\ndefault 192.168.1.1 UGScg en0\n", "", 0, 1)
+                if spec.kind is CommandKind.NEIGHBORS:
+                    return CommandResult("", "", 0, 1)
+                if spec.kind is CommandKind.WIFI_INTERFACES:
+                    return CommandResult(hardware_ports(), "", 0, 1)
+                return CommandResult(airport_json(bssid=profiler_bssid), "", 0, 1)
+
+            with mock.patch("server.platform.system", return_value="Darwin"), mock.patch("server.run_command", side_effect=run):
+                return state.collect_passive_parts()
+
+        configured = collect_with(None)
+        configured_wifi = configured.wireless_attachments[0]
+        self.assertEqual(configured_wifi.bssid, "02:aa:bb:cc:dd:55")
+        self.assertEqual(configured_wifi.role, "relay")
+        self.assertTrue(configured_wifi.configured)
+        self.assertFalse(configured_wifi.bssid_observed)
+        self.assertIn("local_configuration", {source.type for source in configured.sources})
+
+        automatic = collect_with("02:aa:bb:cc:dd:01")
+        automatic_wifi = automatic.wireless_attachments[0]
+        self.assertEqual(automatic_wifi.bssid, "02:aa:bb:cc:dd:01")
+        self.assertEqual(automatic_wifi.ssid, "Automatic Wi-Fi")
+        self.assertEqual(automatic_wifi.role, "relay")
+        self.assertTrue(automatic_wifi.bssid_observed)
+        self.assertFalse(automatic_wifi.configured)
+        self.assertEqual(automatic_wifi.hardware_mac_address, "02:00:00:00:20:01")
 
     def test_material_timeouts_return_source_specific_504_details(self):
         state = AppState(port=8765, nmap_path=None)
