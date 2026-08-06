@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Deploy HomeNetTopo as a per-user macOS LaunchAgent.
 
-The deployment intentionally stays inside the current user's Library directory,
-never requests administrator privileges, and keeps the service bound to
-127.0.0.1. It copies only the exact runtime file allowlist below, so tests,
-repository metadata, caches, and local development artifacts are not deployed.
+The deployment stays inside the current user's Library directory, never requests
+administrator privileges, and keeps the service bound to 127.0.0.1. Optional
+Wi-Fi fallback values are stored only in the local LaunchAgent plist when macOS
+withholds BSSID details from a background process.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import plistlib
+import re
 import shutil
 import stat
 import subprocess
@@ -52,6 +53,8 @@ HEALTH_TIMEOUT_SECONDS = 10
 MAX_HEALTH_BYTES = 4096
 MAX_DIAGNOSTIC_BYTES = 8192
 PLUTIL_PATH = "/usr/bin/plutil"
+_MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
+_INTERFACE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class DeploymentError(RuntimeError):
@@ -68,6 +71,33 @@ def validate_port(value: int | str) -> int:
     if not 1 <= port <= 65535:
         raise argparse.ArgumentTypeError("port must be between 1 and 65535")
     return port
+
+
+def validate_mac(value: str) -> str:
+    """Return one canonical locally configured BSSID."""
+
+    normalized = value.strip().lower().replace("-", ":")
+    if not _MAC_RE.fullmatch(normalized):
+        raise argparse.ArgumentTypeError("Wi-Fi BSSID must be a canonical MAC address")
+    return normalized
+
+
+def validate_interface(value: str) -> str:
+    """Return one safe BSD interface name."""
+
+    cleaned = value.strip()
+    if not _INTERFACE_RE.fullmatch(cleaned):
+        raise argparse.ArgumentTypeError("Wi-Fi interface name is invalid")
+    return cleaned
+
+
+def validate_ssid(value: str) -> str:
+    """Return a nonempty SSID within the IEEE 802.11 byte limit."""
+
+    cleaned = value.strip()
+    if not cleaned or len(cleaned.encode("utf-8")) > 32:
+        raise argparse.ArgumentTypeError("Wi-Fi SSID must be 1 to 32 UTF-8 bytes")
+    return cleaned
 
 
 def require_supported_host() -> None:
@@ -112,7 +142,16 @@ def validate_source_root(root: Path = SOURCE_ROOT) -> None:
         raise DeploymentError(f"Runtime source paths are missing: {', '.join(missing)}")
 
 
-def build_launch_agent(python_path: str, port: int, nmap_path: str | None) -> dict[str, Any]:
+def build_launch_agent(
+    python_path: str,
+    port: int,
+    nmap_path: str | None,
+    *,
+    wifi_interface: str | None = None,
+    wifi_bssid: str | None = None,
+    wifi_ssid: str | None = None,
+    wifi_role: str | None = None,
+) -> dict[str, Any]:
     """Build the deterministic user LaunchAgent property list."""
 
     arguments = [
@@ -125,12 +164,19 @@ def build_launch_agent(python_path: str, port: int, nmap_path: str | None) -> di
     ]
     if nmap_path:
         arguments.extend(("--nmap-path", nmap_path))
+    if wifi_interface:
+        arguments.extend(("--wifi-interface", wifi_interface))
+    if wifi_bssid:
+        arguments.extend(("--wifi-bssid", wifi_bssid))
+    if wifi_ssid:
+        arguments.extend(("--wifi-ssid", wifi_ssid))
+    if wifi_role:
+        arguments.extend(("--wifi-role", wifi_role))
     return {
         "Label": LABEL,
         "ProgramArguments": arguments,
         "WorkingDirectory": str(INSTALL_DIR),
         "RunAtLoad": True,
-        # Restart only after an unexpected exit; a normal stop remains stopped.
         "KeepAlive": {"SuccessfulExit": False},
         "ThrottleInterval": 5,
         "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
@@ -187,8 +233,6 @@ def stage_runtime(root: Path = SOURCE_ROOT) -> Path:
             source = root / relative
             destination = staging / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            # Do not follow a link introduced after the first validation. A
-            # copied link remains visible and is rejected by the staged check.
             shutil.copy2(source, destination, follow_symlinks=False)
         validate_source_root(staging)
     except Exception:
@@ -209,9 +253,6 @@ def replace_runtime(staging: Path) -> Path | None:
     try:
         staging.rename(INSTALL_DIR)
     except Exception:
-        # Restore here because the caller cannot receive ``previous`` when this
-        # function raises. The outer rollback must therefore run only after a
-        # successful return from this function.
         if previous and previous.exists():
             previous.rename(INSTALL_DIR)
         raise
@@ -339,22 +380,18 @@ def launchd_diagnostics() -> str:
         f"  runtime: {INSTALL_DIR}",
         f"  python: {sys.executable}",
     ]
-
     lint = _run_plutil() if PLIST_PATH.exists() else None
     if lint is None:
         lines.append("  plutil: plist is absent")
     else:
         lint_detail = lint.stdout.strip() or lint.stderr.strip() or f"exit {lint.returncode}"
         lines.append(f"  plutil: {lint_detail}")
-
     disabled = run_launchctl("print-disabled", service_domain(), check=False)
     disabled_detail = disabled.stdout.strip() or disabled.stderr.strip() or f"exit {disabled.returncode}"
     lines.append(f"  print-disabled: {disabled_detail[:MAX_DIAGNOSTIC_BYTES]}")
-
     current = run_launchctl("print", service_target(), check=False)
     current_detail = current.stdout.strip() or current.stderr.strip() or f"exit {current.returncode}"
     lines.append(f"  service-state: {current_detail[:MAX_DIAGNOSTIC_BYTES]}")
-
     lines.append(f"  service-error.log: {_tail(LOG_DIR / 'service-error.log')}")
     lines.append(f"  service.log: {_tail(LOG_DIR / 'service.log')}")
     return "\n".join(lines)
@@ -364,20 +401,11 @@ def bootstrap_agent() -> None:
     """Enable, clean stale registration, validate, and bootstrap the user agent."""
 
     validate_launch_agent()
-
-    # launchd persists disabled state separately from the plist. Re-enable this
-    # exact user service before bootstrap; using root would target the wrong
-    # bootstrap domain and is neither required nor supported.
     enabled = run_launchctl("enable", service_target(), check=False)
     if enabled.returncode != 0:
         detail = enabled.stderr.strip() or enabled.stdout.strip() or "launchctl enable failed"
         raise DeploymentError(f"Could not enable the current-user LaunchAgent: {detail}\n{launchd_diagnostics()}")
-
-    # A prior interrupted install can leave a registration that is not returned
-    # by the normal service-target probe. Booting out by plist path is a safe,
-    # idempotent cleanup for this exact label and domain.
     run_launchctl("bootout", service_domain(), str(PLIST_PATH), check=False)
-
     loaded = run_launchctl("bootstrap", service_domain(), str(PLIST_PATH), check=False)
     if loaded.returncode != 0:
         detail = loaded.stderr.strip() or loaded.stdout.strip() or "launchctl bootstrap failed"
@@ -414,23 +442,38 @@ def wait_for_health(port: int, timeout_seconds: int = HEALTH_TIMEOUT_SECONDS) ->
     )
 
 
-def install(port: int, nmap_path: str | None) -> None:
+def install(
+    port: int,
+    nmap_path: str | None,
+    *,
+    wifi_interface: str | None = None,
+    wifi_bssid: str | None = None,
+    wifi_ssid: str | None = None,
+    wifi_role: str | None = None,
+) -> None:
     """Install runtime files, activate launchd, and verify loopback health."""
 
     require_supported_host()
+    if any((wifi_bssid, wifi_ssid, wifi_role)) and not wifi_interface:
+        raise DeploymentError("--wifi-interface is required with Wi-Fi fallback values")
     python_path = canonical_executable(sys.executable)
     assert python_path is not None
     resolved_nmap = canonical_executable(nmap_path)
-    payload = build_launch_agent(python_path, port, resolved_nmap)
+    payload = build_launch_agent(
+        python_path,
+        port,
+        resolved_nmap,
+        wifi_interface=wifi_interface,
+        wifi_bssid=wifi_bssid,
+        wifi_ssid=wifi_ssid,
+        wifi_role=wifi_role,
+    )
     staging = stage_runtime()
     previous_plist = PLIST_PATH.read_bytes() if PLIST_PATH.exists() else None
     backup: Path | None = None
     runtime_replaced = False
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-
     try:
-        # A loaded old process must stop before files or the plist are changed;
-        # otherwise its health endpoint could be mistaken for the new version.
         bootout_if_loaded()
         backup = replace_runtime(staging)
         runtime_replaced = True
@@ -516,15 +559,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="Deploy HomeNetTopo as a per-user macOS LaunchAgent.")
     subparsers = parser.add_subparsers(dest="action", required=True)
-
     install_parser = subparsers.add_parser("install", help="Install or update the current user deployment.")
     install_parser.add_argument("--port", type=validate_port, default=DEFAULT_PORT)
     install_parser.add_argument("--nmap-path", help="Optional explicit Nmap executable path.")
-
+    install_parser.add_argument("--wifi-interface", type=validate_interface, help="BSD Wi-Fi interface for a local fallback, for example en0.")
+    install_parser.add_argument("--wifi-bssid", type=validate_mac, help="Current AP/relay BSSID used only when automatic collection omits it.")
+    install_parser.add_argument("--wifi-ssid", type=validate_ssid, help="Optional current SSID stored only in the local LaunchAgent plist.")
+    install_parser.add_argument("--wifi-role", choices=("access-point", "relay"), help="Optional user-confirmed role of the connected Wi-Fi node.")
     subparsers.add_parser("restart", help="Restart the installed service.")
     subparsers.add_parser("status", help="Show launchd state and the health response.")
     subparsers.add_parser("diagnose", help="Show plist, launchd, path, and service-log diagnostics.")
-
     uninstall_parser = subparsers.add_parser("uninstall", help="Remove the current user deployment.")
     uninstall_parser.add_argument("--purge-logs", action="store_true")
     return parser.parse_args(argv)
@@ -536,7 +580,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         if args.action == "install":
-            install(args.port, args.nmap_path)
+            install(
+                args.port,
+                args.nmap_path,
+                wifi_interface=args.wifi_interface,
+                wifi_bssid=args.wifi_bssid,
+                wifi_ssid=args.wifi_ssid,
+                wifi_role=args.wifi_role,
+            )
         elif args.action == "restart":
             restart()
         elif args.action == "status":
