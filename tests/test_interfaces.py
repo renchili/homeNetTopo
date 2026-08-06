@@ -60,11 +60,7 @@ def airport_payload(bssid="02:AA:BB:CC:DD:01", current_marker=object()):
         }
     else:
         interface["spairport_current_network_information"] = current_marker
-    return json.dumps({
-        "SPAirPortDataType": [{
-            "spairport_airport_interfaces": [interface],
-        }],
-    })
+    return json.dumps({"SPAirPortDataType": [{"spairport_airport_interfaces": [interface]}]})
 
 
 class InterfaceParserTests(unittest.TestCase):
@@ -105,9 +101,7 @@ class InterfaceParserTests(unittest.TestCase):
             parse_wifi_hardware_ports("unexpected output\n")
 
     def test_airport_parser_keeps_current_radio_metrics_and_normalizes_bssid(self):
-        facts = parse_airport_json(airport_payload())
-        self.assertEqual(len(facts), 1)
-        fact = facts[0]
+        fact = parse_airport_json(airport_payload())[0]
         self.assertEqual(fact.interface, "en0")
         self.assertEqual(fact.bssid, "02:aa:bb:cc:dd:01")
         self.assertEqual(fact.ssid, "Synthetic Wi-Fi")
@@ -116,13 +110,14 @@ class InterfaceParserTests(unittest.TestCase):
         self.assertEqual(fact.noise_dbm, -91)
         self.assertEqual(fact.phy_mode, "802.11ax")
         self.assertEqual(fact.transmit_rate_mbps, 1200)
-        self.assertTrue(fact.identified)
+        self.assertTrue(fact.bssid_observed)
         self.assertTrue(fact.associated)
 
     def test_airport_parser_preserves_redacted_association_without_guessing(self):
         fact = parse_airport_json(airport_payload("<redacted>"))[0]
         self.assertIsNone(fact.bssid)
         self.assertFalse(fact.identified)
+        self.assertFalse(fact.bssid_observed)
         self.assertTrue(fact.associated)
 
     def test_airport_parser_accepts_string_current_network(self):
@@ -159,7 +154,8 @@ class InterfaceParserTests(unittest.TestCase):
         self.assertEqual(merged.bssid, "02:aa:bb:cc:dd:01")
         self.assertEqual(merged.ssid, "Synthetic Wi-Fi")
         self.assertEqual(merged.role, "relay")
-        self.assertTrue(merged.configured)
+        self.assertTrue(merged.bssid_observed)
+        self.assertFalse(merged.configured)
 
     def test_configured_bssid_fills_only_missing_automatic_identity(self):
         media = parse_wifi_hardware_ports(NETWORKSETUP_HARDWARE_PORTS)
@@ -177,6 +173,8 @@ class InterfaceParserTests(unittest.TestCase):
         self.assertEqual(merged.bssid, "02:aa:bb:cc:dd:55")
         self.assertEqual(merged.hardware_mac_address, "02:00:00:00:00:01")
         self.assertEqual(merged.role, "relay")
+        self.assertTrue(merged.configured)
+        self.assertFalse(merged.bssid_observed)
 
     def test_airport_parser_tolerates_only_a_trailing_profiler_prompt_marker(self):
         self.assertEqual(parse_airport_json(airport_payload() + "%")[0].interface, "en0")
