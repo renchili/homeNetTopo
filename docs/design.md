@@ -6,47 +6,36 @@ This document defines the intended first implementation. It is not evidence that
 
 ## Goals
 
-- Collect IPv4, route, ARP, Wi-Fi media, and optional current-association evidence visible from the Mac.
+- Collect IPv4, local interface MAC, adapter hardware MAC, route, ARP, Wi-Fi association, and optional radio measurements visible from the Mac.
 - Show an evidence-backed path toward the default gateway.
-- Keep same-subnet peers separate from transit-path nodes.
+- Keep local identities, serving-radio BSSID, peers, and transit semantics separate.
 - Preserve tunnel interfaces as explicit Layer-3 paths.
-- Represent unavailable intermediate Layer-2 evidence as unknown instead of inventing switches.
+- Represent unavailable non-Wi-Fi Layer-2 evidence as unknown instead of inventing switches.
 - Keep active discovery bounded to validated local RFC 1918 targets.
-- Serve a secure, accessible, loopback-only interface.
-- Provide deterministic state, layout, tests, and current-user deployment ownership.
+- Serve a secure, accessible, loopback-only interface and a current-user LaunchAgent.
 
 ## Non-goals
 
-- Proving complete physical topology from one endpoint.
-- Discovering every transparent switch, bridge, mesh backhaul, VLAN, controller, or firewall-internal segment.
-- Treating ARP peers as transit devices.
-- Port, service, vulnerability, credential, OS, public, or internet-wide scanning.
-- Reverse DNS, online enrichment, persistent inventory, LAN bind, active IPv6, packet capture, cloud deployment, containers, or system-wide installation.
+The first release does not prove complete physical topology, automatically determine AP versus relay from BSSID alone, enumerate transparent switches without LLDP or managed-network evidence, discover hidden VLANs or backhaul, scan ports/services/OS, bind to LAN, capture packets, persist inventory, or use cloud enrichment.
 
-## Runtime and owners
-
-Production uses macOS, Python 3.10+, the Python standard library, repository-owned browser assets, and optional Nmap. Node.js 20+ is development-only.
+## Owners
 
 ```text
-server.py                  loopback HTTP, security boundary, concurrent source orchestration, lock, snapshots
-homenettopo/commands.py    exact command allowlist, Nmap resolution, bounded subprocess runner
-homenettopo/interfaces.py  ifconfig, networksetup Wi-Fi media, profiler association parsing and merge
+server.py                  loopback HTTP, concurrent collection, fallback merge, snapshot publication
+homenettopo/commands.py    fixed command allowlist and bounded subprocesses
+homenettopo/interfaces.py  IP/current MAC, hardware MAC, BSSID and radio parsing/merge
 homenettopo/routes.py      IPv4 route parser
 homenettopo/neighbors.py   ARP parser
 homenettopo/discovery.py   Phase A/B and Nmap evidence validation
-homenettopo/models.py      validated public topology schema
-homenettopo/topology.py    evidence merge, gateway path, peer membership, confidence
-web/core.mjs               reducer, path/peer layout, address arithmetic, camera math
-web/app.js                 fetch, capability status, safe DOM/SVG, input/focus/export
-web/index.html             accessible page and explanatory copy
-web/styles.css             visual tokens and path/peer/tunnel presentation
-scripts/deploy.py          current-user LaunchAgent lifecycle and rollback
+homenettopo/models.py      public topology schema
+homenettopo/topology.py    identity separation, gateway path, peers and confidence
+web/core.mjs               reducer, path/peer layout and camera math
+web/app.js                 fetch, semantic Details, safe DOM/SVG, input/focus/export
+scripts/deploy.py          current-user LaunchAgent lifecycle, local fallback and rollback
 scripts/check.py           full regression and cross-owner guards
 ```
 
 ## Approved commands
-
-The browser and HTTP body cannot supply executable names or arguments.
 
 ```text
 INTERFACES       /sbin/ifconfig -a
@@ -58,234 +47,122 @@ DISCOVERY        <canonical-nmap-path> -sn -n --max-retries 1
                  --host-timeout 5s -oX - <validated-targets...>
 ```
 
-Commands run with `shell=False`, a minimal environment, bounded output, total deadlines, and terminate/kill cleanup. Interface, route, and ARP commands use five seconds. Wi-Fi hardware-port detection uses three seconds. Wi-Fi profiling uses an eight-second process deadline around the profiler’s fixed five-second timeout.
+Commands run with `shell=False`, minimal environment, bounded output, total deadlines, and terminate/kill cleanup. Passive sources start concurrently. Interface, route, and ARP use five seconds; Wi-Fi interface detection uses three seconds; profiler uses an eight-second process deadline around its fixed five-second timeout.
 
-Nmap resolution order is explicit path, Apple Silicon Homebrew, Intel Homebrew, then `PATH`. The public API exposes only the resolution source.
-
-## Passive collection
+## Passive collection and identity merge
 
 1. Validate Host and protected POST headers.
-2. Require an empty JSON object.
-3. Acquire the single collection lock.
-4. Require macOS.
-5. Launch interface, route, ARP, `networksetup`, and `system_profiler` commands concurrently.
-6. Parse each source with explicit failure semantics.
-7. Merge fast Wi-Fi media detection with optional association details.
-8. Construct a complete or coherent partial snapshot.
-9. Publish atomically and release the lock.
-10. Re-read capabilities before the browser releases its passive collection owner.
+2. Require an empty JSON object and acquire the single collection lock.
+3. Launch all fixed passive commands concurrently.
+4. Parse material interface/route/ARP evidence independently from optional Wi-Fi enrichment.
+5. Merge automatic evidence with an optional local fallback.
+6. Construct and atomically publish a complete or coherent partial snapshot.
 
-The server still owns one collection. Concurrent command execution is internal and shortens wall-clock duration to approximately the slowest command deadline rather than the sum of all deadlines.
+The identity merge uses these owners:
 
-Interface, route, and ARP are material coherence sources. `networksetup` supplies `wifi_interfaces` media evidence. `system_profiler` supplies optional `wifi` SSID/BSSID detail. A profiler timeout or parse failure creates a warning and partial snapshot but does not discard valid Wi-Fi media evidence and cannot by itself cause `504`.
+| Evidence | Meaning |
+|---|---|
+| `ifconfig inet` | local IPv4 assignment |
+| `ifconfig ether` | MAC currently active on the local interface, potentially a private Wi-Fi MAC |
+| `networksetup Ethernet Address` | adapter hardware MAC |
+| current `system_profiler` BSSID | serving AP/mesh/relay radio |
+| ARP | IP-neighbor MAC, excluding all local IPs and local MACs |
+| Nmap | responding peer evidence, excluding all local IPs and local MACs |
 
-If no material source is coherent, errors expose normalized `failed_sources`. A `504 command_timeout` also exposes `timeout_sources`, allowing the browser/operator to identify the actual source without leaking commands or stderr.
+A detailed profiler result must not erase the adapter hardware MAC. A configured fallback must not override an automatically observed BSSID. Nearby-network scan entries are ignored.
 
-## Determining the path to the gateway
+Optional profiler failure becomes a warning and cannot by itself produce `504`. If material evidence is incoherent, `collection_failed` or `command_timeout` includes `failed_sources` and `timeout_sources`.
 
-The topology builder uses the default route’s interface and gateway.
+## Wi-Fi gateway path
 
-### Wi-Fi evidence
-
-`networksetup -listallhardwareports` establishes which BSD interfaces are Wi-Fi. `system_profiler` JSON is searched only for current interface association objects; nearby-network scan lists are ignored.
-
-When a canonical BSSID is present:
+When a current BSSID is available:
 
 ```text
 local_host
   → host_uses_interface
 interface
-  → interface_associated_with       observed
-access_point
-  → attachment_reaches_gateway      inferred
+  → interface_associated_with
+connected Wi-Fi node
+  → attachment_reaches_gateway
 gateway
-  → upstream_of                     inferred
+  → upstream_of
 upstream_boundary
 ```
 
-The BSSID identifies an associated AP radio. It does not prove the physical identity of the router appliance. Exact AP BSSID and gateway ARP MAC equality is positive `same_mac` evidence. Different MACs remain `unknown` because one device may expose different radio and routed-interface MAC addresses.
+The Wi-Fi node carries available SSID, BSSID, channel, RSSI, noise, PHY mode, transmit rate, role, and evidence source. Its default role is `access point or relay`. BSSID proves the serving radio; it does not prove main AP versus relay or physical identity with the gateway.
 
-When current association is visible but BSSID is redacted or missing, the graph keeps an observed `access_point` node labelled as identity unavailable. It never guesses or silently merges it with the gateway.
+When macOS withholds BSSID, the graph retains a connected Wi-Fi node without an invented address. A background LaunchAgent may use a strictly validated local fallback:
 
-When only `networksetup` identifies the default-route interface as Wi-Fi, the graph creates an inferred unidentified AP boundary. The interface-to-AP edge cites Wi-Fi-media plus default-route evidence and remains visibly inferred. It must not fall back to the generic Ethernet `Intermediate L2 path unknown` node.
+```text
+--wifi-interface en0
+--wifi-bssid 02:aa:bb:cc:dd:55
+--wifi-ssid "Synthetic Wi-Fi"
+--wifi-role relay
+```
 
-### Ethernet and unclassified non-tunnel links
+The values above are synthetic. Fallback evidence is labelled `local_configuration`, has medium confidence, and is stored only in the current-user LaunchAgent plist. An automatic BSSID collected later has priority.
 
-ARP resolves an IP neighbor to a link-layer address. It does not enumerate transparent switching infrastructure. An IP route or traceroute-style hop sequence also does not reveal a device that forwards only Layer-2 frames.
-
-A directly adjacent switch can be identified only when an adjacent-device or managed-topology source such as LLDP/CDP is actually available. This first release has no such source. It therefore creates:
+For a non-Wi-Fi path without adjacent-device evidence:
 
 ```text
 interface
-  → interface_reaches_link          inferred, low confidence
+  → interface_reaches_link
 link_boundary "Intermediate L2 path unknown"
-  → attachment_reaches_gateway      inferred, low confidence
+  → attachment_reaches_gateway
 gateway
 ```
 
-The boundary may represent a direct link, switch, bridge, or mesh backhaul. It is uncertainty, not an invented device.
+The boundary can represent direct connection, switch, bridge, or mesh backhaul. It is uncertainty, not a fabricated device. Tunnel routes use direct Layer-3 interface-to-gateway edges.
 
-### Tunnel paths
+## Peer semantics
 
-A default route through a tunnel uses:
-
-```text
-interface → interface_reaches_gateway → gateway → upstream
-```
-
-No access point, switch, or Layer-2 broadcast-domain node is inserted.
-
-### LAN peers
-
-`member_of` and `gateway_for_subnet` express address/subnet context. They do not express forwarding order. The browser groups subnet peer devices below the main path and does not render membership edges as transit lines.
+`member_of` and `gateway_for_subnet` express subnet context, not forwarding order. Peer devices appear in a separate group and never enter the host-to-gateway path. A peer whose IP or MAC equals any local identity is rejected during topology construction.
 
 ## Active discovery
 
-### Phase A
+Phase A validates Host/origin, JSON, 16 KiB body, 1–32 canonical networks, RFC 1918 membership, address union up to 1024, and timeout 5–120 seconds before commands.
 
-Before lock acquisition or commands:
+Phase B collects fresh interfaces, derives eligible non-tunnel networks, assigns each target to the most-specific local owner, rejects supernets/partial overlaps/unrelated ranges, deduplicates only within an owner, preserves adjacent sibling targets and overlapping owners, and recalculates the union.
 
-- validate Host, content type, custom header, Origin, and Fetch Metadata;
-- enforce 16 KiB JSON limit;
-- require 1–32 canonical IPv4 networks;
-- require RFC 1918 membership;
-- reject loopback, link-local, multicast, unspecified, public, documentation, reserved, or tunnel-only targets;
-- enforce at most 1024 unique addresses;
-- validate total timeout from 5 through 120 seconds.
+Only then may Nmap run. Its XML must have `nmaprun`; hosts must be `up`; IPv4 and optional MAC must be canonical and in an effective target. Invalid evidence is `500 collection_failed`; failures preserve the previous snapshot.
 
-### Phase B
+## Browser design
 
-After fresh passive collection:
+The action area shows Nmap checking, ready, unavailable with recheck, no eligible LAN, or unsupported platform. The graph uses compact fixed columns, orthogonal paths, a viewBox camera, delayed pointer capture, drag-click suppression, pointer-centered zoom, keyboard selection, and a semantic Details panel.
 
-- require usable interface evidence;
-- derive eligible non-tunnel RFC 1918 networks;
-- require every target to equal or be contained by one eligible network;
-- assign the target to its most-specific containing local network;
-- reject supernets, partial overlaps, adjacent networks outside the owner, unrelated networks, and tunnel-only networks;
-- reduce exact duplicates and contained targets only inside the same owner group;
-- preserve adjacent sibling targets and distinct overlapping-owner targets;
-- recalculate the address union.
-
-Interface timeout is `504 command_timeout` with `timeout_sources: ["interfaces"]`. Missing or unparseable interface evidence is `500 collection_failed`. Successful interface evidence without an eligible network is `400 invalid_target`.
-
-Only after both phases pass may Nmap run. Nmap XML must have an `nmaprun` root. Only `up` hosts are accepted. IPv4 and optional MAC values are validated, and every accepted address must belong to at least one effective target. Malformed or out-of-effective-target evidence is `500 collection_failed`. Failed operations preserve the prior snapshot and do not publish intermediate passive data.
-
-## API, concurrency, and browser security
-
-Accepted Host values are derived from the configured port and limited to `127.0.0.1` and `localhost`. Collection POSTs require JSON and `X-HomeNetTopo-Request: 1`; optional Origin and Fetch Metadata must be same-origin. No permissive CORS is emitted.
-
-Read-only routes never collect:
+Details present:
 
 ```text
-GET /api/v1/health
-GET /api/v1/capabilities
-GET /api/v1/topology
-GET /api/v1/topology/export
+IP addresses
+Hardware MAC
+Private Wi-Fi MAC
+BSSID
+SSID
+Channel
+RSSI
+Noise
+PHY mode
+Transmit rate
+Role
+Evidence
 ```
 
-Collection routes are:
+The UI does not lead with internal identifiers or parser property names.
 
-```text
-POST /api/v1/topology/refresh
-POST /api/v1/discover
-```
+## Deployment
 
-One collection runs at a time. Another client gets `409 collection_in_progress`. The browser uses one `collectionInFlight` owner and ignores stale completions.
+`scripts/deploy.py` manages `com.homenettopo.local` in `gui/<uid>`. It never uses `sudo`, always binds `127.0.0.1`, copies the exact 15-file runtime allowlist, rejects symlinks/special files, stages before replacement, retains rollback data until bootstrap and loopback health succeed, disables environment proxies, and retains logs unless purge is requested.
 
-The CSP permits repository fonts and `data:` fonts through `font-src 'self' data:`. It does not permit external font, script, or style origins. Browser-extension `runtime.lastError` messages are outside application execution.
+Local Wi-Fi fallback values are ProgramArguments in the current user's plist only. They are not environment variables, service log lines, or repository data.
 
-## Browser information architecture
+## Testing and acceptance
 
-```text
-header
-  product and snapshot metadata
-  passive refresh
-  active discovery action plus visible Nmap capability state
-  export
-status
-  progress, errors, source warnings, recovery instructions
-workspace
-  gateway path and LAN peers graph
-  details panel
-dialog
-  eligible targets, address total, timeout, confirmation
-```
-
-The Nmap action is never an unexplained grey placeholder:
-
-- checking: disabled with `Nmap: checking`;
-- ready: enabled `Discover devices`;
-- missing: enabled `Check Nmap setup` plus `Nmap: unavailable`;
-- no eligible target: disabled `No eligible LAN`;
-- unsupported platform: explicit disabled explanation.
-
-Checking Nmap only re-reads capabilities; it does not start discovery.
-
-## Deterministic graph layout
-
-Top-left world coordinates use fixed path columns:
-
-```text
-local host       x = 0
-interface        x = 240
-AP/unknown link  x = 500
-gateway          x = 760
-upstream         x = 1040
-```
-
-Each interface owns a vertical lane. The path row is above an optional subnet/peer context group. Peers use up to three columns, or four for more than 30 devices. Membership edges are omitted from rendered path edges.
-
-Rendered path edge types are:
-
-```text
-host_uses_interface
-interface_associated_with
-interface_reaches_link
-attachment_reaches_gateway
-interface_reaches_gateway
-upstream_of
-routes_to
-```
-
-Edges use orthogonal SVG paths. A viewBox camera fits each new snapshot, pans from nodes/edges/groups/blank space, suppresses click after drag, and zooms around the pointer. Layout and camera math are pure and deterministic.
-
-## Topology schema additions
-
-Node kinds include:
-
-```text
-local_host
-interface
-access_point
-link_boundary
-subnet
-gateway
-device
-upstream_boundary
-```
-
-Sources include `wifi_interfaces`, `wifi`, and `link_path_inference`. Every inferred path edge remains visibly inferred with confidence and evidence. The schema does not claim physical wiring.
-
-## Current-user deployment
-
-`scripts/deploy.py` manages one current-user LaunchAgent and never uses `sudo`. It copies only the explicit 15 runtime files, rejects symlinks, stages before replacement, keeps rollback data until loopback health succeeds, disables proxy use for health checks, and retains logs unless purge is requested.
-
-## Testing design
-
-Python tests cover command allowlists, fast Wi-Fi hardware-port parsing, profiler redaction/current-network filtering, media/detail merge, concurrent degradation, source-specific `timeout_sources`, route and ARP parsing, active validation, path schema, Wi-Fi AP path, unknown Ethernet path, tunnel path, AP/gateway MAC relation, HTTP security, deployment, and snapshot preservation.
-
-Node tests cover reducer ownership, capability recovery, evidence graph preservation, path order, peer grouping, hidden membership edges, tunnel paths, layout determinism, rectangle overlap, camera fit/zoom, address arithmetic, selection, and export naming.
-
-Full regression:
+Python tests cover command boundaries, all three Wi-Fi MAC roles, radio metrics, merge priority, local identity exclusion, AP/relay path, unknown Ethernet path, tunnel path, active validation, HTTP security, deployment fallback, and snapshot preservation. Node/static web tests cover reducer ownership, path/peer layout, camera behavior, selection, and semantic Details labels.
 
 ```text
 python3 scripts/check.py
 ```
 
-It includes compile, metadata, Python tests, documentation guards, contract guards, browser asset/CSP checks, Node tests, deployment guards, and tracked-path hygiene.
+Formal acceptance still requires exact-revision execution on supported macOS, real command behavior, browser interaction, LaunchAgent lifecycle, Nmap recovery, one bounded active discovery, and full regression.
 
-## Privacy and acceptance
-
-Snapshots remain in memory unless exported. Do not commit real SSIDs, BSSIDs, IPs, MACs, hostnames, logs, captures, or scan results.
-
-Formal acceptance still requires exact-revision execution on supported macOS, including real `networksetup` and `system_profiler` behavior, browser interaction, LaunchAgent lifecycle, Nmap unavailable/recovery, one bounded active discovery, and regression execution.
+Do not commit real IPs, SSIDs, BSSIDs, MACs, hostnames, logs, LaunchAgent plists, captures, scans, or exports.
