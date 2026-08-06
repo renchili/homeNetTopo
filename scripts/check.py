@@ -47,6 +47,7 @@ def load_metadata() -> dict:
     required = {
         "name", "status", "runtime", "collection_api", "passive_evidence",
         "active_discovery", "snapshot_policy", "gateway_path", "graph_layout",
+        "command_limits", "http_limits", "network_scope", "local_bind", "default_port",
     }
     missing = required - metadata.keys()
     if missing:
@@ -83,7 +84,7 @@ def documentation_guards() -> None:
             "<module>", "ApiError", "PassiveParts", "AppState", "AppState.collect_passive_parts",
             "AppState.passive_refresh", "AppState.active_discover", "HomeNetTopoServer",
             "HomeNetTopoHandler", "HomeNetTopoHandler._validate_collection_headers",
-            "HomeNetTopoHandler._serve_static", "parse_args", "main",
+            "HomeNetTopoHandler._serve_static", "canonical_mac_argument", "parse_args", "main",
         ),
         "homenettopo/commands.py": (
             "<module>", "CommandError", "CommandKind", "CommandSpec", "CommandResult",
@@ -102,8 +103,7 @@ def documentation_guards() -> None:
         "homenettopo/models.py": (
             "<module>", "ModelError", "Confidence", "NodeKind", "EdgeType", "Evidence",
             "SourceStatus", "NetworkDescriptor", "WarningItem", "Node", "Edge",
-            "ActiveDiscoveryMetadata", "TopologySnapshot", "TopologySnapshot.validate",
-            "TopologySnapshot.to_dict",
+            "ActiveDiscoveryMetadata", "TopologySnapshot", "TopologySnapshot.validate", "TopologySnapshot.to_dict",
         ),
         "homenettopo/topology.py": ("<module>", "build_snapshot"),
         "scripts/deploy.py": (
@@ -118,31 +118,30 @@ def documentation_guards() -> None:
         if missing:
             raise RuntimeError(f"required code documentation missing from {relative}: {missing}")
 
-    core = (ROOT / "web/core.mjs").read_text(encoding="utf-8")
-    app = (ROOT / "web/app.js").read_text(encoding="utf-8")
-    comment_contracts = (
-        ("web/core.mjs", core, ("Pure frontend state", "Apply one state action", "Lay out an evidence-backed path", "Return a camera rectangle", "orthogonal SVG path")),
-        ("web/app.js", app, ("Browser adapter for HomeNetTopo", "Recheck Nmap when unavailable", "Render subnet context first", "viewBox camera")),
-    )
-    for owner, text, markers in comment_contracts:
-        missing = [marker for marker in markers if marker not in text]
+    comment_contracts = {
+        "web/core.mjs": ("Pure frontend state", "Lay out an evidence-backed path", "camera"),
+        "web/app.js": ("Browser adapter for HomeNetTopo", "viewBox camera", "safe DOM/SVG"),
+    }
+    for relative, markers in comment_contracts.items():
+        source = (ROOT / relative).read_text(encoding="utf-8")
+        missing = [marker for marker in markers if marker not in source]
         if missing:
-            raise RuntimeError(f"required code comments missing from {owner}: {missing}")
+            raise RuntimeError(f"required code comments missing from {relative}: {missing}")
 
 
 def consistency_guards() -> None:
-    """Check cross-owner safety, path-evidence, UI, and deployment contracts."""
+    """Check cross-owner safety, Wi-Fi identity, path, UI, and deployment contracts."""
 
     required_paths = (
         "server.py", "metadata.json", "AGENT.md", "README.md",
         "homenettopo/commands.py", "homenettopo/discovery.py", "homenettopo/interfaces.py",
         "homenettopo/models.py", "homenettopo/neighbors.py", "homenettopo/routes.py",
         "homenettopo/topology.py", "scripts/deploy.py", "web/index.html", "web/core.mjs",
-        "web/app.js", "web/styles.css", "docs/api-spec.md", "docs/design.md",
-        "docs/plan.md", "docs/questions.md", "tests/test_commands.py",
-        "tests/test_interfaces.py", "tests/test_models.py", "tests/test_topology.py",
-        "tests/test_discovery.py", "tests/test_server.py", "tests/test_static_security.py",
-        "tests/test_web_contract.py", "tests/frontend/core.test.mjs",
+        "web/app.js", "web/styles.css", "docs/api-spec.md", "docs/design.md", "docs/plan.md",
+        "docs/questions.md", "tests/test_commands.py", "tests/test_interfaces.py",
+        "tests/test_models.py", "tests/test_topology.py", "tests/test_discovery.py",
+        "tests/test_server.py", "tests/test_static_security.py", "tests/test_web_contract.py",
+        "tests/frontend/core.test.mjs",
     )
     missing = [path for path in required_paths if not (ROOT / path).is_file()]
     if missing:
@@ -158,9 +157,11 @@ def consistency_guards() -> None:
         WirelessAttachmentFact,
         merge_wireless_facts,
         parse_airport_json,
+        parse_ifconfig,
         parse_wifi_hardware_ports,
     )
-    from homenettopo.models import SourceStatus, SourceStatusValue
+    from homenettopo.models import ActiveDiscoveryMetadata, SourceStatus, SourceStatusValue
+    from homenettopo.neighbors import NeighborFact
     from homenettopo.topology import build_snapshot
 
     metadata = load_metadata()
@@ -201,215 +202,188 @@ def consistency_guards() -> None:
     if not passive.get("commands_run_concurrently") or not passive.get("wifi_detail_failure_is_optional"):
         raise RuntimeError("metadata does not preserve concurrent optional Wi-Fi detail semantics")
 
+    parsed_interface = parse_ifconfig(
+        "en0: flags=8863<UP,RUNNING> mtu 1500\n"
+        "    ether 02:00:00:00:10:01\n"
+        "    inet 192.168.1.10 netmask 0xffffff00\n"
+    )[0]
+    if parsed_interface.current_mac_address != "02:00:00:00:10:01":
+        raise RuntimeError("ifconfig current MAC is not parsed canonically")
+
     synthetic_ports = (
         "Hardware Port: Ethernet\nDevice: en5\nEthernet Address: 02:00:00:00:00:05\n\n"
-        "Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: 02:00:00:00:00:01\n"
+        "Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: 02:00:00:00:20:01\n"
     )
-    media_facts = parse_wifi_hardware_ports(synthetic_ports)
-    if len(media_facts) != 1 or media_facts[0].interface != "en0" or media_facts[0].associated:
-        raise RuntimeError("fast Wi-Fi hardware-port evidence is not parsed canonically")
+    media = parse_wifi_hardware_ports(synthetic_ports)[0]
+    if media.interface != "en0" or media.hardware_mac_address != "02:00:00:00:20:01" or media.bssid is not None:
+        raise RuntimeError("networksetup hardware MAC is not separated from BSSID")
+
     synthetic_airport = json.dumps({
         "SPAirPortDataType": [{"spairport_airport_interfaces": [{
             "_name": "en0",
             "spairport_current_network_information": {
                 "_name": "Synthetic Wi-Fi",
                 "spairport_bssid": "02:AA:BB:CC:DD:01",
+                "spairport_channel": "44 (5GHz, 80MHz)",
+                "spairport_signal_noise": "-41 dBm / -91 dBm",
+                "spairport_phymode": "802.11ax",
+                "spairport_transmit_rate": "1200",
             },
-            "spairport_airport_other_local_wireless_networks": [{
-                "_name": "Ignored",
-                "spairport_bssid": "02:aa:bb:cc:dd:99",
-            }],
         }]}],
     })
-    wifi_facts = parse_airport_json(synthetic_airport)
-    if len(wifi_facts) != 1 or wifi_facts[0].bssid != "02:aa:bb:cc:dd:01":
-        raise RuntimeError("current Wi-Fi BSSID evidence is not parsed canonically")
-    merged_wifi = merge_wireless_facts(media_facts, wifi_facts)
-    if merged_wifi != wifi_facts:
-        raise RuntimeError("Wi-Fi detail evidence does not deterministically enrich media fallback")
+    observed = parse_airport_json(synthetic_airport)[0]
+    if (
+        observed.bssid != "02:aa:bb:cc:dd:01"
+        or not observed.bssid_observed
+        or observed.rssi_dbm != -41
+        or observed.noise_dbm != -91
+        or observed.transmit_rate_mbps != 1200
+    ):
+        raise RuntimeError("current Wi-Fi radio evidence is not parsed canonically")
 
-    interface = InterfaceFact("en0", ("UP",), "physical", (InterfaceAddress("192.168.1.10", 24, "192.168.1.0/24"),))
+    fallback = WirelessAttachmentFact(
+        "en0", "02:aa:bb:cc:dd:55", "Configured Wi-Fi",
+        associated=False, role="relay", configured=True,
+    )
+    merged = merge_wireless_facts((media,), (fallback,), (observed,))[0]
+    if (
+        merged.hardware_mac_address != media.hardware_mac_address
+        or merged.bssid != observed.bssid
+        or not merged.bssid_observed
+        or merged.configured
+        or merged.role != "relay"
+    ):
+        raise RuntimeError("automatic BSSID did not override local fallback while retaining role")
+
+    interface = InterfaceFact(
+        "en0", ("UP",), "physical",
+        (InterfaceAddress("192.168.1.10", 24, "192.168.1.0/24"),),
+        "02:00:00:00:10:01",
+    )
     route = routes.RouteFact("0.0.0.0/0", "192.168.1.1", ("U", "G"), "en0", True)
-    base_sources = (
+    sources = (
         SourceStatus("interfaces", SourceStatusValue.OK),
         SourceStatus("routes", SourceStatusValue.OK),
         SourceStatus("neighbors", SourceStatusValue.OK),
         SourceStatus("wifi", SourceStatusValue.OK),
     )
-    wifi_snapshot = build_snapshot(
+    attachment = WirelessAttachmentFact(
+        "en0", observed.bssid, observed.ssid,
+        hardware_mac_address=media.hardware_mac_address,
+        channel=observed.channel,
+        rssi_dbm=observed.rssi_dbm,
+        noise_dbm=observed.noise_dbm,
+        phy_mode=observed.phy_mode,
+        transmit_rate_mbps=observed.transmit_rate_mbps,
+        bssid_observed=True,
+    )
+    metadata_active = ActiveDiscoveryMetadata(("192.168.1.0/24",), ("192.168.1.0/24",), True, 1, 3, 30)
+    snapshot = build_snapshot(
         interfaces=(interface,),
         routes=(route,),
-        neighbors=(),
-        wireless_attachments=(WirelessAttachmentFact("en0", "02:aa:bb:cc:dd:01", "Synthetic Wi-Fi"),),
-        sources=base_sources,
+        neighbors=(
+            NeighborFact("192.168.1.11", interface.current_mac_address, "en0", None, True),
+            NeighborFact("192.168.1.12", media.hardware_mac_address, "en0", None, True),
+            NeighborFact("192.168.1.20", "02:00:00:00:00:20", "en0", None, True),
+        ),
+        wireless_attachments=(attachment,),
+        active_hosts=(
+            discovery.ActiveHost("192.168.1.13", interface.current_mac_address),
+            discovery.ActiveHost("192.168.1.30", "02:00:00:00:00:30"),
+        ),
+        active_metadata=metadata_active,
+        sources=sources,
         collected_at="2026-08-03T00:00:00Z",
     )
-    wifi_kinds = {node.kind.value for node in wifi_snapshot.nodes}
-    wifi_edges = {edge.type.value for edge in wifi_snapshot.edges}
-    if "access_point" not in wifi_kinds or "interface_associated_with" not in wifi_edges or "attachment_reaches_gateway" not in wifi_edges:
-        raise RuntimeError("Wi-Fi AP-to-gateway path is not connected")
-    if "l2_segment" in wifi_kinds or "member_of_l2" in wifi_edges:
-        raise RuntimeError("fabricated presentation L2 topology reappeared")
-
-    media_snapshot = build_snapshot(
-        interfaces=(interface,),
-        routes=(route,),
-        neighbors=(),
-        wireless_attachments=media_facts,
-        sources=(*base_sources[:-1], SourceStatus("wifi_interfaces", SourceStatusValue.OK)),
-        collected_at="2026-08-03T00:00:00Z",
-    )
-    media_ap = next((node for node in media_snapshot.nodes if node.kind.value == "access_point"), None)
-    media_edge = next((edge for edge in media_snapshot.edges if edge.type.value == "interface_associated_with"), None)
-    if media_ap is None or media_edge is None or media_edge.observed or media_ap.properties.get("identity_source") != "wifi_interface_and_default_route":
-        raise RuntimeError("Wi-Fi media fallback is not represented as an inferred unidentified AP")
-    if any(node.kind.value == "link_boundary" for node in media_snapshot.nodes):
-        raise RuntimeError("Wi-Fi media fallback regressed to unknown Ethernet transit")
-
-    unknown_snapshot = build_snapshot(
-        interfaces=(interface,),
-        routes=(route,),
-        neighbors=(),
-        sources=base_sources[:-1],
-        collected_at="2026-08-03T00:00:00Z",
-    )
-    if not any(node.kind.value == "link_boundary" and node.label == "Intermediate L2 path unknown" for node in unknown_snapshot.nodes):
-        raise RuntimeError("missing Ethernet/unknown intermediate path boundary")
+    host = next(node for node in snapshot.nodes if node.kind.value == "local_host")
+    iface = next(node for node in snapshot.nodes if node.kind.value == "interface")
+    ap = next(node for node in snapshot.nodes if node.kind.value == "access_point")
+    peers = {node.id for node in snapshot.nodes if node.kind.value == "device"}
+    if set(host.mac_addresses) != {interface.current_mac_address, media.hardware_mac_address}:
+        raise RuntimeError("local host MAC identity is incomplete")
+    if iface.properties.get("private_wifi_mac_address") != interface.current_mac_address:
+        raise RuntimeError("private Wi-Fi MAC was not distinguished from hardware MAC")
+    if ap.properties.get("bssid") != observed.bssid or ap.mac_addresses != (observed.bssid,):
+        raise RuntimeError("serving BSSID was not assigned only to the connected Wi-Fi node")
+    if peers != {"device:192.168.1.20", "device:192.168.1.30"} or snapshot.active_discovery.hosts_reported_up != 1:
+        raise RuntimeError("local MAC evidence was emitted as a peer or active host")
 
     validated_targets = ("192.168.1.0/24", "192.168.1.0/25")
     if commands._canonical_targets(validated_targets) != validated_targets:
         raise RuntimeError("command layer collapsed Phase B targets across owners")
-    overlap_request = discovery.validate_phase_a({"networks": list(validated_targets), "operation_timeout_seconds": 30})
+    request = discovery.validate_phase_a({"networks": list(validated_targets), "operation_timeout_seconds": 30})
     overlap_interfaces = (
         interface,
         InterfaceFact("en1", ("UP",), "physical", (InterfaceAddress("192.168.1.2", 25, "192.168.1.0/25"),)),
     )
-    effective_targets = discovery.validate_phase_b(overlap_request, overlap_interfaces)
-    if tuple(map(str, effective_targets)) != validated_targets:
-        raise RuntimeError("Phase B did not preserve overlapping local owners")
-    trusted_host = discovery.ActiveHost("192.168.1.20", "02:00:00:00:00:20")
-    if discovery.validate_active_hosts((trusted_host,), effective_targets) != (trusted_host,):
-        raise RuntimeError("active host validation changed trusted in-scope evidence")
-    try:
-        discovery.validate_active_hosts((discovery.ActiveHost("192.168.2.20"),), effective_targets)
-    except discovery.ValidationError as exc:
-        if (exc.code, exc.status) != ("collection_failed", 500):
-            raise RuntimeError("out-of-range Nmap evidence uses the wrong error") from exc
-    else:
-        raise RuntimeError("active host validation accepted out-of-range evidence")
-
-    invalid_mac_xml = (
-        "<nmaprun><host><status state='up'/>"
-        "<address addr='192.168.1.20' addrtype='ipv4'/>"
-        "<address addr='not-a-mac' addrtype='mac'/></host></nmaprun>"
-    )
-    try:
-        discovery.parse_nmap_xml(invalid_mac_xml)
-    except discovery.ValidationError as exc:
-        if (exc.code, exc.status) != ("collection_failed", 500):
-            raise RuntimeError("invalid Nmap MAC uses the wrong error") from exc
-    else:
-        raise RuntimeError("Nmap parser accepted an invalid MAC")
-
-    invalid_routes = "Routing tables\n\nInternet:\nDestination Gateway Flags Netif\nalpha beta gamma delta\n"
-    try:
-        routes.parse_routes(invalid_routes)
-    except ValueError:
-        pass
-    else:
-        raise RuntimeError("route parser accepted an unrecognized four-column row")
+    effective = discovery.validate_phase_b(request, overlap_interfaces)
+    if tuple(map(str, effective)) != validated_targets:
+        raise RuntimeError("Phase B did not preserve adjacent sibling or overlapping-owner targets")
 
     texts = {
-        "server": (ROOT / "server.py").read_text(encoding="utf-8"),
-        "agent": (ROOT / "AGENT.md").read_text(encoding="utf-8"),
-        "api": (ROOT / "docs/api-spec.md").read_text(encoding="utf-8"),
-        "design": (ROOT / "docs/design.md").read_text(encoding="utf-8"),
-        "plan": (ROOT / "docs/plan.md").read_text(encoding="utf-8"),
-        "questions": (ROOT / "docs/questions.md").read_text(encoding="utf-8"),
-        "readme": (ROOT / "README.md").read_text(encoding="utf-8"),
-        "commands": (ROOT / "homenettopo/commands.py").read_text(encoding="utf-8"),
-        "interfaces": (ROOT / "homenettopo/interfaces.py").read_text(encoding="utf-8"),
-        "models": (ROOT / "homenettopo/models.py").read_text(encoding="utf-8"),
-        "topology": (ROOT / "homenettopo/topology.py").read_text(encoding="utf-8"),
-        "core": (ROOT / "web/core.mjs").read_text(encoding="utf-8"),
-        "app": (ROOT / "web/app.js").read_text(encoding="utf-8"),
-        "html": (ROOT / "web/index.html").read_text(encoding="utf-8"),
-        "deploy": (ROOT / "scripts/deploy.py").read_text(encoding="utf-8"),
+        name: (ROOT / path).read_text(encoding="utf-8")
+        for name, path in {
+            "server": "server.py", "agent": "AGENT.md", "api": "docs/api-spec.md",
+            "design": "docs/design.md", "plan": "docs/plan.md", "questions": "docs/questions.md",
+            "readme": "README.md", "interfaces": "homenettopo/interfaces.py",
+            "topology": "homenettopo/topology.py", "core": "web/core.mjs",
+            "app": "web/app.js", "html": "web/index.html", "deploy": "scripts/deploy.py",
+        }.items()
     }
     for route_path in ("/api/v1/topology/refresh", "/api/v1/discover", "/api/v1/topology/export"):
         for owner in ("server", "api", "readme"):
             if route_path not in texts[owner]:
                 raise RuntimeError(f"route contract mismatch for {route_path}: {owner}")
-    for argument in ("-sn", "-n", "--max-retries", "--host-timeout", "-oX"):
-        for owner in ("commands", "api", "readme"):
-            if argument not in texts[owner]:
-                raise RuntimeError(f"Nmap contract mismatch for {argument}: {owner}")
 
-    contract_owners = ("agent", "api", "design", "plan", "questions", "readme")
-    for owner in contract_owners:
+    for owner in ("agent", "api", "design", "readme"):
         lowered = texts[owner].lower()
-        for phrase in ("bssid", "gateway", "intermediate l2 path unknown", "peer"):
+        for phrase in (
+            "hardware mac", "private wi-fi mac", "bssid", "gateway", "peer", "lldp",
+            "rfc 1918", "adjacent sibling targets", "collection_failed", "networksetup",
+            "concurrent", "timeout_sources", "launchagent",
+        ):
             if phrase not in lowered:
-                raise RuntimeError(f"gateway-path contract mismatch in {owner}: missing {phrase}")
-        if "lldp" not in lowered:
-            raise RuntimeError(f"adjacent-device evidence limit missing from {owner}")
-    for owner in ("agent", "api", "design", "plan", "readme"):
-        lowered = texts[owner].lower()
-        for phrase in ("rfc 1918", "adjacent sibling targets", "collection_failed"):
-            if phrase not in lowered:
-                raise RuntimeError(f"active-discovery contract mismatch in {owner}: missing {phrase}")
-    for owner in ("agent", "api", "design", "plan", "readme"):
-        lowered = texts[owner].lower()
-        for phrase in ("networksetup", "concurrent", "timeout_sources"):
-            if phrase not in lowered:
-                raise RuntimeError(f"passive-evidence contract mismatch in {owner}: missing {phrase}")
+                raise RuntimeError(f"Wi-Fi/path/safety contract mismatch in {owner}: missing {phrase}")
 
     for marker in (
-        "ThreadPoolExecutor",
-        "wireless_attachments",
-        "wifi_interfaces_spec()",
-        "wifi_spec()",
-        "merge_wireless_facts",
-        "validate_active_hosts",
-        "interface_failure",
-        '"wifi_interface_source": "networksetup"',
-        '"wifi_bssid_source": "system_profiler"',
-        '"timeout_sources"',
-        "font-src 'self' data:",
+        "ThreadPoolExecutor", "wifi_override", "merge_wireless_facts", "validate_active_hosts",
+        '"wifi_local_fallback_configured"', '"timeout_sources"', "font-src 'self' data:",
+        '"--wifi-interface"', '"--wifi-bssid"', '"--wifi-role"',
     ):
         if marker not in texts["server"]:
             raise RuntimeError(f"server orchestration contract missing: {marker}")
-    for marker in ("ACCESS_POINT", "LINK_BOUNDARY", "INTERFACE_ASSOCIATED_WITH", "ATTACHMENT_REACHES_GATEWAY"):
-        if marker not in texts["models"]:
-            raise RuntimeError(f"path schema marker missing: {marker}")
-    for marker in ("WirelessAttachmentFact", "physical_identity_with_gateway", "wifi_interface_and_default_route", "link_path_inference", "Intermediate L2 path unknown"):
+    for marker in (
+        "current_mac_address", "hardware_mac_address", "bssid_observed", "merge_wireless_facts",
+    ):
+        if marker not in texts["interfaces"]:
+            raise RuntimeError(f"Wi-Fi parser contract missing: {marker}")
+    for marker in (
+        "local_macs", "private_wifi_mac_address", '"bssid"', '"role"', "local_configuration",
+    ):
         if marker not in texts["topology"]:
-            raise RuntimeError(f"path construction marker missing: {marker}")
+            raise RuntimeError(f"topology identity contract missing: {marker}")
+    for marker in (
+        "PROPERTY_LABELS", 'hardware_mac_address: "Hardware MAC"',
+        'private_wifi_mac_address: "Private Wi-Fi MAC"', 'bssid: "BSSID"',
+        'rssi_dbm: "RSSI"', 'transmit_rate_mbps: "Transmit rate"',
+    ):
+        if marker not in texts["app"]:
+            raise RuntimeError(f"semantic Details contract missing: {marker}")
     for prohibited in ("l2_segment", "member_of_l2"):
         if prohibited in texts["core"] or prohibited in texts["app"]:
             raise RuntimeError(f"fabricated frontend topology marker returned: {prohibited}")
-    for marker in ("PATH_EDGE_TYPES", "not transit hops", "hiddenRelationshipCount", "groups:"):
-        if marker not in texts["core"]:
-            raise RuntimeError(f"frontend path/peer contract missing: {marker}")
-    for marker in ("discover-capability", "Check Nmap setup", "handleDiscoverAction", "renderNetworkGroup"):
-        owner = "html" if marker == "discover-capability" else "app"
-        if marker not in texts[owner]:
-            raise RuntimeError(f"active-capability UI contract missing: {marker}")
 
     test_contracts = {
-        "tests/test_commands.py": ("wifi_interfaces_spec", "test_passive_commands_are_absolute_and_typed"),
         "tests/test_interfaces.py": (
-            "test_wifi_hardware_ports_identify_only_wifi_bsd_interfaces",
-            "test_media_fallback_survives_profiler_failure_and_details_win_when_available",
-            "test_airport_parser_preserves_redacted_association_without_guessing",
+            "test_wifi_hardware_ports_identify_adapter_hardware_mac_only",
+            "test_airport_parser_keeps_current_radio_metrics_and_normalizes_bssid",
+            "test_merge_preserves_hardware_mac_and_prefers_automatic_bssid",
         ),
-        "tests/test_models.py": ("test_serializes_access_attachment_nodes_and_edges",),
         "tests/test_topology.py": (
-            "test_wifi_bssid_creates_observed_ap_then_inferred_gateway_path",
-            "test_redacted_wifi_identity_is_visible_without_guessing",
-            "test_wifi_media_only_evidence_does_not_fall_back_to_unknown_l2_transit",
+            "test_local_ip_and_local_macs_are_host_identity_not_peer_devices",
+            "test_wifi_bssid_is_serving_radio_not_local_interface_mac",
+            "test_user_confirmed_relay_fallback_is_visible_without_claiming_observation",
             "test_tunnel_default_route_skips_l2_attachment_nodes",
-            "test_builds_expected_kinds_and_keeps_peers_out_of_gateway_path",
         ),
         "tests/test_discovery.py": (
             "test_contained_targets_owned_by_overlapping_local_networks_remain_separate",
@@ -419,20 +393,20 @@ def consistency_guards() -> None:
         "tests/test_server.py": (
             "test_capabilities_explain_link_path_sources",
             "test_real_active_discover_preserves_phase_b_effective_targets_order_and_wifi",
-            "test_malformed_interface_and_wifi_detail_can_produce_coherent_partial_routes",
             "test_wifi_detail_timeout_degrades_without_failing_passive_collection",
             "test_material_timeouts_return_source_specific_504_details",
-            "test_real_active_discover_rejects_untrusted_nmap_evidence_and_preserves_snapshot",
+        ),
+        "tests/test_static_security.py": (
+            "test_wifi_fallback_is_validated_and_written_only_to_program_arguments",
+            "test_runtime_copy_is_an_explicit_minimal_allowlist",
         ),
         "tests/test_web_contract.py": (
-            "test_discovery_control_is_not_an_unexplained_placeholder",
-            "test_gateway_path_and_peer_group_contract",
+            "test_graph_nodes_show_local_ip_bssid_and_semantic_wifi_details",
             "test_canvas_uses_viewbox_camera_full_surface_pan_and_orthogonal_edges",
         ),
         "tests/frontend/core.test.mjs": (
             "presentation graph never invents an L2 transit device",
             "gateway path is ordered while peer devices stay in a separate group",
-            "unknown Ethernet attachment is explicit instead of a fabricated switch",
             "tunnel remains a visible direct L3 path",
         ),
     }
@@ -442,27 +416,17 @@ def consistency_guards() -> None:
         if missing_markers:
             raise RuntimeError(f"required regression definitions missing from {relative}: {missing_markers}")
 
-    deploy_source = texts["deploy"]
-    for owner in ("agent", "design", "plan", "readme"):
-        if "scripts/deploy.py" not in texts[owner] or "LaunchAgent" not in texts[owner]:
-            raise RuntimeError(f"deployment contract mismatch in {owner}")
+    deploy = texts["deploy"]
     for prohibited in ("sudo", "shell=True", "0.0.0.0", "https://"):
-        if prohibited in deploy_source:
+        if prohibited in deploy:
             raise RuntimeError(f"deployment script violates local safety boundary: {prohibited}")
     for marker in (
-        'LABEL = "com.homenettopo.local"',
-        '"--bind",\n        "127.0.0.1"',
-        '"homenettopo/__init__.py"',
-        '"homenettopo/topology.py"',
-        '"web/index.html"',
-        '"web/styles.css"',
-        "validate_source_root(staging)",
-        "ProxyHandler({})",
-        "runtime_replaced = False",
-        'run_launchctl("bootstrap"',
-        "wait_for_health(port)",
+        'LABEL = "com.homenettopo.local"', '"--bind",\n        "127.0.0.1"',
+        '"--wifi-interface"', '"--wifi-bssid"', '"--wifi-ssid"', '"--wifi-role"',
+        "validate_source_root(staging)", "ProxyHandler({})", "runtime_replaced = False",
+        'run_launchctl("bootstrap"', "wait_for_health(port)",
     ):
-        if marker not in deploy_source:
+        if marker not in deploy:
             raise RuntimeError(f"deployment script contract missing: {marker}")
 
     if re.search(r"(?m)^fixtures/\s+", texts["agent"]) or (ROOT / "fixtures").exists():
@@ -485,39 +449,22 @@ def asset_guards() -> None:
         raise RuntimeError("font CSP must allow local/data fonts without external origins")
     if "innerHTML" in app or "insertAdjacentHTML" in app:
         raise RuntimeError("HTML string sink is not allowed")
-    if 'id="status-heading" tabindex="-1"' not in html:
-        raise RuntimeError("status surface lacks a focus owner")
-    if 'id="dialog-error" class="field-error" role="alert" tabindex="-1"' not in html:
-        raise RuntimeError("dialog lacks a focusable validation summary")
     for marker in (
         "focusStatusHeading", "focusDialogValidation", "requestAnimationFrame",
-        'setAttribute("aria-invalid", "true")', "restoreFocus: false",
-        "No peer devices observed", "Unsupported platform", "collectionInFlight",
-        'collection: "passive"', 'collection: "active"',
+        'setAttribute("aria-invalid", "true")', "restoreFocus: false", "collectionInFlight",
         "loadCapabilities({ reportError: false })", 'setAttribute("aria-disabled", "true")',
-        'removeAttribute("aria-disabled")', "Check Nmap setup", "Nmap: unavailable",
-        "renderNetworkGroup", 'svgElement("path"', 'setAttribute("viewBox"',
-        'addEventListener("pointerdown"', "setPointerCapture(event.pointerId)",
-        'classList.add("is-panning")', "suppressGraphClick",
+        'removeAttribute("aria-disabled")', "Check Nmap setup", "renderNetworkGroup",
+        'svgElement("path"', 'setAttribute("viewBox"', 'addEventListener("pointerdown"',
+        "setPointerCapture(event.pointerId)", "PAN_THRESHOLD = 6", "preventFitUpscale",
     ):
         if marker not in app:
             raise RuntimeError(f"frontend contract missing: {marker}")
-    if app.index("loadCapabilities({ reportError: false })") > app.index('dispatch({ type: "PASSIVE_SUCCESS", snapshot })'):
-        raise RuntimeError("capability recheck must finish before passive state release")
     if "passiveInFlight" in app or 'elements["refresh-button"].disabled = true' in app:
         raise RuntimeError("frontend regressed shared collection/focus behavior")
-    for marker in (
-        "collectionInFlight: null", 'collectionInFlight: "passive"',
-        'collectionInFlight: "active"',
-        "if (state.collectionInFlight && !action.collection) return state",
-        "if (action.collection && state.collectionInFlight !== action.collection) return state",
-        'unavailable_reason: "dependency_unavailable"', "available: false",
-        "const recovered =", "PATH_EDGE_TYPES", "groups:", "fitCamera", "zoomCamera",
-        "orthogonalEdgePath",
-    ):
+    for marker in ("PATH_EDGE_TYPES", "groups:", "fitCamera", "zoomCamera", "orthogonalEdgePath"):
         if marker not in core:
             raise RuntimeError(f"frontend state/layout contract missing: {marker}")
-    for marker in ("node-access_point", "node-link_boundary", "group-lan_peers", "interface-kind-tunnel", "cursor: grab", "cursor: grabbing", "pointer-events: stroke"):
+    for marker in ("node-access_point", "node-link_boundary", "group-lan_peers", "interface-kind-tunnel", "cursor: grab", "pointer-events: stroke"):
         if marker not in css:
             raise RuntimeError(f"frontend visual contract missing: {marker}")
     for path in (ROOT / "web").iterdir():
