@@ -27,6 +27,7 @@ const elements = Object.fromEntries([
   "address-total", "dialog-error", "dialog-close", "dialog-cancel", "dialog-confirm",
 ].map((id) => [id, document.getElementById(id)]));
 
+const PAN_THRESHOLD = 6;
 let state = initialState();
 let camera = null;
 let layoutBounds = null;
@@ -274,15 +275,31 @@ function svgElement(name, attributes = {}) {
 }
 
 function truncate(label, compact) {
-  const limit = compact ? 18 : 24;
+  const limit = compact ? 16 : 22;
   return label.length > limit ? `${label.slice(0, limit - 1)}…` : label;
 }
 
+function preferredIPv4(node) {
+  const addresses = (node.addresses ?? []).filter((value) => /^\d+\.\d+\.\d+\.\d+$/.test(value));
+  return addresses.find((value) => !value.startsWith("127.")) ?? addresses[0] ?? null;
+}
+
+function nodeTitle(node) {
+  if (node.kind === "access_point") return "Wi-Fi access point";
+  if (node.kind === "link_boundary") return "L2 path unknown";
+  if (node.kind === "local_host") return "This Mac";
+  return node.label;
+}
+
 function nodeSubtitle(node) {
-  if (node.kind === "access_point") return node.mac_addresses?.length ? "Observed Wi-Fi AP" : "Wi-Fi AP · identity unavailable";
-  if (node.kind === "link_boundary") return "Unknown L2 transit";
-  if (node.kind === "gateway") return "Router / gateway";
-  if (node.kind === "interface" && node.properties?.kind === "tunnel") return "L3 tunnel interface";
+  const address = preferredIPv4(node);
+  if (node.kind === "local_host") return address ?? "Local host";
+  if (node.kind === "interface") return address ?? (node.properties?.kind === "tunnel" ? "L3 tunnel" : "Network interface");
+  if (node.kind === "access_point") return node.mac_addresses?.length ? "BSSID observed" : "Identity unavailable";
+  if (node.kind === "link_boundary") return "No adjacent-device evidence";
+  if (node.kind === "gateway") return "Gateway";
+  if (node.kind === "device") return "LAN peer";
+  if (node.kind === "upstream_boundary") return "Default route";
   return node.kind.replaceAll("_", " ");
 }
 
@@ -348,19 +365,21 @@ function renderGraph() {
     elements["graph-scene"].append(path);
   }
   for (const node of layout.nodes) {
+    const titleText = nodeTitle(node);
+    const subtitleText = nodeSubtitle(node);
     const group = svgElement("g", {
       class: nodeClass(node),
       transform: `translate(${node.x} ${node.y})`,
       tabindex: "0",
       role: "button",
-      "aria-label": `${nodeSubtitle(node)}: ${node.label}, ${node.confidence ?? "medium"} confidence`,
+      "aria-label": `${subtitleText}: ${titleText}, ${node.confidence ?? "medium"} confidence`,
       "data-id": node.id,
     });
     group.append(svgElement("rect", { width: node.width, height: node.height, rx: 10 }));
     const title = svgElement("text", { x: 12, y: 27, class: "node-title" });
-    title.textContent = truncate(node.label, node.compact);
+    title.textContent = truncate(titleText, node.compact);
     const subtitle = svgElement("text", { x: 12, y: 51, class: "node-subtitle" });
-    subtitle.textContent = nodeSubtitle(node);
+    subtitle.textContent = truncate(subtitleText, node.compact);
     group.append(title, subtitle);
     group.addEventListener("click", () => dispatch({ type: "SELECT", id: node.id }));
     group.addEventListener("keydown", selectableKeyHandler);
@@ -388,12 +407,28 @@ function layerLabel(item) {
   return "Unknown";
 }
 
+function formatDetailValue(value) {
+  if (value === null || value === undefined || value === "") return "None";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function appendDetailRow(list, term, value) {
+  if (value === undefined) return;
+  const dt = document.createElement("dt");
+  dt.textContent = term;
+  const dd = document.createElement("dd");
+  dd.textContent = formatDetailValue(value);
+  list.append(dt, dd);
+}
+
 function renderDetails() {
   const id = state.selectedId;
   if (!id || !state.snapshot) {
     const message = document.createElement("p");
     message.className = "muted";
-    message.textContent = "Select a path node, peer, network, or edge to inspect evidence and confidence.";
+    message.textContent = "Select a node, network, or relationship to inspect its addresses and evidence.";
     elements["details-content"].replaceChildren(message);
     return;
   }
@@ -401,36 +436,53 @@ function renderDetails() {
     ?? state.snapshot.edges.find((edge) => edge.id === id)
     ?? currentLayout.nodes.find((node) => node.id === id)
     ?? currentLayout.edges.find((edge) => edge.id === id);
-  if (!item) return;
-  const heading = document.createElement("h3");
-  heading.textContent = item.label ?? item.type.replaceAll("_", " ");
-  const dl = document.createElement("dl");
-  const rows = [
-    ["Identifier", item.id],
-    ["Layer", layerLabel(item)],
-    ["Confidence", item.confidence ?? "medium"],
-    ["Relationship", item.observed === undefined ? "Node" : item.observed ? "Observed" : "Inferred"],
-    ["Addresses", (item.addresses ?? []).join(", ") || "None"],
-    ["MAC addresses", (item.mac_addresses ?? []).join(", ") || "None"],
-  ];
-  for (const [term, value] of rows) {
-    const dt = document.createElement("dt"); dt.textContent = term;
-    const dd = document.createElement("dd"); dd.textContent = value;
-    dl.append(dt, dd);
+  if (!item) {
+    const message = document.createElement("p");
+    message.className = "muted";
+    message.textContent = "The selected item is no longer present in this snapshot.";
+    elements["details-content"].replaceChildren(message);
+    return;
   }
-  const evidenceTitle = document.createElement("h4"); evidenceTitle.textContent = "Evidence";
+
+  const heading = document.createElement("h3");
+  heading.textContent = item.label ?? item.type?.replaceAll("_", " ") ?? item.id;
+  const dl = document.createElement("dl");
+  appendDetailRow(dl, "Identifier", item.id);
+  appendDetailRow(dl, "Type", item.kind?.replaceAll("_", " ") ?? item.type?.replaceAll("_", " "));
+  appendDetailRow(dl, "Layer", layerLabel(item));
+  appendDetailRow(dl, "Confidence", item.confidence ?? "medium");
+  appendDetailRow(dl, "Relationship", item.observed === undefined ? "Node" : item.observed ? "Observed" : "Inferred");
+  appendDetailRow(dl, "From", item.source);
+  appendDetailRow(dl, "To", item.target);
+  appendDetailRow(dl, "Interfaces", item.interface_names);
+  appendDetailRow(dl, "Addresses", item.addresses);
+  appendDetailRow(dl, "MAC addresses", item.mac_addresses);
+  for (const [key, value] of Object.entries(item.properties ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
+    appendDetailRow(dl, key.replaceAll("_", " "), value);
+  }
+
+  const evidenceTitle = document.createElement("h4");
+  evidenceTitle.textContent = "Evidence";
   const list = document.createElement("ul");
   for (const evidence of item.evidence ?? []) {
-    const li = document.createElement("li"); li.textContent = `${evidence.source}: ${evidence.summary}`; list.append(li);
+    const li = document.createElement("li");
+    li.textContent = `${evidence.source}: ${evidence.summary}`;
+    list.append(li);
   }
-  if (!list.children.length) { const li = document.createElement("li"); li.textContent = "No evidence details supplied."; list.append(li); }
+  if (!list.children.length) {
+    const li = document.createElement("li");
+    li.textContent = "No evidence details supplied.";
+    list.append(li);
+  }
   elements["details-content"].replaceChildren(heading, dl, evidenceTitle, list);
 }
 
 function renderWarnings() {
   elements["warning-list"].replaceChildren();
   for (const warning of state.snapshot?.warnings ?? []) {
-    const item = document.createElement("li"); item.textContent = warning.message; elements["warning-list"].append(item);
+    const item = document.createElement("li");
+    item.textContent = warning.message;
+    elements["warning-list"].append(item);
   }
 }
 
@@ -505,10 +557,23 @@ function applyView() {
   if (camera) elements["topology-svg"].setAttribute("viewBox", `${camera.x} ${camera.y} ${camera.width} ${camera.height}`);
 }
 
+function preventFitUpscale(fitted, viewportWidth, viewportHeight) {
+  const scale = Math.max(1, viewportWidth / fitted.width, viewportHeight / fitted.height);
+  if (scale === 1) return fitted;
+  const width = fitted.width * scale;
+  const height = fitted.height * scale;
+  return {
+    x: fitted.x - (width - fitted.width) / 2,
+    y: fitted.y - (height - fitted.height) / 2,
+    width,
+    height,
+  };
+}
+
 function fitView() {
   if (!layoutBounds) return;
   const rect = elements["graph-viewport"].getBoundingClientRect();
-  camera = fitCamera(layoutBounds, rect.width, rect.height, 24);
+  camera = preventFitUpscale(fitCamera(layoutBounds, rect.width, rect.height, 20), rect.width, rect.height);
   applyView();
 }
 
@@ -560,20 +625,40 @@ elements["graph-viewport"].addEventListener("wheel", (event) => {
   changeZoom(event.deltaY < 0 ? 1.12 : 1 / 1.12, { x: event.clientX, y: event.clientY });
 }, { passive: false });
 
+/*
+ * Delay pointer capture until movement proves a pan. Capturing on pointerdown
+ * retargets the following click to the viewport and prevents node selection.
+ */
 elements["graph-viewport"].addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || !camera) return;
-  drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, camera: { ...camera }, moved: false };
-  elements["graph-viewport"].classList.add("is-panning");
-  elements["graph-viewport"].setPointerCapture(event.pointerId);
+  drag = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    camera: { ...camera },
+    moved: false,
+    captured: false,
+  };
 });
 
 elements["graph-viewport"].addEventListener("pointermove", (event) => {
   if (!drag || event.pointerId !== drag.pointerId) return;
-  const rect = elements["graph-viewport"].getBoundingClientRect();
   const deltaX = event.clientX - drag.x;
   const deltaY = event.clientY - drag.y;
-  if (Math.hypot(deltaX, deltaY) > 3) drag.moved = true;
-  camera = { ...drag.camera, x: drag.camera.x - deltaX * (drag.camera.width / Math.max(1, rect.width)), y: drag.camera.y - deltaY * (drag.camera.height / Math.max(1, rect.height)) };
+  if (!drag.moved && Math.hypot(deltaX, deltaY) <= PAN_THRESHOLD) return;
+  if (!drag.moved) {
+    drag.moved = true;
+    elements["graph-viewport"].classList.add("is-panning");
+    elements["graph-viewport"].setPointerCapture(event.pointerId);
+    drag.captured = true;
+  }
+  event.preventDefault();
+  const rect = elements["graph-viewport"].getBoundingClientRect();
+  camera = {
+    ...drag.camera,
+    x: drag.camera.x - deltaX * (drag.camera.width / Math.max(1, rect.width)),
+    y: drag.camera.y - deltaY * (drag.camera.height / Math.max(1, rect.height)),
+  };
   applyView();
 });
 
@@ -581,7 +666,9 @@ function endPan(event) {
   if (!drag || event.pointerId !== drag.pointerId) return;
   suppressGraphClick = drag.moved;
   if (suppressGraphClick) setTimeout(() => { suppressGraphClick = false; }, 0);
-  if (elements["graph-viewport"].hasPointerCapture(event.pointerId)) elements["graph-viewport"].releasePointerCapture(event.pointerId);
+  if (drag.captured && elements["graph-viewport"].hasPointerCapture(event.pointerId)) {
+    elements["graph-viewport"].releasePointerCapture(event.pointerId);
+  }
   drag = null;
   elements["graph-viewport"].classList.remove("is-panning");
 }
@@ -589,10 +676,13 @@ function endPan(event) {
 elements["graph-viewport"].addEventListener("pointerup", endPan);
 elements["graph-viewport"].addEventListener("pointercancel", endPan);
 elements["graph-viewport"].addEventListener("click", (event) => {
-  if (!suppressGraphClick) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  suppressGraphClick = false;
+  if (suppressGraphClick) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    suppressGraphClick = false;
+    return;
+  }
+  if (!event.target.closest?.("[data-id]")) dispatch({ type: "CLEAR_SELECTION" });
 }, true);
 window.addEventListener("resize", () => requestAnimationFrame(fitView));
 
@@ -600,9 +690,15 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !elements["discover-dialog"].open) dispatch({ type: "CLEAR_SELECTION" });
   if (elements["discover-dialog"].open && event.key === "Tab") {
     const focusable = [...elements["discover-dialog"].querySelectorAll("button, input, [tabindex]:not([tabindex='-1'])")].filter((item) => !item.disabled);
-    const first = focusable[0]; const last = focusable.at(-1);
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 });
 
