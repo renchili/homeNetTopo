@@ -6,6 +6,7 @@ from homenettopo.interfaces import (
     merge_wireless_facts,
     parse_airport_json,
     parse_ifconfig,
+    parse_native_wifi_json,
     parse_wifi_hardware_ports,
 )
 
@@ -63,6 +64,28 @@ def airport_payload(bssid="02:AA:BB:CC:DD:01", current_marker=object()):
     return json.dumps({"SPAirPortDataType": [{"spairport_airport_interfaces": [interface]}]})
 
 
+def native_payload(*, authorization="authorized", bssid="02:AA:BB:CC:DD:42", wifi=True):
+    association = None
+    if wifi:
+        association = {
+            "interface": "en0",
+            "ssid": "Native Synthetic Wi-Fi",
+            "bssid": bssid,
+            "hardware_mac_address": "02:00:00:00:00:01",
+            "channel": "40",
+            "rssi_dbm": -35,
+            "noise_dbm": -90,
+            "phy_mode": "802.11ax",
+            "transmit_rate_mbps": 2401,
+        }
+    return json.dumps({
+        "schema_version": 1,
+        "collected_at": "2026-08-08T12:00:00Z",
+        "authorization": authorization,
+        "wifi": association,
+    })
+
+
 class InterfaceParserTests(unittest.TestCase):
     def test_parses_physical_virtual_addresses_and_current_macs(self):
         facts = parse_ifconfig(IFCONFIG_MULTI_INTERFACE)
@@ -91,6 +114,7 @@ class InterfaceParserTests(unittest.TestCase):
         self.assertFalse(facts[0].associated)
         self.assertIsNone(facts[0].bssid)
         self.assertEqual(facts[0].hardware_mac_address, "02:00:00:00:00:01")
+        self.assertEqual(facts[0].evidence_source, "wifi_interfaces")
 
     def test_wifi_hardware_ports_accept_legacy_airport_label_and_reject_drift(self):
         legacy = "Hardware Port: AirPort\nDevice: en1\nEthernet Address: 02:00:00:00:00:11\n"
@@ -112,6 +136,7 @@ class InterfaceParserTests(unittest.TestCase):
         self.assertEqual(fact.transmit_rate_mbps, 1200)
         self.assertTrue(fact.bssid_observed)
         self.assertTrue(fact.associated)
+        self.assertEqual(fact.evidence_source, "wifi")
 
     def test_airport_parser_preserves_redacted_association_without_guessing(self):
         fact = parse_airport_json(airport_payload("<redacted>"))[0]
@@ -136,9 +161,46 @@ class InterfaceParserTests(unittest.TestCase):
         self.assertIsNone(fact.bssid)
         self.assertFalse(fact.associated)
 
-    def test_merge_preserves_hardware_mac_and_prefers_automatic_bssid(self):
+    def test_native_wifi_parser_keeps_current_corewlan_identity_and_metrics(self):
+        evidence = parse_native_wifi_json(native_payload())
+        fact = evidence.fact
+        self.assertEqual(evidence.authorization, "authorized")
+        self.assertIsNotNone(fact)
+        assert fact is not None
+        self.assertEqual(fact.interface, "en0")
+        self.assertEqual(fact.ssid, "Native Synthetic Wi-Fi")
+        self.assertEqual(fact.bssid, "02:aa:bb:cc:dd:42")
+        self.assertEqual(fact.hardware_mac_address, "02:00:00:00:00:01")
+        self.assertEqual(fact.channel, "40")
+        self.assertEqual((fact.rssi_dbm, fact.noise_dbm), (-35, -90))
+        self.assertEqual(fact.phy_mode, "802.11ax")
+        self.assertEqual(fact.transmit_rate_mbps, 2401)
+        self.assertTrue(fact.bssid_observed)
+        self.assertEqual(fact.evidence_source, "wifi_native")
+
+    def test_native_wifi_parser_never_turns_denied_permission_into_identity(self):
+        evidence = parse_native_wifi_json(native_payload(authorization="denied", wifi=False))
+        self.assertEqual(evidence.authorization, "denied")
+        self.assertIsNone(evidence.fact)
+        with self.assertRaises(ValueError):
+            parse_native_wifi_json(native_payload(authorization="denied", wifi=True))
+
+    def test_native_wifi_parser_rejects_invalid_schema_interface_and_mac(self):
+        invalid = [
+            {"schema_version": 2, "collected_at": "2026-08-08T12:00:00Z", "authorization": "authorized", "wifi": None},
+            {"schema_version": 1, "collected_at": "bad", "authorization": "authorized", "wifi": None},
+            {"schema_version": 1, "collected_at": "2026-08-08T12:00:00Z", "authorization": "authorized", "wifi": {"interface": "../en0", "bssid": None}},
+            {"schema_version": 1, "collected_at": "2026-08-08T12:00:00Z", "authorization": "authorized", "wifi": {"interface": "en0", "bssid": "not-a-mac"}},
+        ]
+        for payload in invalid:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                parse_native_wifi_json(json.dumps(payload))
+
+    def test_native_bssid_wins_profiler_while_user_confirmed_role_survives(self):
         media = parse_wifi_hardware_ports(NETWORKSETUP_HARDWARE_PORTS)
-        detailed = parse_airport_json(airport_payload())
+        profiler = parse_airport_json(airport_payload())
+        native_fact = parse_native_wifi_json(native_payload()).fact
+        assert native_fact is not None
         fallback = (
             WirelessAttachmentFact(
                 "en0",
@@ -147,15 +209,17 @@ class InterfaceParserTests(unittest.TestCase):
                 associated=False,
                 role="relay",
                 configured=True,
+                evidence_source="local_configuration",
             ),
         )
-        merged = merge_wireless_facts(media, fallback, detailed)[0]
+        merged = merge_wireless_facts(media, profiler, (native_fact,), fallback)[0]
         self.assertEqual(merged.hardware_mac_address, "02:00:00:00:00:01")
-        self.assertEqual(merged.bssid, "02:aa:bb:cc:dd:01")
-        self.assertEqual(merged.ssid, "Synthetic Wi-Fi")
+        self.assertEqual(merged.bssid, "02:aa:bb:cc:dd:42")
+        self.assertEqual(merged.ssid, "Native Synthetic Wi-Fi")
         self.assertEqual(merged.role, "relay")
         self.assertTrue(merged.bssid_observed)
         self.assertFalse(merged.configured)
+        self.assertEqual(merged.evidence_source, "wifi_native")
 
     def test_configured_bssid_fills_only_missing_automatic_identity(self):
         media = parse_wifi_hardware_ports(NETWORKSETUP_HARDWARE_PORTS)
@@ -167,6 +231,7 @@ class InterfaceParserTests(unittest.TestCase):
                 associated=False,
                 role="relay",
                 configured=True,
+                evidence_source="local_configuration",
             ),
         )
         merged = merge_wireless_facts(media, fallback)[0]
@@ -175,6 +240,7 @@ class InterfaceParserTests(unittest.TestCase):
         self.assertEqual(merged.role, "relay")
         self.assertTrue(merged.configured)
         self.assertFalse(merged.bssid_observed)
+        self.assertEqual(merged.evidence_source, "local_configuration")
 
     def test_airport_parser_tolerates_only_a_trailing_profiler_prompt_marker(self):
         self.assertEqual(parse_airport_json(airport_payload() + "%")[0].interface, "en0")
