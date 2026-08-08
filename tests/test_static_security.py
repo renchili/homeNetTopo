@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import importlib.util
+import plistlib
 import sys
 import tempfile
 import threading
@@ -85,7 +86,7 @@ class StaticSecurityTests(unittest.TestCase):
 
 
 class DeploymentScriptTests(unittest.TestCase):
-    """Keep local deployment user-scoped, loopback-only, and allowlisted."""
+    """Keep local deployment user-scoped, fixed-source, and loopback-only."""
 
     @classmethod
     def setUpClass(cls):
@@ -95,6 +96,14 @@ class DeploymentScriptTests(unittest.TestCase):
         """Create the exact synthetic runtime files expected by the deployer."""
 
         for relative in self.deploy.RUNTIME_FILES:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(relative, encoding="utf-8")
+
+    def make_native_source(self, root: Path) -> None:
+        """Create the exact synthetic native source manifest expected by deployment."""
+
+        for relative in self.deploy.NATIVE_SOURCE_FILES:
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(relative, encoding="utf-8")
@@ -160,35 +169,81 @@ class DeploymentScriptTests(unittest.TestCase):
                 "web/styles.css",
             ),
         )
+        self.assertEqual(
+            self.deploy.NATIVE_SOURCE_FILES,
+            (
+                "macos/HomeNetTopoApp/HomeNetTopoApp.swift",
+                "macos/HomeNetTopoApp/AppDelegate.swift",
+                "macos/HomeNetTopoApp/WiFiCollector.swift",
+                "macos/HomeNetTopoApp/Info.plist",
+                "macos/HomeNetTopoApp/HomeNetTopoApp.xcodeproj/project.pbxproj",
+            ),
+        )
+        self.assertTrue(str(self.deploy.NATIVE_APP_PATH).startswith(str(Path.home() / "Applications")))
+        self.assertEqual(self.deploy.NATIVE_APP_BUNDLE_ID, "com.homenettopo.wifi")
+
         source = DEPLOY_PATH.read_text(encoding="utf-8")
         self.assertNotIn("sudo", source)
         self.assertNotIn("shell=True", source)
         self.assertNotIn("0.0.0.0", source)
         self.assertNotIn("https://", source)
         self.assertIn("ProxyHandler({})", source)
-        self.assertIn("runtime_replaced", source)
         self.assertIn("follow_symlinks=False", source)
         self.assertIn('PLUTIL_PATH = "/usr/bin/plutil"', source)
+        self.assertIn('XCODEBUILD_PATH = "/usr/bin/xcodebuild"', source)
+        self.assertIn('CODESIGN_PATH = "/usr/bin/codesign"', source)
+        self.assertIn('OPEN_PATH = "/usr/bin/open"', source)
+        self.assertIn('"-target",\n            NATIVE_TARGET', source)
+        self.assertIn('"--sign", "-"', source)
         self.assertIn('run_launchctl("enable", service_target()', source)
         self.assertIn('run_launchctl("print-disabled", service_domain()', source)
         self.assertIn("Do not rerun as root", source)
         for marker in ("--wifi-interface", "--wifi-bssid", "--wifi-ssid", "--wifi-role"):
             self.assertIn(marker, source)
 
-    def test_source_validation_rejects_symbolic_links(self):
+    def test_native_privacy_identity_and_login_item_sources_are_explicit(self):
+        plist_path = ROOT / "macos" / "HomeNetTopoApp" / "Info.plist"
+        with plist_path.open("rb") as handle:
+            payload = plistlib.load(handle)
+        self.assertIn("NSLocationUsageDescription", payload)
+        self.assertIn("NSLocationWhenInUseUsageDescription", payload)
+        self.assertIn("SSID", payload["NSLocationUsageDescription"])
+        self.assertIn("BSSID", payload["NSLocationUsageDescription"])
+
+        collector = (ROOT / "macos" / "HomeNetTopoApp" / "WiFiCollector.swift").read_text(encoding="utf-8")
+        delegate = (ROOT / "macos" / "HomeNetTopoApp" / "AppDelegate.swift").read_text(encoding="utf-8")
+        project = (ROOT / "macos" / "HomeNetTopoApp" / "HomeNetTopoApp.xcodeproj" / "project.pbxproj").read_text(encoding="utf-8")
+        self.assertIn("CWWiFiClient.shared()", collector)
+        self.assertIn("requestWhenInUseAuthorization()", collector)
+        self.assertIn('"wifi-current.json"', collector)
+        self.assertIn("SMAppService.mainApp", delegate)
+        self.assertIn("PRODUCT_BUNDLE_IDENTIFIER = com.homenettopo.wifi", project)
+        self.assertNotIn("CODE_SIGN_ENTITLEMENTS", project)
+
+    def test_source_validation_rejects_symbolic_links_for_runtime_and_native_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.make_runtime_source(root)
+            self.make_native_source(root)
             target = root / "outside.txt"
             target.write_text("outside", encoding="utf-8")
-            candidate = root / "web" / "app.js"
-            candidate.unlink()
+
+            runtime_candidate = root / "web" / "app.js"
+            runtime_candidate.unlink()
             try:
-                candidate.symlink_to(target)
+                runtime_candidate.symlink_to(target)
             except OSError as exc:
                 self.skipTest(f"symbolic links are unavailable: {exc}")
             with self.assertRaises(self.deploy.DeploymentError):
                 self.deploy.validate_source_root(root)
+
+            runtime_candidate.unlink()
+            runtime_candidate.write_text("app", encoding="utf-8")
+            native_candidate = root / "macos" / "HomeNetTopoApp" / "WiFiCollector.swift"
+            native_candidate.unlink()
+            native_candidate.symlink_to(target)
+            with self.assertRaises(self.deploy.DeploymentError):
+                self.deploy.validate_native_source_root(root)
 
     def test_loaded_service_must_stop_before_replacement(self):
         loaded = self.deploy.subprocess.CompletedProcess(("launchctl", "print"), 0, "", "")
