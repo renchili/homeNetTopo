@@ -1,9 +1,10 @@
 """Build deterministic topology with explicit path uncertainty.
 
 A local endpoint can observe its IP addresses, active interface MAC addresses,
-adapter hardware MAC addresses, optional current BSSID, route gateway, and ARP
-mappings. Local adapter addresses and the serving BSSID are different identities
-and must never be merged. Peer devices are never transit hops.
+adapter hardware MAC addresses, current serving-radio BSSID through a native
+CoreWLAN helper or profiler fallback, route gateway, and ARP mappings. Local
+adapter addresses and the serving BSSID are different identities and must never
+be merged. Peer devices are never transit hops.
 """
 
 from __future__ import annotations
@@ -55,13 +56,13 @@ def _content_fingerprint(snapshot: TopologySnapshot) -> str:
 
 
 def _normalize_optional_sources(sources: Iterable[SourceStatus]) -> list[SourceStatus]:
-    """Keep optional Wi-Fi detail failures from making a usable snapshot partial."""
+    """Keep optional command Wi-Fi detail failures from making a snapshot partial."""
 
     normalized: list[SourceStatus] = []
     for source in sources:
         if source.type in _OPTIONAL_WIFI_SOURCES and source.status is SourceStatusValue.FAILED:
             message = (
-                "Wi-Fi association details are unavailable; the topology remains usable."
+                "Wi-Fi profiler details are unavailable; native Wi-Fi identity may still be usable."
                 if source.type == "wifi"
                 else "Wi-Fi interface classification is unavailable; the topology remains usable."
             )
@@ -76,13 +77,19 @@ def _wireless_node_properties(wireless: WirelessAttachmentFact) -> dict[str, obj
 
     role = wireless.role or "access point or relay"
     if wireless.bssid:
-        identity = "BSSID configured locally" if wireless.configured else "BSSID observed"
+        if wireless.configured:
+            identity = "BSSID configured locally"
+        elif wireless.evidence_source == "wifi_native":
+            identity = "BSSID observed by native CoreWLAN helper"
+        else:
+            identity = "BSSID observed"
     else:
-        identity = "Not exposed by macOS"
+        identity = "BSSID unavailable"
     properties: dict[str, object] = {
         "connection": "Wi-Fi",
         "role": role,
         "identity": identity,
+        "identity_source": wireless.evidence_source,
     }
     optional = {
         "ssid": wireless.ssid,
@@ -113,9 +120,9 @@ def build_snapshot(
     """Merge normalized evidence into one immutable topology snapshot.
 
     The active interface MAC can be a per-network private Wi-Fi address, while
-    ``networksetup`` reports the adapter hardware MAC and ``system_profiler``
-    reports the serving radio BSSID. All local MACs remain on the host/interface
-    nodes and are excluded from ARP/Nmap peer creation.
+    ``networksetup`` and CoreWLAN report local adapter hardware identity and the
+    native helper can report the serving radio BSSID. All local MACs remain on
+    host/interface nodes and are excluded from ARP/Nmap peer creation.
     """
 
     timestamp = collected_at or utc_now()
@@ -268,15 +275,15 @@ def build_snapshot(
 
         wireless = wireless_by_interface.get(interface_name)
         if wireless is not None:
-            automatically_observed = wireless.associated and not wireless.configured
-            evidence_source = "local_configuration" if wireless.configured else ("wifi" if wireless.associated else "wifi_interfaces")
-            evidence_summary = (
-                "Locally configured Wi-Fi attachment fallback"
-                if wireless.configured
-                else "Current Wi-Fi association"
-                if wireless.associated
-                else "Wi-Fi hardware port used by the default route"
-            )
+            automatically_observed = wireless.associated and wireless.evidence_source != "local_configuration"
+            evidence_source = wireless.evidence_source
+            summaries = {
+                "wifi_native": "Current Wi-Fi association from Location-authorized CoreWLAN helper",
+                "wifi": "Current Wi-Fi association from system profiler",
+                "wifi_interfaces": "Wi-Fi hardware port used by the default route",
+                "local_configuration": "Locally configured Wi-Fi attachment fallback",
+            }
+            evidence_summary = summaries.get(evidence_source, "Current Wi-Fi attachment evidence")
             wifi_evidence = Evidence(
                 evidence_source,
                 evidence_summary,
