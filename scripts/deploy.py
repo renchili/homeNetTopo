@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Deploy HomeNetTopo as a per-user macOS LaunchAgent.
+"""Deploy HomeNetTopo and its current-user macOS Wi-Fi identity helper.
 
-The deployment stays inside the current user's Library directory, never requests
-administrator privileges, and keeps the service bound to 127.0.0.1. Optional
-Wi-Fi fallback values are stored only in the local LaunchAgent plist when macOS
-withholds BSSID details from a background process.
+The Python service remains a loopback-only per-user LaunchAgent. Installation
+also builds a small native CoreLocation/CoreWLAN app, ad-hoc signs it, installs
+it under ``~/Applications``, and opens it so the user can grant Location access
+required by modern macOS for SSID/BSSID. No administrator privilege is used.
 """
 
 from __future__ import annotations
@@ -31,6 +31,19 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_DIR = Path.home() / "Library" / "Application Support" / "HomeNetTopo"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 LOG_DIR = Path.home() / "Library" / "Logs" / "HomeNetTopo"
+NATIVE_CACHE_DIR = Path.home() / "Library" / "Caches" / "HomeNetTopo"
+USER_APPLICATIONS_DIR = Path.home() / "Applications"
+NATIVE_APP_NAME = "HomeNetTopo Wi-Fi.app"
+NATIVE_APP_PATH = USER_APPLICATIONS_DIR / NATIVE_APP_NAME
+NATIVE_APP_BUNDLE_ID = "com.homenettopo.wifi"
+NATIVE_PROJECT = SOURCE_ROOT / "macos" / "HomeNetTopoApp" / "HomeNetTopoApp.xcodeproj"
+NATIVE_TARGET = "HomeNetTopoApp"
+NATIVE_BUILD_LOG = LOG_DIR / "native-build.log"
+XCODEBUILD_PATH = "/usr/bin/xcodebuild"
+CODESIGN_PATH = "/usr/bin/codesign"
+OPEN_PATH = "/usr/bin/open"
+NATIVE_BUILD_TIMEOUT_SECONDS = 120
+NATIVE_UNREGISTER_TIMEOUT_SECONDS = 10
 RUNTIME_FILES = (
     "server.py",
     "metadata.json",
@@ -47,6 +60,13 @@ RUNTIME_FILES = (
     "web/app.js",
     "web/core.mjs",
     "web/styles.css",
+)
+NATIVE_SOURCE_FILES = (
+    "macos/HomeNetTopoApp/HomeNetTopoApp.swift",
+    "macos/HomeNetTopoApp/AppDelegate.swift",
+    "macos/HomeNetTopoApp/WiFiCollector.swift",
+    "macos/HomeNetTopoApp/Info.plist",
+    "macos/HomeNetTopoApp/HomeNetTopoApp.xcodeproj/project.pbxproj",
 )
 DEFAULT_PORT = 8765
 HEALTH_TIMEOUT_SECONDS = 10
@@ -120,26 +140,38 @@ def canonical_executable(value: str | None) -> str | None:
     return str(path)
 
 
-def validate_source_root(root: Path = SOURCE_ROOT) -> None:
-    """Verify every deployable file is regular, contained, and not a symlink."""
+def _validate_regular_sources(root: Path, relatives: Sequence[str], label: str) -> None:
+    """Require a fixed source manifest of contained regular non-symlink files."""
 
     root = root.resolve()
     missing: list[str] = []
-    for relative in RUNTIME_FILES:
+    for relative in relatives:
         source = root / relative
         if source.is_symlink():
-            raise DeploymentError(f"Runtime source contains a symbolic link: {relative}")
+            raise DeploymentError(f"{label} source contains a symbolic link: {relative}")
         if not source.exists():
             missing.append(relative)
             continue
         if not source.is_file():
-            raise DeploymentError(f"Runtime source is not a regular file: {relative}")
+            raise DeploymentError(f"{label} source is not a regular file: {relative}")
         try:
             source.resolve().relative_to(root)
         except ValueError as exc:
-            raise DeploymentError(f"Runtime source escapes the repository: {source}") from exc
+            raise DeploymentError(f"{label} source escapes the repository: {source}") from exc
     if missing:
-        raise DeploymentError(f"Runtime source paths are missing: {', '.join(missing)}")
+        raise DeploymentError(f"{label} source paths are missing: {', '.join(missing)}")
+
+
+def validate_source_root(root: Path = SOURCE_ROOT) -> None:
+    """Verify every deployable Python/web runtime file is safe and present."""
+
+    _validate_regular_sources(root, RUNTIME_FILES, "Runtime")
+
+
+def validate_native_source_root(root: Path = SOURCE_ROOT) -> None:
+    """Verify the explicitly approved native helper source manifest."""
+
+    _validate_regular_sources(root, NATIVE_SOURCE_FILES, "Native helper")
 
 
 def build_launch_agent(
@@ -152,7 +184,7 @@ def build_launch_agent(
     wifi_ssid: str | None = None,
     wifi_role: str | None = None,
 ) -> dict[str, Any]:
-    """Build the deterministic user LaunchAgent property list."""
+    """Build the deterministic Python user LaunchAgent property list."""
 
     arguments = [
         python_path,
@@ -213,7 +245,7 @@ def run_launchctl(*arguments: str, check: bool = True) -> subprocess.CompletedPr
 
 
 def bootout_if_loaded(*, check: bool = True) -> bool:
-    """Stop the loaded user service; absence is safe, shutdown failure is not."""
+    """Stop the loaded Python service; absence is safe, shutdown failure is not."""
 
     loaded = run_launchctl("print", service_target(), check=False)
     if loaded.returncode != 0:
@@ -242,7 +274,7 @@ def stage_runtime(root: Path = SOURCE_ROOT) -> Path:
 
 
 def replace_runtime(staging: Path) -> Path | None:
-    """Atomically replace the installed tree while retaining a rollback copy."""
+    """Atomically replace the installed runtime while retaining rollback data."""
 
     backup = INSTALL_DIR.with_name(f"{INSTALL_DIR.name}.previous-{os.getpid()}")
     shutil.rmtree(backup, ignore_errors=True)
@@ -260,15 +292,181 @@ def replace_runtime(staging: Path) -> Path | None:
 
 
 def restore_runtime(backup: Path | None) -> None:
-    """Restore the previous runtime after a later launchd activation failure."""
+    """Restore the previous Python/web runtime after a deployment failure."""
 
     shutil.rmtree(INSTALL_DIR, ignore_errors=True)
     if backup and backup.exists():
         backup.rename(INSTALL_DIR)
 
 
+def _require_system_executable(path: str, label: str) -> None:
+    """Require one fixed Apple development/deployment executable."""
+
+    candidate = Path(path)
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise DeploymentError(f"{label} is unavailable: {path}")
+
+
+def _run_native_build(argv: Sequence[str]) -> None:
+    """Run one fixed native build command with a total timeout and local log."""
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    NATIVE_BUILD_LOG.write_text("", encoding="utf-8")
+    NATIVE_BUILD_LOG.chmod(0o600)
+    try:
+        with NATIVE_BUILD_LOG.open("a", encoding="utf-8") as log:
+            completed = subprocess.run(
+                tuple(argv),
+                check=False,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=NATIVE_BUILD_TIMEOUT_SECONDS,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise DeploymentError(f"Native Wi-Fi helper build timed out. Check {NATIVE_BUILD_LOG}.") from exc
+    if completed.returncode != 0:
+        raise DeploymentError(f"Native Wi-Fi helper build failed. Check {NATIVE_BUILD_LOG}.")
+
+
+def _validate_built_native_app(path: Path) -> None:
+    """Require the expected bundle identity, privacy keys, and executable."""
+
+    plist_path = path / "Contents" / "Info.plist"
+    if path.is_symlink() or not path.is_dir() or not plist_path.is_file() or plist_path.is_symlink():
+        raise DeploymentError("Native Wi-Fi helper build did not produce a valid application bundle.")
+    try:
+        with plist_path.open("rb") as handle:
+            payload = plistlib.load(handle)
+        executable_name = payload["CFBundleExecutable"]
+        bundle_id = payload["CFBundleIdentifier"]
+    except (OSError, KeyError, TypeError, plistlib.InvalidFileException) as exc:
+        raise DeploymentError("Native Wi-Fi helper Info.plist is invalid.") from exc
+    executable = path / "Contents" / "MacOS" / executable_name
+    if bundle_id != NATIVE_APP_BUNDLE_ID:
+        raise DeploymentError("Native Wi-Fi helper bundle identifier is unexpected.")
+    if not payload.get("NSLocationUsageDescription") or not payload.get("NSLocationWhenInUseUsageDescription"):
+        raise DeploymentError("Native Wi-Fi helper is missing Location privacy descriptions.")
+    if executable.is_symlink() or not executable.is_file() or not os.access(executable, os.X_OK):
+        raise DeploymentError("Native Wi-Fi helper executable is unavailable after build.")
+
+
+def build_native_app(root: Path = SOURCE_ROOT) -> tuple[Path, Path]:
+    """Build and ad-hoc sign the approved native CoreWLAN helper sources."""
+
+    validate_native_source_root(root)
+    _require_system_executable(XCODEBUILD_PATH, "Xcode command-line build tool")
+    _require_system_executable(CODESIGN_PATH, "macOS code signing tool")
+    build_root = Path(tempfile.mkdtemp(prefix=".HomeNetTopo-native-build-"))
+    try:
+        project = root / "macos" / "HomeNetTopoApp" / "HomeNetTopoApp.xcodeproj"
+        _run_native_build((
+            XCODEBUILD_PATH,
+            "-quiet",
+            "-project",
+            str(project),
+            "-target",
+            NATIVE_TARGET,
+            "-configuration",
+            "Release",
+            f"SYMROOT={build_root / 'Build'}",
+            f"OBJROOT={build_root / 'Obj'}",
+            "CODE_SIGNING_ALLOWED=NO",
+            "CODE_SIGNING_REQUIRED=NO",
+        ))
+        app = build_root / "Build" / "Release" / NATIVE_APP_NAME
+        _validate_built_native_app(app)
+        signed = subprocess.run(
+            (CODESIGN_PATH, "--force", "--deep", "--sign", "-", "--timestamp=none", str(app)),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if signed.returncode != 0:
+            raise DeploymentError("Could not ad-hoc sign the native Wi-Fi helper.")
+        verified = subprocess.run(
+            (CODESIGN_PATH, "--verify", "--deep", "--strict", str(app)),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if verified.returncode != 0:
+            raise DeploymentError("Native Wi-Fi helper signature verification failed.")
+        return build_root, app
+    except Exception:
+        shutil.rmtree(build_root, ignore_errors=True)
+        raise
+
+
+def replace_native_app(built_app: Path) -> Path | None:
+    """Atomically install the built helper under the current user's Applications."""
+
+    _validate_built_native_app(built_app)
+    USER_APPLICATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(prefix=".HomeNetTopo-WiFi-stage-", dir=USER_APPLICATIONS_DIR))
+    staged_app = staging_root / NATIVE_APP_NAME
+    backup = NATIVE_APP_PATH.with_name(f"{NATIVE_APP_NAME}.previous-{os.getpid()}")
+    shutil.rmtree(backup, ignore_errors=True)
+    previous: Path | None = None
+    try:
+        shutil.copytree(built_app, staged_app, symlinks=True)
+        _validate_built_native_app(staged_app)
+        if NATIVE_APP_PATH.exists():
+            NATIVE_APP_PATH.rename(backup)
+            previous = backup
+        staged_app.rename(NATIVE_APP_PATH)
+        return previous
+    except Exception:
+        if previous and previous.exists() and not NATIVE_APP_PATH.exists():
+            previous.rename(NATIVE_APP_PATH)
+        raise
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def restore_native_app(backup: Path | None) -> None:
+    """Restore the previous native helper after a later deployment failure."""
+
+    shutil.rmtree(NATIVE_APP_PATH, ignore_errors=True)
+    if backup and backup.exists():
+        backup.rename(NATIVE_APP_PATH)
+
+
+def open_native_helper() -> None:
+    """Open the installed helper in the GUI so Location authorization can prompt."""
+
+    _require_system_executable(OPEN_PATH, "macOS open tool")
+    if not NATIVE_APP_PATH.is_dir():
+        raise DeploymentError("Native Wi-Fi helper is not installed.")
+    completed = subprocess.run(
+        (OPEN_PATH, str(NATIVE_APP_PATH)),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if completed.returncode != 0:
+        raise DeploymentError("Could not open the native Wi-Fi helper for Location authorization.")
+
+
+def unregister_native_login_item() -> None:
+    """Ask the installed helper to unregister its own SMAppService login item."""
+
+    if not NATIVE_APP_PATH.is_dir() or not Path(OPEN_PATH).is_file():
+        return
+    try:
+        subprocess.run(
+            (OPEN_PATH, "-W", "-n", str(NATIVE_APP_PATH), "--args", "--unregister-login-item"),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=NATIVE_UNREGISTER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def write_plist(payload: dict[str, Any]) -> None:
-    """Write the LaunchAgent plist through an atomic same-directory replace."""
+    """Write the Python LaunchAgent plist through an atomic same-directory replace."""
 
     PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{LABEL}.", suffix=".plist", dir=PLIST_PATH.parent)
@@ -294,7 +492,7 @@ def restore_plist(previous: bytes | None) -> None:
 
 
 def plist_port() -> int:
-    """Read the configured port from the installed LaunchAgent arguments."""
+    """Read the configured port from the installed Python LaunchAgent arguments."""
 
     try:
         with PLIST_PATH.open("rb") as handle:
@@ -370,7 +568,7 @@ def _tail(path: Path) -> str:
 
 
 def launchd_diagnostics() -> str:
-    """Collect bounded, non-privileged diagnostics for an activation failure."""
+    """Collect bounded non-privileged deployment diagnostics without Wi-Fi data."""
 
     lines = [
         "LaunchAgent diagnostics:",
@@ -378,6 +576,7 @@ def launchd_diagnostics() -> str:
         f"  target: {service_target()}",
         f"  plist: {PLIST_PATH}",
         f"  runtime: {INSTALL_DIR}",
+        f"  native-app: {NATIVE_APP_PATH}",
         f"  python: {sys.executable}",
     ]
     lint = _run_plutil() if PLIST_PATH.exists() else None
@@ -394,6 +593,7 @@ def launchd_diagnostics() -> str:
     lines.append(f"  service-state: {current_detail[:MAX_DIAGNOSTIC_BYTES]}")
     lines.append(f"  service-error.log: {_tail(LOG_DIR / 'service-error.log')}")
     lines.append(f"  service.log: {_tail(LOG_DIR / 'service.log')}")
+    lines.append(f"  native-build.log: {_tail(NATIVE_BUILD_LOG)}")
     return "\n".join(lines)
 
 
@@ -451,7 +651,7 @@ def install(
     wifi_ssid: str | None = None,
     wifi_role: str | None = None,
 ) -> None:
-    """Install runtime files, activate launchd, and verify loopback health."""
+    """Build helper, install runtime, activate launchd, and open authorization UI."""
 
     require_supported_host()
     if any((wifi_bssid, wifi_ssid, wifi_role)) and not wifi_interface:
@@ -468,24 +668,34 @@ def install(
         wifi_ssid=wifi_ssid,
         wifi_role=wifi_role,
     )
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    build_root, built_app = build_native_app()
     staging = stage_runtime()
     previous_plist = PLIST_PATH.read_bytes() if PLIST_PATH.exists() else None
-    backup: Path | None = None
+    runtime_backup: Path | None = None
+    native_backup: Path | None = None
     runtime_replaced = False
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    native_replaced = False
+
     try:
         bootout_if_loaded()
-        backup = replace_runtime(staging)
+        runtime_backup = replace_runtime(staging)
         runtime_replaced = True
+        native_backup = replace_native_app(built_app)
+        native_replaced = True
         write_plist(payload)
         bootstrap_agent()
         run_launchctl("kickstart", "-k", service_target())
         health = wait_for_health(port)
+        open_native_helper()
     except Exception:
         bootout_if_loaded(check=False)
         run_launchctl("bootout", service_domain(), str(PLIST_PATH), check=False)
         if runtime_replaced:
-            restore_runtime(backup)
+            restore_runtime(runtime_backup)
+        if native_replaced:
+            restore_native_app(native_backup)
         restore_plist(previous_plist)
         if previous_plist is not None and INSTALL_DIR.exists():
             run_launchctl("enable", service_target(), check=False)
@@ -495,16 +705,20 @@ def install(
         shutil.rmtree(staging, ignore_errors=True)
         raise
     else:
-        if backup:
-            shutil.rmtree(backup, ignore_errors=True)
+        if runtime_backup:
+            shutil.rmtree(runtime_backup, ignore_errors=True)
+        if native_backup:
+            shutil.rmtree(native_backup, ignore_errors=True)
         print(f"HomeNetTopo {health.get('version', '')} is running at http://127.0.0.1:{port}")
         print(f"Installed runtime: {INSTALL_DIR}")
-        print(f"LaunchAgent: {PLIST_PATH}")
-        print(f"Logs: {LOG_DIR}")
+        print(f"Wi-Fi identity helper: {NATIVE_APP_PATH}")
+        print("Grant Location access in the opened helper, then refresh the topology page.")
+    finally:
+        shutil.rmtree(build_root, ignore_errors=True)
 
 
 def restart() -> None:
-    """Restart an existing deployment and verify its health endpoint."""
+    """Restart an existing Python deployment and verify its health endpoint."""
 
     require_supported_host()
     if not INSTALL_DIR.is_dir() or not PLIST_PATH.is_file():
@@ -530,23 +744,27 @@ def status() -> None:
     print(completed.stdout.rstrip())
     health = wait_for_health(plist_port(), timeout_seconds=2)
     print(json.dumps(health, indent=2, sort_keys=True))
+    print(f"Native Wi-Fi helper installed: {NATIVE_APP_PATH.is_dir()}")
 
 
 def diagnose() -> None:
-    """Print bounded launchd, plist, path, and service-log diagnostics."""
+    """Print bounded launchd, native-build, path, and service-log diagnostics."""
 
     require_supported_host()
     print(launchd_diagnostics())
 
 
 def uninstall(purge_logs: bool) -> None:
-    """Remove the user LaunchAgent and deployed runtime without elevation."""
+    """Remove the current-user service, native helper, runtime, and helper cache."""
 
     require_supported_host()
     bootout_if_loaded()
     run_launchctl("bootout", service_domain(), str(PLIST_PATH), check=False)
+    unregister_native_login_item()
     PLIST_PATH.unlink(missing_ok=True)
     shutil.rmtree(INSTALL_DIR, ignore_errors=True)
+    shutil.rmtree(NATIVE_APP_PATH, ignore_errors=True)
+    shutil.rmtree(NATIVE_CACHE_DIR, ignore_errors=True)
     if purge_logs:
         shutil.rmtree(LOG_DIR, ignore_errors=True)
     print("HomeNetTopo was removed from the current user account.")
@@ -557,18 +775,18 @@ def uninstall(purge_logs: bool) -> None:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse deployment actions without accepting arbitrary commands or paths."""
 
-    parser = argparse.ArgumentParser(description="Deploy HomeNetTopo as a per-user macOS LaunchAgent.")
+    parser = argparse.ArgumentParser(description="Deploy HomeNetTopo as a per-user macOS application and service.")
     subparsers = parser.add_subparsers(dest="action", required=True)
-    install_parser = subparsers.add_parser("install", help="Install or update the current user deployment.")
+    install_parser = subparsers.add_parser("install", help="Build and install/update the current user deployment.")
     install_parser.add_argument("--port", type=validate_port, default=DEFAULT_PORT)
     install_parser.add_argument("--nmap-path", help="Optional explicit Nmap executable path.")
-    install_parser.add_argument("--wifi-interface", type=validate_interface, help="BSD Wi-Fi interface for a local fallback, for example en0.")
-    install_parser.add_argument("--wifi-bssid", type=validate_mac, help="Current AP/relay BSSID used only when automatic collection omits it.")
-    install_parser.add_argument("--wifi-ssid", type=validate_ssid, help="Optional current SSID stored only in the local LaunchAgent plist.")
+    install_parser.add_argument("--wifi-interface", type=validate_interface, help="BSD Wi-Fi interface for a last-resort local fallback, for example en0.")
+    install_parser.add_argument("--wifi-bssid", type=validate_mac, help="Fallback BSSID used only if native and profiler collection omit it.")
+    install_parser.add_argument("--wifi-ssid", type=validate_ssid, help="Optional fallback SSID stored only in the local LaunchAgent plist.")
     install_parser.add_argument("--wifi-role", choices=("access-point", "relay"), help="Optional user-confirmed role of the connected Wi-Fi node.")
-    subparsers.add_parser("restart", help="Restart the installed service.")
-    subparsers.add_parser("status", help="Show launchd state and the health response.")
-    subparsers.add_parser("diagnose", help="Show plist, launchd, path, and service-log diagnostics.")
+    subparsers.add_parser("restart", help="Restart the installed Python service.")
+    subparsers.add_parser("status", help="Show launchd state, helper installation, and health response.")
+    subparsers.add_parser("diagnose", help="Show bounded deployment diagnostics.")
     uninstall_parser = subparsers.add_parser("uninstall", help="Remove the current user deployment.")
     uninstall_parser.add_argument("--purge-logs", action="store_true")
     return parser.parse_args(argv)
