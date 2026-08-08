@@ -1,70 +1,138 @@
 # Home Net Topology
 
-Home Net Topology (`homeNetTopo`) is a local-first macOS application that collects network evidence visible from the current Mac, builds a best-effort logical topology, and serves an interactive loopback-only web page.
+Home Net Topology (`homeNetTopo`) is a local-first macOS application that collects network evidence visible from the current Mac, builds a conservative logical topology, and serves an interactive loopback-only web page.
 
-## Implementation status
+The current implementation adds a native macOS Wi-Fi identity helper so the product can obtain the **current SSID/BSSID** through CoreWLAN after the user grants Location permission. The Python LaunchAgent no longer depends on `system_profiler` as the only way to identify the connected Wi-Fi radio.
 
-The repository contains the Python service, macOS parsers, bounded Nmap adapter, topology model, static browser interface, deterministic tests with inline synthetic inputs, a per-user macOS deployment script, and a full-regression entrypoint.
+## Status
 
-**This revision has not been executed or runtime-accepted.** Source presence is not evidence that startup, deployment, tests, browser behavior, Nmap discovery, Wi-Fi association collection, or real-network collection succeeds on a supported Mac.
+This revision is source-complete but unverified. The Python/Node tests, Xcode build, Location prompt, CoreWLAN runtime, LaunchAgent lifecycle, browser interaction, and real network behavior have not been executed for this exact revision.
 
 ## Requirements
 
-Production requires macOS and Python 3.10 or newer. Nmap is optional and is used only for bounded active host discovery. Development verification additionally requires Node.js 20 or newer. No npm packages or third-party Python packages are used.
+Runtime:
 
-## Start from the repository
+- macOS 13 or newer for the native helper;
+- Python 3.10 or newer;
+- Python standard library only;
+- Apple system frameworks: CoreLocation, CoreWLAN, AppKit/SwiftUI, ServiceManagement;
+- optional Nmap for bounded active host discovery.
+
+Installation currently builds the native helper from source and therefore requires Xcode command-line build support. Development frontend verification additionally requires Node.js 20 or newer. No npm packages are used.
+
+## Recommended install
+
+From the repository root:
 
 ```text
-python3 server.py
-python3 server.py --port 8765
-python3 server.py --nmap-path /opt/homebrew/bin/nmap
+python3 ./scripts/deploy.py install
 ```
 
-The default URL is `http://127.0.0.1:8765`. The first release rejects any bind other than `127.0.0.1`.
-
-## Deploy as a macOS user service
-
-`scripts/deploy.py` installs HomeNetTopo as a LaunchAgent for the current macOS user. It never uses `sudo`, never changes the loopback bind, and copies only the explicit runtime allowlist. Tests, documentation, Git metadata, caches, reports, and unlisted files are not installed.
+With an explicit Nmap path:
 
 ```text
-python3 scripts/deploy.py install
-python3 scripts/deploy.py install --port 8877
-python3 scripts/deploy.py install --nmap-path /opt/homebrew/bin/nmap
-python3 scripts/deploy.py status
-python3 scripts/deploy.py restart
-python3 scripts/deploy.py diagnose
-python3 scripts/deploy.py uninstall
-python3 scripts/deploy.py uninstall --purge-logs
+python3 ./scripts/deploy.py install --nmap-path /opt/homebrew/bin/nmap
 ```
 
-The deployment locations are fixed to the current user:
+The installer:
+
+1. builds the fixed `HomeNetTopoApp` Xcode target;
+2. ad-hoc signs and verifies `HomeNetTopo Wi-Fi.app`;
+3. installs it to `~/Applications/HomeNetTopo Wi-Fi.app`;
+4. installs the Python/web runtime under `~/Library/Application Support/HomeNetTopo`;
+5. manages the Python service as current-user LaunchAgent `com.homenettopo.local`;
+6. waits for the loopback service to become healthy;
+7. opens the native Wi-Fi helper in the foreground.
+
+When `HomeNetTopo Wi-Fi` opens, grant **Location** access. The app explains that macOS requires Location permission for current SSID/BSSID access. Once permission is granted, it reads the current Wi-Fi association through CoreWLAN and refreshes it every five seconds.
+
+Then return to:
 
 ```text
-~/Library/Application Support/HomeNetTopo
-~/Library/LaunchAgents/com.homenettopo.local.plist
-~/Library/Logs/HomeNetTopo
+http://127.0.0.1:8765
 ```
 
-Installation validates regular files, rejects symbolic links, stages the exact runtime, disables environment proxies for the loopback health check, and retains the previous runtime until the new LaunchAgent is healthy. A failed replacement, bootstrap, or health check restores the prior runtime and property list.
+and use **Refresh passive**.
 
-### Optional local Wi-Fi relay fallback
+No manual BSSID is required for the normal path.
 
-macOS can show the current BSSID in the interactive Wi-Fi menu while withholding it from a background LaunchAgent. Automatic `system_profiler` evidence always has priority. When automatic BSSID evidence is absent, installation can provide a local fallback:
+If you know the connected wireless node is a relay and want to preserve that role annotation while still using the automatically detected BSSID:
 
 ```text
-python3 scripts/deploy.py install \
+python3 ./scripts/deploy.py install \
   --nmap-path /opt/homebrew/bin/nmap \
   --wifi-interface en0 \
-  --wifi-bssid 02:aa:bb:cc:dd:55 \
-  --wifi-ssid "Synthetic Wi-Fi" \
   --wifi-role relay
 ```
 
-The example is synthetic. These values are validated and written only to the current user's LaunchAgent plist. They are not added to the repository, source logs, examples, or fixtures. `--wifi-role relay` is user-confirmed local configuration; automatic collection does not guess AP versus relay.
+The native/automatic BSSID still wins. Manual `--wifi-bssid` and `--wifi-ssid` options remain last-resort local fallbacks only.
 
-## Passive evidence and Wi-Fi identity
+## What identifies the current Wi-Fi device
 
-Initial page load sends a protected passive refresh. The fixed commands run concurrently:
+The application intentionally separates three MAC identities:
+
+```text
+This Mac / interface
+  Private Wi-Fi MAC   <- ifconfig ether
+  Hardware MAC        <- networksetup Ethernet Address
+
+Current Wi-Fi node
+  BSSID               <- native CoreWLAN helper (preferred)
+                          then system_profiler fallback
+```
+
+The BSSID belongs to the currently associated wireless radio. It is not the Mac's Private Wi-Fi MAC and it is not the adapter Hardware MAC.
+
+Evidence precedence is:
+
+```text
+wifi_native (CoreWLAN + Location)
+  > wifi (system_profiler current association)
+  > local_configuration
+```
+
+`networksetup -listallhardwareports` remains authoritative for identifying the Wi-Fi BSD interface and its local Hardware MAC.
+
+The native helper publishes a short-lived local cache only:
+
+```text
+~/Library/Caches/HomeNetTopo/wifi-current.json
+```
+
+The Python service accepts the cache only when it is a current-user-owned regular file, not group/world writable, at most 16 KiB, valid schema version 1, and no more than 20 seconds old. Missing, stale, denied, restricted, or invalid helper data cannot become BSSID evidence.
+
+`GET /api/v1/capabilities` exposes only the helper state and activation URL. It does not expose the current SSID, BSSID, Hardware MAC, Private Wi-Fi MAC, or manual fallback value.
+
+## Expected Wi-Fi topology
+
+With fresh CoreWLAN evidence, the main path is:
+
+```text
+This Mac
+  → en0
+  → current Wi-Fi node (SSID / BSSID)
+  → gateway
+  → upstream
+```
+
+The Wi-Fi node can expose:
+
+- SSID;
+- BSSID;
+- Channel;
+- RSSI;
+- Noise;
+- PHY mode;
+- transmit rate;
+- role (`access point or relay`, or a user-confirmed `relay`).
+
+A BSSID proves the current associated radio. It does **not**, by itself, prove that the physical device is a main AP rather than a relay. If you know the role from your actual network, `--wifi-role relay` records that local confirmation without replacing the automatically observed BSSID.
+
+The Details panel separately displays the local interface Hardware MAC and Private Wi-Fi MAC so they cannot be mistaken for the BSSID.
+
+## Passive evidence
+
+The fixed Python command sources are:
 
 ```text
 /sbin/ifconfig -a
@@ -74,80 +142,39 @@ Initial page load sends a protected passive refresh. The fixed commands run conc
 /usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType
 ```
 
-`networksetup` identifies Wi-Fi BSD interfaces and adapter hardware MAC addresses. `ifconfig` provides the MAC currently active on the interface; with Private Wi-Fi Address enabled, that current MAC can differ from the hardware MAC. `system_profiler` optionally provides the current SSID, serving-radio BSSID, channel, RSSI, noise, PHY mode, and transmit rate. Nearby-network entries are ignored.
+These command collectors run concurrent inside one collection operation. Interface, route, and ARP evidence establish material coherence. `networksetup` identifies Wi-Fi media and local hardware identity. `system_profiler` is optional current-association fallback. The native CoreWLAN cache is read after the command evidence and does not extend command latency.
 
-The three MAC roles are kept separate:
+Profiler failure alone does not invalidate a usable topology. Native helper state is represented as source `wifi_native`; when no automatic BSSID is available, missing/denied/stale native state becomes an actionable warning instead of an invented identity.
 
-```text
-This Mac / en0
-  IP address
-  Hardware MAC             local adapter identity
-  Private Wi-Fi MAC        current per-network local identity, when different
+## Local identities and peers
 
-Connected Wi-Fi node
-  BSSID                    serving AP, mesh node, or relay radio
-```
+All local IPv4 addresses, Private Wi-Fi MAC values, and Hardware MAC values belong to this Mac. If ARP or Nmap reports a local IP or local MAC again, HomeNetTopo excludes it from peer nodes and active host counts.
 
-A local IP, adapter hardware MAC, or private Wi-Fi MAC can never become a peer device. ARP or Nmap evidence that repeats a local IP or local MAC is discarded from peer creation. A BSSID belongs to the connected wireless node, not to the Mac.
+ARP maps an IP neighbor to a link-layer address. It cannot enumerate transparent switches. Different BSSID and gateway MAC values do not prove that they are different physical boxes because a single appliance may expose multiple interface MACs.
 
-The main path is evidence-backed:
+Without LLDP/CDP or managed-topology evidence, a non-Wi-Fi Ethernet path remains:
 
 ```text
-Wi-Fi with BSSID:
-This Mac → interface → connected Wi-Fi node → gateway → upstream
-
-Wi-Fi media without BSSID:
-This Mac → interface → connected Wi-Fi node (AP or relay) → gateway → upstream
-
-Non-Wi-Fi without adjacent-device evidence:
 This Mac → interface → Intermediate L2 path unknown → gateway → upstream
-
-Tunnel default route:
-This Mac → tunnel interface → gateway → upstream
 ```
 
-A BSSID proves which radio serves the client, but does not by itself prove whether it is the main AP, a mesh node, or a relay. A configured role is shown as local user evidence. Exact matching serving-radio and gateway MAC evidence is recorded as a positive relation; different MACs do not prove different physical appliances.
-
-ARP identifies the link-layer address used for an IP neighbor, but does not enumerate transparent switches. Traceroute likewise does not reveal ordinary Layer-2 forwarding devices. An Ethernet switch is named only when adjacent-device or managed-topology evidence such as LLDP is available. The first release does not claim LLDP support.
-
-Other same-subnet devices are rendered in a separate peer group and are never transit hops between this Mac and the gateway.
+Other same-subnet devices are LAN peers, not transit hops.
 
 ## Active discovery
 
-After explicit confirmation, active discovery uses only:
+Active discovery is optional and separately confirmed. It uses only:
 
 ```text
 <canonical-nmap-path> -sn -n --max-retries 1 --host-timeout 5s -oX - <validated-targets...>
 ```
 
-Nmap finds responding peers. It does not reveal transparent switches, Wi-Fi backhaul, or prove the physical gateway path. Port, service, vulnerability, credential, operating-system, DNS, and internet-wide scanning are excluded.
+Targets must be canonical RFC 1918 IPv4 networks equal to or contained by eligible non-tunnel local interface networks. Validation occurs before and after fresh passive collection. Adjacent sibling targets remain separate and are never widened into a new supernet.
 
-Validation occurs in two phases:
-
-1. request structure, canonical IPv4 syntax, RFC 1918 membership, body size, count, address union, and timeout are checked before commands;
-2. after fresh passive collection, every target must equal or be contained by an eligible non-tunnel RFC 1918 network assigned to a local interface.
-
-Only `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16` are eligible. Exact duplicates and contained targets may be removed only within the same most-specific local owner. Adjacent sibling targets remain separate and are never widened into a new supernet.
-
-| Limit | Value |
-|---|---:|
-| JSON body | 16 KiB |
-| Requested networks | 1–32 |
-| Unique target addresses | at most 1024 |
-| Nmap operation timeout | default 30 seconds; range 5–120 |
-| Nmap host timeout | fixed 5 seconds |
-| Interface/route/ARP timeout | 5 seconds each, concurrent |
-| Wi-Fi interface detection | 3 seconds |
-| Wi-Fi profiler process | 8 seconds; internal timeout 5 seconds |
-| Captured stdout | 2 MiB |
-| Captured stderr | 64 KiB |
-| Terminate-to-kill grace | 2 seconds |
-
-If all material passive sources fail, the normalized `collection_failed` error includes `failed_sources`; a `504 command_timeout` also includes `timeout_sources`. Optional Wi-Fi profiler failure alone never produces a 504.
+The product does not perform port, service, OS, vulnerability, credential, packet-capture, public-internet, or reverse-DNS scanning.
 
 ## Local API
 
-Read-only routes never start commands:
+Read-only routes never start collection commands:
 
 ```text
 GET /api/v1/health
@@ -163,25 +190,39 @@ POST /api/v1/topology/refresh
 POST /api/v1/discover
 ```
 
-Collection routes require JSON, `X-HomeNetTopo-Request: 1`, an accepted loopback Host, matching Origin when present, and `Sec-Fetch-Site: same-origin` or `none` when present. There are no permissive CORS headers. One collection runs at a time; concurrent collection returns `409 collection_in_progress`. Successful snapshots replace the previous snapshot atomically, and failures preserve it.
+Collection POSTs require JSON, `X-HomeNetTopo-Request: 1`, an accepted loopback Host, and matching same-origin signals when present. The service emits no permissive CORS headers.
 
-The complete contract is in `docs/api-spec.md`.
+Only one collection runs at a time. Successful snapshots replace the prior snapshot atomically. Failed collections preserve the previous snapshot. Snapshots are in-memory only.
 
-## Interface
+## Deployment locations
 
-The browser provides passive refresh, explicit active discovery, an evidence-backed gateway path, separate peer groups, tunnel paths, selectable details, deterministic SVG layout, full-surface pan, bounded pointer-centered zoom, keyboard selection, warnings, recovery states, and local JSON export.
+```text
+~/Library/Application Support/HomeNetTopo
+~/Library/LaunchAgents/com.homenettopo.local.plist
+~/Library/Logs/HomeNetTopo
+~/Library/Caches/HomeNetTopo/wifi-current.json
+~/Applications/HomeNetTopo Wi-Fi.app
+```
 
-Selecting the Mac or interface shows local IPs, hardware MAC, and private Wi-Fi MAC. Selecting the connected Wi-Fi node shows role, SSID, BSSID, channel, RSSI, noise, PHY mode, and transmit rate when available. Internal parser field names are not used as primary UI labels.
+The native helper registers `SMAppService.mainApp` for login launch. macOS may require user approval in Login Items; the helper UI provides a button that opens those settings.
 
-## Privacy and exclusions
+The deployment path never uses `sudo` and never changes the Python service bind from `127.0.0.1`. The Xcode project, target, native source manifest, runtime file manifest, Apple build tools, and installation paths are fixed by `scripts/deploy.py`.
 
-Topology data stays in process memory unless the user downloads an export. The application requires no cloud service, account, telemetry, CDN, or external asset.
+Manage the installation:
 
-The first release excludes reverse-DNS enrichment, online vendor lookup, persistent naming, persistent snapshots, LAN bind, active IPv6, port/service/OS scanning, packet capture, guaranteed switch discovery, and automatic proof that a Wi-Fi node is a relay.
+```text
+python3 ./scripts/deploy.py status
+python3 ./scripts/deploy.py restart
+python3 ./scripts/deploy.py diagnose
+python3 ./scripts/deploy.py uninstall
+python3 ./scripts/deploy.py uninstall --purge-logs
+```
 
-Do not commit real local IP addresses, SSIDs, BSSIDs, hostnames, MAC addresses, logs, packet captures, scan output, LaunchAgent property lists, or exported snapshots. Tests use inline synthetic data; no independent fixture directory is required.
+Uninstall asks the native app to unregister its login item, removes the app and helper cache, and removes the Python LaunchAgent/runtime. Logs are retained unless `--purge-logs` is used.
 
-## Verification commands
+## Verification
+
+Source/test regression definitions:
 
 ```text
 python3 -m unittest discover -s tests -p 'test_*.py'
@@ -189,18 +230,19 @@ node --test tests/frontend/core.test.mjs
 python3 scripts/check.py
 ```
 
-`python3 scripts/check.py --python-only` is development feedback only and must not be cited as full-regression evidence.
+`python3 scripts/check.py` includes Python source compilation, metadata, Python tests, documentation/contract guards, native source/Xcode/privacy static checks, browser asset checks, Node frontend tests, and repository hygiene. It does not prove that the native app actually builds or receives Location permission.
 
-## Evidence status for this revision
+Native acceptance requires an exact-revision macOS deployment that demonstrates:
 
-- Static source generation: complete.
-- Test definitions: present.
-- Deployment script: present, not executed.
-- Python tests: not run.
-- Frontend tests: not run.
-- Full regression: not run.
-- macOS startup and Wi-Fi collection: not run.
-- LaunchAgent deployment: not run.
-- Browser interaction: not run.
-- Nmap discovery: not run.
-- CI: not configured or run.
+- successful Xcode build and ad-hoc signing;
+- visible Location authorization for `HomeNetTopo Wi-Fi`;
+- current CoreWLAN SSID/BSSID in the helper;
+- a fresh `wifi_native` cache;
+- the same BSSID in the topology's connected Wi-Fi node;
+- browser selection/details behavior.
+
+## Privacy and repository hygiene
+
+No cloud service, account, telemetry, CDN, or external frontend asset is required.
+
+Do not commit real local IPs, SSIDs, BSSIDs, hostnames, MAC addresses, LaunchAgent plists, native cache files, logs, packet captures, Nmap output, exported snapshots, Xcode build products, or DerivedData. Synthetic test values stay inline with their owning tests.
