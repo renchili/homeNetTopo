@@ -3,110 +3,161 @@
 ## Status and authority
 
 - Status: `STATIC_IMPLEMENTATION_REQUIRES_INDEPENDENT_ACCEPTANCE`
-- Long-term owner: `docs/plan.md`
 - Product authority: `AGENT.md` and `docs/questions.md`
 - Architecture authority: `docs/design.md`
 - Public API authority: `docs/api-spec.md`
 - Metadata authority: `metadata.json`
 
-This document records implementation ownership. It is not runtime evidence, an acceptance report, or automatic authorization for additional files.
+This file records ownership and acceptance boundaries. It is not runtime evidence.
 
 ## User-intent boundary
 
-The first release is a local macOS topology viewer with a Python 3.10+ loopback service, approved passive evidence, optional bounded Nmap host discovery, a local browser interface, JSON export, in-memory snapshots, and a current-user LaunchAgent deployment path.
+HomeNetTopo is a local macOS topology viewer with a Python 3.10+ loopback service, a native CoreLocation/CoreWLAN Wi-Fi identity helper, approved passive evidence, optional bounded Nmap host discovery, a local browser interface, JSON export, in-memory snapshots, and current-user deployment.
 
-The principal graph distinguishes the evidence-backed path toward a gateway from devices that merely share an IPv4 subnet. Wi-Fi media is identified through `networksetup`; current BSSID may identify the associated AP radio through optional profiler evidence. Transparent Ethernet switches are not named without LLDP or managed-topology evidence. `Intermediate L2 path unknown` remains explicit for unclassified non-Wi-Fi links. Tunnel paths remain visible as Layer 3 and peers are never transit hops.
-
-It excludes reverse DNS, online enrichment, annotations, persistence, LAN bind, active IPv6, port/service/OS scanning, packet capture, guaranteed switch enumeration, containers, cloud deployment, and system-wide installation.
+The principal graph distinguishes the path toward a gateway from LAN peer devices. The current Wi-Fi radio is identified by BSSID when automatic evidence is available. Transparent Ethernet switches are not named without LLDP or managed-topology evidence. `Intermediate L2 path unknown` remains explicit for unclassified non-Wi-Fi links. Tunnel paths remain visible Layer 3 and peers are never transit hops.
 
 ## Artifact policy
 
-- Short single-use test inputs remain inline in their owning tests.
-- No fixtures, samples, demos, reports, or generated-data directory is required.
-- Local runtime data, SSIDs, BSSIDs, deployment logs, topology exports, packet captures, and scan output do not enter source control.
-- `scripts/deploy.py` is the only deployment script. It does not authorize a package manager, container manifest, system installer, or parallel deployment directory.
+Native expansion is explicitly limited to:
+
+```text
+macos/HomeNetTopoApp/HomeNetTopoApp.swift
+macos/HomeNetTopoApp/AppDelegate.swift
+macos/HomeNetTopoApp/WiFiCollector.swift
+macos/HomeNetTopoApp/Info.plist
+macos/HomeNetTopoApp/HomeNetTopoApp.xcodeproj/project.pbxproj
+```
+
+No native entitlements file, package manager, external framework, fixture directory, generated sample, or parallel deployment script is authorized.
+
+Do not commit real IPs, SSIDs, BSSIDs, hostnames, MAC addresses, native cache content, deployment logs, exported snapshots, captures, or scan output.
 
 ## Current owners
 
-| Concern | Production owner | Test owner | Documentation owner |
-|---|---|---|---|
-| Service, request security, collection lock, concurrent passive-source orchestration, active orchestration, snapshot publication | `server.py` | `tests/test_server.py`, `tests/test_static_security.py` | `docs/api-spec.md`, `README.md` |
-| Approved interface, route, ARP, networksetup, profiler, and Nmap commands; bounded execution | `homenettopo/commands.py` | `tests/test_commands.py` | `AGENT.md`, `docs/design.md` |
-| Interface parsing, Wi-Fi hardware-port parsing, profiler parsing, deterministic evidence merge | `homenettopo/interfaces.py` | `tests/test_interfaces.py` | `docs/design.md` |
-| Route parsing | `homenettopo/routes.py` | `tests/test_routes.py` | `docs/design.md` |
-| Neighbor parsing | `homenettopo/neighbors.py` | `tests/test_neighbors.py` | `docs/design.md` |
-| Active validation and Nmap evidence boundary | `homenettopo/discovery.py` | `tests/test_discovery.py` | `docs/api-spec.md`, `docs/design.md` |
-| Models, path node/edge enums, deterministic serialization | `homenettopo/models.py` | `tests/test_models.py` | `docs/api-spec.md` |
-| Gateway-path construction, peer membership, identity correlation | `homenettopo/topology.py` | `tests/test_topology.py` | `docs/design.md` |
-| Browser state, path/peer layout, camera math | `web/core.mjs` | `tests/frontend/core.test.mjs` | `docs/design.md` |
-| Browser fetch, capability status, DOM/SVG, full-surface pan, viewBox zoom/fit, focus, export | `web/app.js`, `web/index.html`, `web/styles.css` | `tests/test_web_contract.py` | `docs/design.md` |
-| Current-user LaunchAgent deployment and rollback | `scripts/deploy.py` | `tests/test_static_security.py` | `README.md`, `AGENT.md`, `docs/design.md` |
-| Full regression and documentation enforcement | `scripts/check.py` | self-checking stages | `README.md`, `AGENT.md`, `docs/design.md` |
+| Concern | Production owner | Test owner |
+|---|---|---|
+| Native Location authorization, CoreWLAN association, login launch, cache publication | `macos/HomeNetTopoApp/` | `tests/test_static_security.py`, native guards in `scripts/check.py` |
+| Loopback HTTP, cache trust boundary, collection lock, concurrent source orchestration, snapshot publication | `server.py` | `tests/test_server.py`, `tests/test_static_security.py` |
+| Interface, networksetup, profiler, native cache parsing and evidence merge | `homenettopo/interfaces.py` | `tests/test_interfaces.py` |
+| Route / ARP parsing | `homenettopo/routes.py`, `homenettopo/neighbors.py` | route/neighbor tests |
+| Active RFC 1918 containment and Nmap evidence | `homenettopo/discovery.py`, `homenettopo/commands.py` | discovery/command tests |
+| Public topology schema | `homenettopo/models.py` | `tests/test_models.py` |
+| Local identity, current Wi-Fi node, gateway path, peers | `homenettopo/topology.py` | `tests/test_topology.py` |
+| Browser state/layout/Details | `web/core.mjs`, `web/app.js`, `web/index.html`, `web/styles.css` | frontend/core and web-contract tests |
+| Native build/install + Python LaunchAgent + rollback | `scripts/deploy.py` | `tests/test_static_security.py` |
+| Source/test regression and static native contract | `scripts/check.py` | self-checking stages |
 
-## Required contracts
+## Required Wi-Fi contracts
 
-### Passive evidence and path inference
+Three identities must stay separate:
 
-- Fixed passive sources execute concurrently inside one server collection lock.
-- Material evidence uses `ifconfig`, IPv4 `netstat`, and ARP with independent five-second deadlines.
-- Fast Wi-Fi media detection uses `/usr/sbin/networksetup -listallhardwareports` with a three-second deadline.
-- Optional Wi-Fi detail uses `/usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType` under an eight-second process deadline.
-- `networksetup` evidence survives profiler timeout, command failure, parse failure, missing current-network fields, and redaction.
-- The profiler parser keeps only current association data; nearby-network entries are ignored.
-- Canonical BSSID identifies an associated AP radio. Current association without BSSID creates an observed unidentified AP. Wi-Fi media plus a default route creates an inferred unidentified AP.
-- A Wi-Fi path must not regress to the generic Ethernet `Intermediate L2 path unknown` boundary merely because profiler details are absent.
-- ARP maps an IP neighbor to a link-layer address but does not enumerate transparent switches.
-- Without LLDP or managed-topology evidence, a non-Wi-Fi intermediate path uses `link_boundary` with low-confidence `link_path_inference` evidence.
-- Exact AP BSSID and gateway ARP MAC equality may mark `same_mac`. Different MACs remain `unknown`.
-- Devices connected by `member_of` are peers, not transit hops.
-- Optional Wi-Fi-detail failure is nonfatal when material evidence remains coherent; the snapshot may be partial and retain warnings.
-- If no material source is coherent, normalized errors include `failed_sources`; `504 command_timeout` additionally includes `timeout_sources`.
+```text
+ifconfig ether                 -> local current / Private Wi-Fi MAC
+networksetup Ethernet Address  -> local adapter Hardware MAC
+CoreWLAN or profiler BSSID     -> current serving Wi-Fi radio
+```
 
-### Collection and active discovery
+BSSID precedence is:
 
-- Read-only GET routes never start commands.
-- Active discovery validates request safety before commands, then validates fresh local containment before Nmap.
-- Every target is assigned to its most-specific containing local network.
-- Exact duplicates and contained targets may be removed only inside the same owner group; adjacent sibling targets remain separate.
-- Nmap may run only after both validation phases pass.
-- Parsed Nmap IPv4 and optional MAC evidence is validated before topology construction.
-- Every accepted up-host remains inside at least one effective target network.
-- Malformed or out-of-range Nmap evidence returns `500 collection_failed` and cannot publish a snapshot.
-- Failed operations preserve the previous snapshot.
+```text
+wifi_native > wifi > local_configuration
+```
 
-### Browser and static delivery
+`networksetup` remains authoritative for the local adapter Hardware MAC once present. Native association evidence cannot overwrite that local hardware identity.
 
-- Static files come from a fixed allowlist with traversal and symlink protection.
-- CSP permits local and `data:` fonts through `font-src 'self' data:` but no external font, script, or style origin.
-- The browser uses one shared collection-in-flight owner and ignores stale completion actions.
-- A successful passive refresh rechecks capabilities so restored Nmap availability can recover without a page reload.
-- The main path is `local_host → interface → access_point|link_boundary → gateway → upstream_boundary` when supported by evidence.
-- A tunnel may use `interface → gateway` directly and is never hidden or assigned a fabricated Layer-2 attachment.
-- Subnets and peer devices are rendered in context groups below the path. Membership relationships are not rendered as transit lines.
-- Only path relationships are drawn: `host_uses_interface`, `interface_associated_with`, `interface_reaches_link`, `attachment_reaches_gateway`, `interface_reaches_gateway`, `upstream_of`, and `routes_to`.
-- Edges render as orthogonal SVG paths.
-- The canvas uses a viewBox camera, automatically fits each new snapshot, pans from nodes, edges, groups, or blank space, and zooms around the pointer.
-- Active discovery has a visible Nmap state. Unavailable Nmap exposes `Check Nmap setup`; it is not an unexplained disabled placeholder.
-- Keyboard operation, focus return, reduced motion, pan, zoom, fit, reset, selection, details, and export remain part of the interface contract.
+The native helper:
 
-### Local deployment
+- has stable bundle ID `com.homenettopo.wifi`;
+- requests CoreLocation permission while foreground;
+- keeps one shared `CWWiFiClient`;
+- reads current SSID/BSSID, channel, RSSI, noise, PHY, transmit rate, and local hardware address when available;
+- refreshes every five seconds;
+- writes `~/Library/Caches/HomeNetTopo/wifi-current.json` atomically;
+- registers `SMAppService.mainApp` for login launch, subject to macOS approval.
 
-- `scripts/deploy.py` installs only into the current user's Library and never uses `sudo`.
-- The LaunchAgent label is `com.homenettopo.local` in `gui/<uid>`.
-- The service always receives `--bind 127.0.0.1`.
-- The deployment copies only the 15 explicit `RUNTIME_FILES`: `server.py`, `metadata.json`, `scripts/deploy.py`, the eight named `homenettopo/*.py` files, and the four named web assets.
-- Directory-recursive copying is not allowed; unlisted files, caches, tests, and local artifacts are excluded.
-- Source and staged files must be regular contained files and may not be symbolic links.
-- Updates stage a complete runtime and keep the previous runtime and plist until LaunchAgent startup and loopback health succeed.
-- Health verification contacts only `127.0.0.1`, disables environment proxies, and bounds the response body.
-- Uninstall retains logs unless `--purge-logs` is explicitly requested.
+The Python service accepts native cache identity only from a regular non-symlink file owned by the current user, not group/world writable, at most 16 KiB, valid schema version 1, and no more than 20 seconds old.
 
-### Code documentation
+Missing, stale, denied, restricted, or invalid native evidence is a warning/state, not an invented BSSID.
 
-- Comments explain non-obvious contracts and rationale, not obvious syntax.
-- Critical Python models, parsers, security boundaries, orchestration functions, deployment actions, and regression stages have concise docstrings.
-- Frontend comments cover reducer ownership, stale responses, capability recovery, safe DOM/SVG construction, address-union arithmetic, evidence-backed path layout, peer grouping, and viewBox camera behavior.
-- `scripts/check.py` enforces documentation for critical symbols without requiring comments on trivial assignments.
+A BSSID proves the currently associated radio, not whether the physical appliance is definitely a main AP or relay. User-confirmed `role: relay` may coexist with automatic BSSID evidence.
+
+## Gateway/path contracts
+
+With automatic current BSSID:
+
+```text
+This Mac → interface → current Wi-Fi radio → gateway → upstream
+```
+
+All local IPv4, Private Wi-Fi MAC, and Hardware MAC values remain local identity. ARP/Nmap observations repeating a local IP or local MAC are excluded from peer nodes and active host counts.
+
+ARP cannot enumerate transparent switches. Without LLDP/CDP or managed topology evidence, a non-Wi-Fi intermediate path uses `Intermediate L2 path unknown`.
+
+BSSID equal to gateway ARP MAC may establish positive `same_mac`; a different MAC remains `not_established` because one appliance may expose multiple interface MACs.
+
+LAN devices connected by subnet membership are peers, not transit hops. Tunnel paths are Layer 3 and never receive fabricated Layer-2 nodes.
+
+## Collection and active discovery
+
+Fixed passive command sources run concurrent inside one collection lock:
+
+```text
+/sbin/ifconfig -a
+/usr/sbin/netstat -rn -f inet
+/usr/sbin/arp -an
+/usr/sbin/networksetup -listallhardwareports
+/usr/sbin/system_profiler -json -timeout 5 SPAirPortDataType
+```
+
+The native cache is a file source, not a subprocess. `system_profiler` remains optional fallback.
+
+Active discovery has two validation phases. Requested targets must be canonical RFC 1918 IPv4 equal to or contained by eligible non-tunnel local interface networks. Adjacent sibling targets remain separate. Nmap may run only after fresh containment succeeds, using fixed host-discovery XML arguments. Malformed/out-of-target evidence becomes `500 collection_failed` and cannot publish a new snapshot.
+
+## Browser / HTTP contracts
+
+Read-only routes never collect:
+
+```text
+GET /api/v1/health
+GET /api/v1/capabilities
+GET /api/v1/topology
+GET /api/v1/topology/export
+```
+
+Collection routes:
+
+```text
+POST /api/v1/topology/refresh
+POST /api/v1/discover
+```
+
+The Python service binds only to `127.0.0.1`. Collection requests require JSON, `X-HomeNetTopo-Request: 1`, and accepted same-origin signals when present. No permissive CORS.
+
+Capabilities expose native helper state and activation URL but never current SSID, BSSID, Hardware MAC, Private Wi-Fi MAC, cache content, or fallback values.
+
+Existing graph/Details owners already render local IP, Hardware MAC, Private Wi-Fi MAC, BSSID, SSID, channel, RSSI, noise, PHY, transmit rate, role, confidence, and evidence when snapshot fields are present.
+
+## Deployment contracts
+
+`scripts/deploy.py` is the only deployment owner. It never uses `sudo` and never changes the Python bind from loopback.
+
+It validates the fixed Python/web runtime manifest and fixed native source manifest, builds only the fixed `HomeNetTopoApp` Xcode target with `/usr/bin/xcodebuild`, validates the bundle/privacy metadata, ad-hoc signs with `/usr/bin/codesign`, and installs only to current-user locations.
+
+Native helper:
+
+```text
+~/Applications/HomeNetTopo Wi-Fi.app
+```
+
+Python service/runtime:
+
+```text
+~/Library/Application Support/HomeNetTopo
+~/Library/LaunchAgents/com.homenettopo.local.plist
+~/Library/Logs/HomeNetTopo
+```
+
+Install must foreground-open the native app after service health succeeds so the Location prompt can appear. Replacement failures restore prior runtime/app/plist where rollback data exists. Uninstall removes the native app, helper cache, Python runtime, and LaunchAgent; logs remain unless explicitly purged.
 
 ## Verification definitions
 
@@ -116,12 +167,19 @@ node --test tests/frontend/core.test.mjs
 python3 scripts/check.py
 ```
 
-Full regression includes compile, metadata, Python tests, documentation guards, cross-owner contracts, deployment guards, asset/CSP checks, Node tests, and tracked-path hygiene.
+The source/test regression statically guards native CoreLocation/CoreWLAN, privacy plist, ServiceManagement, and Xcode boundaries but does not prove native compilation/runtime.
 
-A passing or failing status requires executed evidence tied to the exact revision. Source definitions alone are not execution evidence.
+Exact-revision macOS acceptance additionally requires:
 
-## Acceptance boundary
+1. successful Xcode build and ad-hoc signing;
+2. visible Location authorization for `HomeNetTopo Wi-Fi`;
+3. current CoreWLAN BSSID shown in the helper;
+4. fresh native cache within the 20-second trust window;
+5. `GET /api/v1/capabilities` helper state `ready` without identity leakage;
+6. passive snapshot source `wifi_native: ok` and the same BSSID on the connected Wi-Fi node;
+7. local Private/Hardware MAC excluded from peers;
+8. browser selection/Details showing the current BSSID and radio metrics;
+9. current-user LaunchAgent and login-item lifecycle;
+10. bounded Nmap behavior where applicable.
 
-Formal implementation acceptance must independently recheck the exact revision, repository delta, artifact necessity, source/documentation consistency, regression execution, current-user LaunchAgent lifecycle, browser interaction, supported-macOS startup, real `networksetup` and profiler output including timeout/redaction behavior, source-specific `timeout_sources`, and real command boundaries.
-
-The implementation and deployment remain unverified until the independent acceptance workflow produces a verdict from current evidence.
+Do not report any unexecuted test, Xcode build, permission flow, or real-network check as PASS.
