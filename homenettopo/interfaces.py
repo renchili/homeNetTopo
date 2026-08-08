@@ -441,7 +441,8 @@ def merge_wireless_facts(*collections: Iterable[WirelessAttachmentFact]) -> tupl
     Callers provide evidence from weakest/older to strongest/newer automatic
     sources. An automatically observed BSSID always wins a configured fallback;
     configured role may remain alongside automatic identity without downgrading
-    association provenance.
+    association provenance. Once ``networksetup`` supplies an adapter hardware
+    MAC, later association sources cannot replace that local hardware identity.
     """
 
     facts: dict[str, WirelessAttachmentFact] = {}
@@ -476,12 +477,13 @@ def merge_wireless_facts(*collections: Iterable[WirelessAttachmentFact]) -> tupl
             elif configured_bssid_selected and candidate.configured and candidate.bssid == bssid:
                 evidence_source = candidate.evidence_source
 
+            hardware_mac = existing.hardware_mac_address or candidate.hardware_mac_address
             facts[candidate.interface] = WirelessAttachmentFact(
                 interface=candidate.interface,
                 bssid=bssid,
                 ssid=_choose(existing.ssid, candidate.ssid, configured_candidate=candidate.configured),
                 associated=existing.associated or candidate.associated,
-                hardware_mac_address=_choose(existing.hardware_mac_address, candidate.hardware_mac_address, configured_candidate=candidate.configured),
+                hardware_mac_address=hardware_mac,
                 channel=_choose(existing.channel, candidate.channel, configured_candidate=candidate.configured),
                 rssi_dbm=_choose(existing.rssi_dbm, candidate.rssi_dbm, configured_candidate=candidate.configured),
                 noise_dbm=_choose(existing.noise_dbm, candidate.noise_dbm, configured_candidate=candidate.configured),
