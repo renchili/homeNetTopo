@@ -2,21 +2,25 @@
 """Serve HomeNetTopo on IPv4 loopback and own snapshot publication.
 
 The handler exposes read-only state plus two protected collection POST routes.
-All commands remain behind typed adapters. A snapshot is published only after a
-complete passive or active operation produces a validated immutable model.
+Fixed command evidence is supplemented by a short-lived, Location-authorized
+CoreWLAN cache published by the native macOS helper. A snapshot is published
+only after a complete passive or active operation produces a validated model.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
+import stat
 import threading
 import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -47,6 +51,7 @@ from homenettopo.interfaces import (
     merge_wireless_facts,
     parse_airport_json,
     parse_ifconfig,
+    parse_native_wifi_json,
     parse_wifi_hardware_ports,
 )
 from homenettopo.models import ActiveDiscoveryMetadata, SourceStatus, SourceStatusValue, WarningItem
@@ -57,6 +62,11 @@ from homenettopo.topology import build_snapshot
 BIND_ADDRESS = "127.0.0.1"
 DEFAULT_PORT = 8765
 WEB_ROOT = Path(__file__).resolve().parent / "web"
+NATIVE_WIFI_CACHE_PATH = Path.home() / "Library" / "Caches" / "HomeNetTopo" / "wifi-current.json"
+NATIVE_WIFI_MAX_BYTES = 16 * 1024
+NATIVE_WIFI_MAX_AGE_SECONDS = 20
+NATIVE_WIFI_FUTURE_SKEW_SECONDS = 5
+NATIVE_WIFI_LAUNCH_URL = "homenettopo-wifi://authorize"
 STATIC_FILES = {
     "/": "index.html",
     "/index.html": "index.html",
@@ -97,6 +107,15 @@ class PassiveParts:
     failures: tuple[tuple[str, str], ...] = ()
 
 
+@dataclass(frozen=True)
+class NativeWiFiCacheState:
+    """Public-safe native-helper state plus an optional fresh association fact."""
+
+    status: str
+    message: str
+    fact: WirelessAttachmentFact | None = None
+
+
 def canonical_mac_argument(value: str) -> str:
     """Validate a locally configured BSSID without accepting loose notation."""
 
@@ -124,6 +143,65 @@ def ssid_argument(value: str) -> str:
     return cleaned
 
 
+def _native_state(status: str) -> NativeWiFiCacheState:
+    """Return one normalized helper state without exposing local Wi-Fi values."""
+
+    messages = {
+        "ready": "Location-authorized CoreWLAN helper supplied fresh Wi-Fi identity.",
+        "missing": "Open HomeNetTopo Wi-Fi and grant Location access to identify the current Wi-Fi radio.",
+        "stale": "HomeNetTopo Wi-Fi helper data is stale; open or restart the helper.",
+        "not_determined": "HomeNetTopo Wi-Fi still needs Location permission to read SSID and BSSID.",
+        "denied": "Location access is denied for HomeNetTopo Wi-Fi; enable it in System Settings.",
+        "restricted": "Location access for HomeNetTopo Wi-Fi is restricted by macOS.",
+        "no_association": "The native helper is running, but no current Wi-Fi association is available.",
+        "invalid": "HomeNetTopo Wi-Fi helper data is invalid and was ignored.",
+        "unsupported": "Native Wi-Fi identity is available only on macOS.",
+    }
+    return NativeWiFiCacheState(status, messages[status])
+
+
+def read_native_wifi_cache(
+    path: Path = NATIVE_WIFI_CACHE_PATH,
+    *,
+    now: datetime | None = None,
+) -> NativeWiFiCacheState:
+    """Read a bounded, owned, fresh native CoreWLAN cache without executing code."""
+
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return _native_state("missing")
+    except OSError:
+        return _native_state("invalid")
+
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        return _native_state("invalid")
+    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
+        return _native_state("invalid")
+    if metadata.st_size <= 0 or metadata.st_size > NATIVE_WIFI_MAX_BYTES:
+        return _native_state("invalid")
+
+    try:
+        text = path.read_bytes().decode("utf-8")
+        evidence = parse_native_wifi_json(text)
+        collected = datetime.fromisoformat(evidence.collected_at[:-1] + "+00:00")
+    except (OSError, UnicodeError, ValueError):
+        return _native_state("invalid")
+    if collected.utcoffset() is None:
+        return _native_state("invalid")
+
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age = (current - collected.astimezone(timezone.utc)).total_seconds()
+    if age < -NATIVE_WIFI_FUTURE_SKEW_SECONDS or age > NATIVE_WIFI_MAX_AGE_SECONDS:
+        return _native_state("stale")
+    if evidence.authorization != "authorized":
+        return _native_state(evidence.authorization if evidence.authorization in {"not_determined", "denied", "restricted"} else "invalid")
+    if evidence.fact is None:
+        return _native_state("no_association")
+    ready = _native_state("ready")
+    return NativeWiFiCacheState(ready.status, ready.message, evidence.fact)
+
+
 class AppState:
     """Own collection coordination and the latest immutable snapshot."""
 
@@ -133,10 +211,12 @@ class AppState:
         port: int,
         nmap_path: str | None,
         wifi_override: WirelessAttachmentFact | None = None,
+        native_wifi_cache_path: Path = NATIVE_WIFI_CACHE_PATH,
     ) -> None:
         self.port = port
         self.nmap_path = nmap_path
         self.wifi_override = wifi_override
+        self.native_wifi_cache_path = native_wifi_cache_path
         self.snapshot = None
         self.collection_lock = threading.Lock()
 
@@ -146,13 +226,20 @@ class AppState:
 
         return platform.system().lower() == "darwin"
 
-    def collect_passive_parts(self) -> PassiveParts:
-        """Collect independent evidence concurrently and degrade optional Wi-Fi detail.
+    def native_wifi_state(self) -> NativeWiFiCacheState:
+        """Return current helper state without starting a command or collection."""
 
-        Fixed commands are launched together so refresh latency is bounded by the
-        slowest source rather than the sum of every timeout. Interface, route, and
-        ARP evidence establish snapshot coherence. Fast ``networksetup`` media
-        detection survives a slow or unavailable ``system_profiler`` enrichment.
+        if not self.supported:
+            return _native_state("unsupported")
+        return read_native_wifi_cache(self.native_wifi_cache_path)
+
+    def collect_passive_parts(self) -> PassiveParts:
+        """Collect fixed evidence and merge the preferred native Wi-Fi identity.
+
+        Independent command collectors run concurrently. The native cache is read
+        after material coherence is established and never extends command latency.
+        Fresh CoreWLAN evidence wins over profiler identity; profiler evidence wins
+        over optional local configuration.
         """
 
         if not self.supported:
@@ -203,14 +290,26 @@ class AppState:
                 raise ApiError(504, "command_timeout", f"Passive collection timed out in: {joined}.", details)
             raise ApiError(500, "collection_failed", "No coherent passive snapshot could be produced.", details)
 
+        native = self.native_wifi_state()
+        native_collection: tuple[WirelessAttachmentFact, ...] = ()
+        if native.status == "ready" and native.fact is not None:
+            native_collection = (native.fact,)
+            sources.append(SourceStatus("wifi_native", SourceStatusValue.OK, native.message))
+        else:
+            sources.append(SourceStatus("wifi_native", SourceStatusValue.WARNING, native.message))
+
         override_collection = (self.wifi_override,) if self.wifi_override else ()
         wireless = merge_wireless_facts(
             values.get("wifi_interfaces", ()),
             values.get("wifi", ()),
+            native_collection,
             override_collection,
         )
         if self.wifi_override:
             sources.append(SourceStatus("local_configuration", SourceStatusValue.OK, "Local Wi-Fi fallback is configured."))
+        if native.status != "ready" and not any(item.bssid_observed for item in wireless):
+            warnings.append(WarningItem(f"wifi_native_{native.status}", native.message, "wifi_native"))
+
         return PassiveParts(
             interfaces=values.get("interfaces", ()),
             routes=values.get("routes", ()),
@@ -407,6 +506,7 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
             supported = self.server.state.supported
             resolution = resolve_nmap(self.server.state.nmap_path) if supported else None
             available = bool(supported and resolution and resolution.path)
+            native = self.server.state.native_wifi_state()
             self._send_json(200, {
                 "platform": platform.system().lower(),
                 "passive_collection": supported,
@@ -425,7 +525,12 @@ class HomeNetTopoHandler(BaseHTTPRequestHandler):
                 },
                 "link_path": {
                     "wifi_interface_source": "networksetup",
-                    "wifi_bssid_source": "system_profiler",
+                    "wifi_bssid_source": "corewlan_native_then_system_profiler",
+                    "wifi_native_helper": {
+                        "status": native.status,
+                        "message": native.message,
+                        "launch_url": NATIVE_WIFI_LAUNCH_URL,
+                    },
                     "wifi_local_fallback_configured": self.server.state.wifi_override is not None,
                     "ethernet_adjacent_device_source": "not_available_without_lldp",
                 },
@@ -561,6 +666,7 @@ def main() -> int:
             associated=False,
             role=role,
             configured=True,
+            evidence_source="local_configuration",
         )
     state = AppState(port=args.port, nmap_path=args.nmap_path, wifi_override=wifi_override)
     server = HomeNetTopoServer((args.bind, args.port), state)
