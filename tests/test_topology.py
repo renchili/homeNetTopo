@@ -84,6 +84,7 @@ class TopologyTests(unittest.TestCase):
                     None,
                     associated=False,
                     hardware_mac_address=hardware_mac,
+                    evidence_source="wifi_interfaces",
                 ),
             ),
             active_hosts=(
@@ -128,6 +129,8 @@ class TopologyTests(unittest.TestCase):
                 noise_dbm=-91,
                 phy_mode="802.11ax",
                 transmit_rate_mbps=1200,
+                bssid_observed=True,
+                evidence_source="wifi",
             ),
         )
         snapshot = build_snapshot(
@@ -154,6 +157,7 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(access_point.properties["transmit_rate_mbps"], 1200)
         self.assertEqual(access_point.properties["role"], "access point or relay")
         self.assertEqual(access_point.properties["identity"], "BSSID observed")
+        self.assertEqual(access_point.properties["identity_source"], "wifi")
         associated = next(edge for edge in snapshot.edges if edge.type.value == "interface_associated_with")
         toward_gateway = next(edge for edge in snapshot.edges if edge.type.value == "attachment_reaches_gateway")
         self.assertTrue(associated.observed)
@@ -161,6 +165,45 @@ class TopologyTests(unittest.TestCase):
         self.assertFalse(toward_gateway.observed)
         self.assertEqual(toward_gateway.source, access_point.id)
         self.assertFalse(any(node.kind.value == "link_boundary" for node in snapshot.nodes))
+
+    def test_native_corewlan_bssid_is_high_confidence_current_wifi_node(self):
+        interfaces, routes, neighbors, sources = self.parts()
+        bssid = "02:aa:bb:cc:dd:42"
+        snapshot = build_snapshot(
+            interfaces=interfaces,
+            routes=routes,
+            neighbors=neighbors,
+            wireless_attachments=(
+                WirelessAttachmentFact(
+                    "en0",
+                    bssid,
+                    "Native Wi-Fi",
+                    associated=True,
+                    hardware_mac_address="02:00:00:00:20:01",
+                    channel="40",
+                    rssi_dbm=-35,
+                    noise_dbm=-90,
+                    phy_mode="802.11ax",
+                    transmit_rate_mbps=2401,
+                    bssid_observed=True,
+                    evidence_source="wifi_native",
+                ),
+            ),
+            sources=(*sources, SourceStatus("wifi_native", SourceStatusValue.OK)),
+            collected_at="2026-08-03T00:00:00Z",
+        )
+        attachment = next(node for node in snapshot.nodes if node.kind.value == "access_point")
+        associated = next(edge for edge in snapshot.edges if edge.type.value == "interface_associated_with")
+        self.assertEqual(attachment.id, "access-point:02-aa-bb-cc-dd-42")
+        self.assertEqual(attachment.label, "Native Wi-Fi")
+        self.assertEqual(attachment.mac_addresses, (bssid,))
+        self.assertEqual(attachment.properties["identity"], "BSSID observed by native CoreWLAN helper")
+        self.assertEqual(attachment.properties["identity_source"], "wifi_native")
+        self.assertEqual(attachment.properties["rssi_dbm"], -35)
+        self.assertEqual(attachment.evidence[0].source, "wifi_native")
+        self.assertEqual(attachment.confidence.value, "high")
+        self.assertTrue(associated.observed)
+        self.assertEqual(associated.confidence.value, "high")
 
     def test_user_confirmed_relay_fallback_is_visible_without_claiming_observation(self):
         interfaces, routes, neighbors, sources = self.parts()
@@ -177,6 +220,7 @@ class TopologyTests(unittest.TestCase):
                     associated=False,
                     role="relay",
                     configured=True,
+                    evidence_source="local_configuration",
                 ),
             ),
             sources=(*sources, SourceStatus("local_configuration", SourceStatusValue.OK)),
@@ -187,6 +231,7 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(attachment.properties["role"], "relay")
         self.assertEqual(attachment.properties["bssid"], bssid)
         self.assertEqual(attachment.properties["identity"], "BSSID configured locally")
+        self.assertEqual(attachment.properties["identity_source"], "local_configuration")
         self.assertEqual(attachment.evidence[0].source, "local_configuration")
         self.assertFalse(associated.observed)
         self.assertEqual(associated.target, attachment.id)
@@ -197,7 +242,7 @@ class TopologyTests(unittest.TestCase):
             interfaces=interfaces,
             routes=routes,
             neighbors=neighbors,
-            wireless_attachments=(WirelessAttachmentFact("en0", None, None),),
+            wireless_attachments=(WirelessAttachmentFact("en0", None, None, evidence_source="wifi"),),
             sources=(*sources, SourceStatus("wifi", SourceStatusValue.OK)),
             collected_at="2026-08-03T00:00:00Z",
         )
@@ -207,7 +252,8 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(attachment.properties, {
             "connection": "Wi-Fi",
             "role": "access point or relay",
-            "identity": "Not exposed by macOS",
+            "identity": "BSSID unavailable",
+            "identity_source": "wifi",
         })
         self.assertEqual(attachment.mac_addresses, ())
         associated = next(edge for edge in snapshot.edges if edge.type.value == "interface_associated_with")
@@ -223,7 +269,7 @@ class TopologyTests(unittest.TestCase):
             interfaces=interfaces,
             routes=routes,
             neighbors=neighbors,
-            wireless_attachments=(WirelessAttachmentFact("en0", None, None, associated=False),),
+            wireless_attachments=(WirelessAttachmentFact("en0", None, None, associated=False, evidence_source="wifi_interfaces"),),
             sources=(*sources, SourceStatus("wifi_interfaces", SourceStatusValue.OK)),
             collected_at="2026-08-03T00:00:00Z",
         )
@@ -231,7 +277,8 @@ class TopologyTests(unittest.TestCase):
         associated = next(edge for edge in snapshot.edges if edge.type.value == "interface_associated_with")
         self.assertEqual(attachment.label, "Connected Wi-Fi node")
         self.assertEqual(attachment.properties["role"], "access point or relay")
-        self.assertEqual(attachment.properties["identity"], "Not exposed by macOS")
+        self.assertEqual(attachment.properties["identity"], "BSSID unavailable")
+        self.assertEqual(attachment.properties["identity_source"], "wifi_interfaces")
         self.assertFalse(associated.observed)
         self.assertEqual(associated.evidence[0].source, "wifi_interfaces")
         self.assertFalse(any(node.kind.value == "link_boundary" for node in snapshot.nodes))
@@ -243,7 +290,7 @@ class TopologyTests(unittest.TestCase):
             interfaces=interfaces,
             routes=routes,
             neighbors=(NeighborFact("192.168.1.1", shared_mac, "en0", None, True),),
-            wireless_attachments=(WirelessAttachmentFact("en0", shared_mac, "Synthetic Wi-Fi"),),
+            wireless_attachments=(WirelessAttachmentFact("en0", shared_mac, "Synthetic Wi-Fi", bssid_observed=True, evidence_source="wifi"),),
             sources=(*sources, SourceStatus("wifi", SourceStatusValue.OK)),
             collected_at="2026-08-03T00:00:00Z",
         )
