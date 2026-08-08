@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CoreLocation
 import CoreWLAN
 import Foundation
@@ -212,6 +213,7 @@ final class WiFiCollector: NSObject, ObservableObject, CLLocationManagerDelegate
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         return directory
     }
 
